@@ -11,3 +11,4 @@ survey-report.json
 # Real job links can carry personal login tokens. Keep lists of them out of the repository.
 job.txt
 *.urls.txt
+load-report*.json

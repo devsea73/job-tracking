@@ -1,10 +1,10 @@
 import { count, desc, eq, sql } from 'drizzle-orm';
-import type { AdminUser, Applicant, CurrentUser, LoginResponse } from '../../shared/api';
+import type { AdminUser, CurrentUser, LoginResponse, UserRef } from '../../shared/api';
 import { avatarColor, avatarInitials } from '../../shared/avatar';
 import { createSession, revokeUserSessions, type ActiveSession, type UserRow } from '../auth/sessions';
 import type { AppContext } from '../context';
 import { nowIso, type Db } from '../db/client';
-import { applications, users } from '../db/schema';
+import { applications, profiles, userAvatars, users } from '../db/schema';
 import { ApiError, conflict, forbidden, notFound } from '../errors';
 
 export const INITIAL_ADMIN_USERNAME = 'admin';
@@ -15,15 +15,21 @@ export async function ensureInitialAdmin(ctx: AppContext): Promise<void> {
   const existing = ctx.db.select({ total: count() }).from(users).get();
   if ((existing?.total ?? 0) > 0) return;
   const passwordHash = await ctx.hasher.hash(INITIAL_ADMIN_PASSWORD);
-  ctx.db
+  const admin = ctx.db
     .insert(users)
     .values({ username: INITIAL_ADMIN_USERNAME, passwordHash, role: 'admin', mustChangePassword: true })
     .onConflictDoNothing()
-    .run();
+    .returning({ id: users.id })
+    .get();
+  if (admin) ctx.db.insert(profiles).values({ userId: admin.id, name: INITIAL_ADMIN_USERNAME }).run();
   ctx.logger.info('Created the initial administrator account');
 }
 
-export function toCurrentUser(user: UserRow): CurrentUser {
+function avatarVersionOf(db: Db, userId: number): string | null {
+  return db.select({ updatedAt: userAvatars.updatedAt }).from(userAvatars).where(eq(userAvatars.userId, userId)).get()?.updatedAt ?? null;
+}
+
+export function toCurrentUser(db: Db, user: UserRow): CurrentUser {
   return {
     id: user.id,
     username: user.username,
@@ -31,17 +37,20 @@ export function toCurrentUser(user: UserRow): CurrentUser {
     role: user.role,
     mustChangePassword: user.mustChangePassword,
     initials: avatarInitials(user.username, user.displayName),
-    color: avatarColor(user.id)
+    color: avatarColor(user.id),
+    avatarVersion: avatarVersionOf(db, user.id)
   };
 }
 
-export function toApplicant(user: { id: number; username: string; displayName: string | null }): Applicant {
+export function toUserRef(user: { id: number; username: string; displayName: string | null; avatarVersion: string | null }): UserRef {
   return {
+    kind: 'user',
     id: user.id,
     username: user.username,
     displayName: user.displayName,
     initials: avatarInitials(user.username, user.displayName),
-    color: avatarColor(user.id)
+    color: avatarColor(user.id),
+    avatarVersion: user.avatarVersion
   };
 }
 
@@ -71,7 +80,7 @@ export async function login(ctx: AppContext, address: string, username: string, 
   }
   ctx.limiter.recordSuccess(address, username);
   const session = createSession(ctx.db, user.id);
-  return { token: session.token, expiresAt: session.expiresAt, user: toCurrentUser(user) };
+  return { token: session.token, expiresAt: session.expiresAt, user: toCurrentUser(ctx.db, user) };
 }
 
 export async function changePassword(ctx: AppContext, session: ActiveSession, currentPassword: string, newPassword: string): Promise<CurrentUser> {
@@ -91,10 +100,10 @@ export async function changePassword(ctx: AppContext, session: ActiveSession, cu
     .get();
   // Anywhere else this account was signed in now has to prove the new password.
   revokeUserSessions(ctx.db, user.id, session.tokenHash);
-  return toCurrentUser(updated);
+  return toCurrentUser(ctx.db, updated);
 }
 
-function toAdminUser(row: UserRow, applicationCount: number): AdminUser {
+function toAdminUser(row: UserRow, applicationCount: number, avatarVersion: string | null): AdminUser {
   return {
     id: row.id,
     username: row.username,
@@ -106,7 +115,8 @@ function toAdminUser(row: UserRow, applicationCount: number): AdminUser {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     initials: avatarInitials(row.username, row.displayName),
-    color: avatarColor(row.id)
+    color: avatarColor(row.id),
+    avatarVersion
   };
 }
 
@@ -119,12 +129,19 @@ export function listUsers(db: Db): AdminUser[] {
       .all()
       .map((row) => [row.userId, row.total])
   );
+  const avatars = new Map(
+    db
+      .select({ userId: userAvatars.userId, updatedAt: userAvatars.updatedAt })
+      .from(userAvatars)
+      .all()
+      .map((row) => [row.userId, row.updatedAt])
+  );
   return db
     .select()
     .from(users)
     .orderBy(desc(sql`${users.role} = 'admin'`), sql`${users.username} collate nocase`)
     .all()
-    .map((row) => toAdminUser(row, counts.get(row.id) ?? 0));
+    .map((row) => toAdminUser(row, counts.get(row.id) ?? 0, avatars.get(row.id) ?? null));
 }
 
 function assertUsernameFree(db: Db, username: string, exceptId?: number): void {
@@ -140,18 +157,23 @@ export async function createUser(
   const passwordHash = await ctx.hasher.hash(input.password);
   // The hash takes time: check again so two admins' requests cannot collide on the unique index.
   assertUsernameFree(ctx.db, input.username);
-  const row = ctx.db
-    .insert(users)
-    .values({
-      username: input.username,
-      displayName: input.displayName?.trim() || null,
-      passwordHash,
-      mustChangePassword: input.mustChangePassword ?? false
-    })
-    .returning()
-    .get();
+  // Everyone starts with one profile, named after them, so adding a job always has one to offer.
+  const row = ctx.handle.sqlite.transaction(() => {
+    const created = ctx.db
+      .insert(users)
+      .values({
+        username: input.username,
+        displayName: input.displayName?.trim() || null,
+        passwordHash,
+        mustChangePassword: input.mustChangePassword ?? false
+      })
+      .returning()
+      .get();
+    ctx.db.insert(profiles).values({ userId: created.id, name: created.displayName ?? created.username }).run();
+    return created;
+  })();
   ctx.events.publish('users_changed');
-  return toAdminUser(row, 0);
+  return toAdminUser(row, 0, null);
 }
 
 function getUserOr404(db: Db, id: number): UserRow {
@@ -188,7 +210,7 @@ export function updateUser(
   if (input.isActive === false) revokeUserSessions(ctx.db, id);
   ctx.events.publish('users_changed');
   const total = ctx.db.select({ total: count() }).from(applications).where(eq(applications.userId, id)).get();
-  return toAdminUser(row, total?.total ?? 0);
+  return toAdminUser(row, total?.total ?? 0, avatarVersionOf(ctx.db, id));
 }
 
 /** A reset password is temporary by definition: the user must replace it, and existing sessions end. */
@@ -200,7 +222,7 @@ export async function resetPassword(ctx: AppContext, id: number, password: strin
 }
 
 /**
- * Removes the account together with its personal data: applications, memos and interviews.
+ * Removes the account together with its profiles, applications, memos, interviews and avatars.
  * Shared job listings stay, since other users may rely on them.
  */
 export function deleteUser(ctx: AppContext, actor: UserRow, id: number): void {

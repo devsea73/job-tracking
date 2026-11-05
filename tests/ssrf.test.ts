@@ -95,7 +95,7 @@ describe('fetching', () => {
     const { app, http } = await createTestServer();
     const { users } = await createUsers(app, 'tyler');
     for (const url of ['http://192.168.1.1/admin', 'http://localhost:3847/api/admin/users', 'http://169.254.169.254/', 'file:///C:/Windows/win.ini', 'javascript:alert(1)']) {
-      const response = await users.tyler.post('/api/applications', { url });
+      const response = await users.tyler.post('/api/applications', { url, profileId: await users.tyler.defaultProfileId() });
       expect(response.status, url).toBe(400);
       expect(['unsafe_url', 'invalid_url'], url).toContain(response.json.error.code);
     }
@@ -108,7 +108,7 @@ describe('fetching', () => {
     http.fetch = async () => {
       throw new FetchError('unsafe_url', 'Links to private network addresses cannot be fetched.');
     };
-    const response = await users.tyler.post('/api/applications', { url: 'https://short.example.com/x' });
+    const response = await users.tyler.post('/api/applications', { url: 'https://short.example.com/x', profileId: await users.tyler.defaultProfileId() });
     expect(response.status).toBe(400);
     expect(response.json.error.code).toBe('unsafe_url');
     expect(ctx.db.$client.prepare('SELECT COUNT(*) AS c FROM jobs').get()).toEqual({ c: 0 });

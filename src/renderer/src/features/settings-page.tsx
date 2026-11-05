@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { Copy, Database, Download, FolderOpen, Moon, RotateCcw, Save, Sun, SunMoon, Trash2, Upload } from 'lucide-react';
 import type { BackupInfo, CurrentUser } from '@shared/api';
 import type { BridgeState, ThemeChoice } from '@shared/bridge';
+import { HelpTip } from '@/components/symbols';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog, Dialog } from '@/components/ui/dialog';
 import { Field, Input } from '@/components/ui/field';
@@ -11,6 +12,7 @@ import { useToast } from '@/components/ui/toast';
 import { call, errorMessage, useBackups } from '@/lib/api';
 import { formatBytes, formatDateTime } from '@/lib/utils';
 import { ChangePasswordForm } from './auth';
+import { PhotoCard, ProfilesCard } from './profiles-card';
 import { ConnectToHost, Fingerprint } from './setup';
 
 const bridge = window.jobTracker;
@@ -18,8 +20,10 @@ const bridge = window.jobTracker;
 function SettingsCard({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
   return (
     <Card className="p-5">
-      <h2 className="text-[14.5px] font-semibold">{title}</h2>
-      {description ? <p className="mb-3 mt-0.5 text-ink-2">{description}</p> : <div className="mb-3" />}
+      <h2 className="mb-3 flex items-center gap-1.5 text-[14.5px] font-semibold">
+        {title}
+        {description ? <HelpTip>{description}</HelpTip> : null}
+      </h2>
       {children}
     </Card>
   );
@@ -76,13 +80,15 @@ function HostPanel({ state }: { state: BridgeState }) {
         )}
       </div>
       <div>
-        <p className="mb-1.5 text-[12.5px] font-medium text-ink-2">Security fingerprint</p>
+        <p className="mb-1.5 flex items-center gap-1.5 text-[12.5px] font-medium text-ink-2">
+          Security fingerprint <HelpTip>Other computers show this when they connect. Check that it matches, so that you know they are talking to this host.</HelpTip>
+        </p>
         <Fingerprint value={host.fingerprint} />
-        <p className="mt-1 text-[12px] text-ink-3">Other computers show this when they connect. Check that it matches, so that you know they are talking to this host.</p>
       </div>
       <div>
-        <p className="mb-1.5 text-[12.5px] font-medium text-ink-2">Windows firewall</p>
-        <p className="mb-1.5 text-ink-2">If other computers cannot connect, run this once in an administrator terminal. It only allows computers on your local network.</p>
+        <p className="mb-1.5 flex items-center gap-1.5 text-[12.5px] font-medium text-ink-2">
+          Windows firewall <HelpTip>If other computers cannot connect, run this once in an administrator terminal. It only allows computers on your local network.</HelpTip>
+        </p>
         <CopyLine text={firewall} />
       </div>
       <div className="flex flex-wrap items-end gap-2">
@@ -99,9 +105,11 @@ function HostPanel({ state }: { state: BridgeState }) {
         >
           Change port
         </Button>
-        <Button onClick={() => void bridge.openDataFolder()}>
-          <FolderOpen /> Open data folder
-        </Button>
+        <Tooltip content="Open data folder">
+          <Button size="icon" aria-label="Open data folder" onClick={() => void bridge.openDataFolder()}>
+            <FolderOpen />
+          </Button>
+        </Tooltip>
       </div>
     </div>
   );
@@ -158,13 +166,17 @@ function BackupsCard({ state }: { state: BridgeState }) {
   return (
     <SettingsCard title="Database backups" description="Copies of the shared database, kept on the host computer. Backing up is safe while people are working.">
       <div className="mb-3 flex flex-wrap gap-2">
-        <Button variant="primary" loading={create.isPending} onClick={() => create.mutate()}>
-          <Save /> Back up now
-        </Button>
-        {isHost ? (
-          <Button onClick={() => void importBackup()}>
-            <Upload /> Add a backup file
+        <Tooltip content="Back up now">
+          <Button variant="primary" size="icon" aria-label="Back up now" loading={create.isPending} onClick={() => create.mutate()}>
+            {create.isPending ? null : <Save />}
           </Button>
+        </Tooltip>
+        {isHost ? (
+          <Tooltip content="Add a backup file">
+            <Button size="icon" aria-label="Add a backup file" onClick={() => void importBackup()}>
+              <Upload />
+            </Button>
+          </Tooltip>
         ) : null}
       </div>
       {backups.isPending ? (
@@ -172,8 +184,8 @@ function BackupsCard({ state }: { state: BridgeState }) {
       ) : backups.isError ? (
         <Notice kind="error">{errorMessage(backups.error)}</Notice>
       ) : backups.data?.length === 0 ? (
-        <p className="flex items-center gap-2 text-ink-3">
-          <Database className="size-4" aria-hidden /> No backups yet.
+        <p className="flex items-center gap-2 text-ink-3" aria-label="No backups yet">
+          <Database className="size-4" aria-hidden /> 0
         </p>
       ) : (
         <ul className="divide-y divide-border rounded-lg border border-border">
@@ -194,9 +206,11 @@ function BackupsCard({ state }: { state: BridgeState }) {
                   </Button>
                 </Tooltip>
               ) : null}
-              <Button size="sm" onClick={() => setRestoring(backup)}>
-                <RotateCcw /> Restore
-              </Button>
+              <Tooltip content="Restore">
+                <Button size="icon-sm" variant="ghost" aria-label="Restore" onClick={() => setRestoring(backup)}>
+                  <RotateCcw />
+                </Button>
+              </Tooltip>
               <Tooltip content="Delete backup">
                 <Button size="icon-sm" variant="danger-ghost" aria-label="Delete backup" onClick={() => setDeleting(backup)}>
                   <Trash2 />
@@ -256,19 +270,22 @@ export function SettingsPage({ state, user }: { state: BridgeState; user: Curren
       <h1 className="mb-4 text-[20px] font-semibold leading-tight">Settings</h1>
       <div className="grid max-w-[1120px] gap-4 xl:grid-cols-2">
         <div className="space-y-4">
+          <PhotoCard user={user} />
+          <ProfilesCard />
           <SettingsCard title="Appearance">
             <div className="inline-flex rounded-md border border-border-strong p-0.5" role="group" aria-label="Theme">
               {THEMES.map(({ value, label, icon: Icon }) => (
-                <button
-                  key={value}
-                  type="button"
-                  aria-pressed={state.theme === value}
-                  onClick={() => void bridge.setTheme(value)}
-                  className={`inline-flex h-7.5 items-center gap-1.5 rounded px-3 ${state.theme === value ? 'bg-accent-soft font-medium text-accent-soft-ink' : 'text-ink-2 hover:text-ink'}`}
-                >
-                  <Icon className="size-3.5" aria-hidden />
-                  {label}
-                </button>
+                <Tooltip key={value} content={label}>
+                  <button
+                    type="button"
+                    aria-label={label}
+                    aria-pressed={state.theme === value}
+                    onClick={() => void bridge.setTheme(value)}
+                    className={`inline-flex size-7.5 items-center justify-center rounded ${state.theme === value ? 'bg-accent-soft text-accent-soft-ink' : 'text-ink-2 hover:text-ink'}`}
+                  >
+                    <Icon className="size-4" aria-hidden />
+                  </button>
+                </Tooltip>
               ))}
             </div>
           </SettingsCard>

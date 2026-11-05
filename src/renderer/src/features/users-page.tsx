@@ -1,14 +1,15 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { KeyRound, MoreHorizontal, Pencil, Trash2, UserCheck, UserPlus, UserX } from 'lucide-react';
+import { Activity, CalendarPlus, ImageOff, KeyRound, MoreHorizontal, Pencil, Send, Shield, Trash2, User, UserCheck, UserPlus, UserX } from 'lucide-react';
 import { DropdownMenu } from 'radix-ui';
 import type { AdminUser, CurrentUser } from '@shared/api';
 import { PASSWORD_MIN_LENGTH } from '@shared/constants';
-import { Avatar } from '@/components/job-bits';
+import { asUserSubject, Avatar, userLabel } from '@/components/job-bits';
+import { Symbol } from '@/components/symbols';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog, Dialog } from '@/components/ui/dialog';
 import { Field, Input } from '@/components/ui/field';
-import { Notice, Skeleton } from '@/components/ui/misc';
+import { Notice, Skeleton, Tooltip } from '@/components/ui/misc';
 import { useToast } from '@/components/ui/toast';
 import { call, errorMessage, useUsers } from '@/lib/api';
 import { formatDate } from '@/lib/utils';
@@ -187,6 +188,14 @@ export function UsersPage({ currentUser }: { currentUser: CurrentUser }) {
     onSuccess: () => queryClient.invalidateQueries(),
     onError: (error) => toast.show(errorMessage(error), 'error')
   });
+  const removePhoto = useMutation({
+    mutationFn: (user: AdminUser) => call('DELETE', `/api/admin/users/${user.id}/avatar`),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries();
+      toast.show('Photo removed.');
+    },
+    onError: (error) => toast.show(errorMessage(error), 'error')
+  });
   const remove = useUserMutation(
     (user: AdminUser) => call('DELETE', `/api/admin/users/${user.id}`),
     () => setDeleting(null),
@@ -195,14 +204,13 @@ export function UsersPage({ currentUser }: { currentUser: CurrentUser }) {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex items-start justify-between gap-4 px-6 pb-4 pt-5">
-        <div>
-          <h1 className="text-[20px] font-semibold leading-tight">Users</h1>
-          <p className="mt-0.5 text-ink-2">Only people you add here can sign in. There is no public registration.</p>
-        </div>
-        <Button variant="primary" onClick={() => setAdding(true)}>
-          <UserPlus /> Add user
-        </Button>
+      <header className="flex items-center justify-between gap-4 px-5 pb-2.5 pt-4">
+        <h1 className="text-[17px] font-semibold leading-tight">Users</h1>
+        <Tooltip content="Add user">
+          <Button variant="primary" size="icon" aria-label="Add user" onClick={() => setAdding(true)}>
+            <UserPlus />
+          </Button>
+        </Tooltip>
       </header>
       <div className="min-h-0 flex-1 overflow-auto border-t border-border bg-surface">
         {users.isError ? (
@@ -217,13 +225,23 @@ export function UsersPage({ currentUser }: { currentUser: CurrentUser }) {
         ) : (
           <table className="w-full border-collapse">
             <thead className="sticky top-0 z-10 bg-surface">
-              <tr className="border-b border-border text-left text-[12px] text-ink-3 [&>th]:font-medium">
-                <th className="py-2 pl-5 pr-3">User</th>
-                <th className="py-2 pr-3">Role</th>
-                <th className="py-2 pr-3">Status</th>
-                <th className="py-2 pr-3 text-right">Applications</th>
-                <th className="py-2 pr-3">Added</th>
-                <th className="w-12 py-2 pr-4" />
+              <tr className="border-b border-border text-left text-ink-3 [&>th]:font-normal">
+                <th className="py-1.5 pl-5 pr-3">
+                  <Symbol icon={User} label="User" />
+                </th>
+                <th className="py-1.5 pr-3">
+                  <Symbol icon={Shield} label="Role" />
+                </th>
+                <th className="py-1.5 pr-3">
+                  <Symbol icon={Activity} label="Status" />
+                </th>
+                <th className="py-1.5 pr-3 text-right">
+                  <Symbol icon={Send} label="Applications" />
+                </th>
+                <th className="py-1.5 pr-3">
+                  <Symbol icon={CalendarPlus} label="Added" />
+                </th>
+                <th className="w-12 py-1.5 pr-4" />
               </tr>
             </thead>
             <tbody>
@@ -231,25 +249,25 @@ export function UsersPage({ currentUser }: { currentUser: CurrentUser }) {
                 <tr key={user.id} className="border-b border-border last:border-b-0">
                   <td className="py-2 pl-5 pr-3">
                     <div className="flex items-center gap-2.5">
-                      <Avatar user={user} size="md" ring={false} />
+                      <Avatar subject={asUserSubject(user)} label={userLabel(user)} size="md" ring={false} />
                       <div className="min-w-0">
                         <p className="truncate font-medium">{user.username}</p>
                         {user.displayName ? <p className="truncate text-[12.5px] text-ink-2">{user.displayName}</p> : null}
                       </div>
                     </div>
                   </td>
-                  <td className="py-2 pr-3 capitalize text-ink-2">{user.role === 'admin' ? 'Administrator' : 'User'}</td>
+                  <td className="py-2 pr-3 text-ink-2">{user.role === 'admin' ? <Symbol icon={Shield} label="Administrator" /> : <Symbol icon={User} label="User" className="text-ink-3" />}</td>
                   <td className="py-2 pr-3">
                     {user.isActive ? (
-                      <span className="inline-flex items-center gap-1.5 text-ink-2">
-                        <span className="size-1.5 rounded-full bg-success-ink" aria-hidden /> Active
+                      <span className="inline-flex size-4 items-center justify-center" title="Active" aria-label="Active">
+                        <span className="size-2 rounded-full bg-success-ink" aria-hidden />
                       </span>
                     ) : (
-                      <span className="inline-flex items-center gap-1.5 text-ink-3">
-                        <span className="size-1.5 rounded-full bg-ink-3" aria-hidden /> Disabled
+                      <span className="inline-flex size-4 items-center justify-center" title="Disabled" aria-label="Disabled">
+                        <span className="size-2 rounded-full bg-ink-3" aria-hidden />
                       </span>
                     )}
-                    {user.mustChangePassword ? <span className="ml-2 rounded bg-warning-soft px-1.5 py-0.5 text-[11px] text-warning-ink">Temporary password</span> : null}
+                    {user.mustChangePassword ? <Symbol icon={KeyRound} label="Temporary password" className="ml-1.5 text-warning-ink" size="size-3.5" /> : null}
                   </td>
                   <td className="py-2 pr-3 text-right tabular-nums text-ink-2">{user.applicationCount}</td>
                   <td className="py-2 pr-3 text-ink-2">{formatDate(user.createdAt)}</td>
@@ -268,6 +286,11 @@ export function UsersPage({ currentUser }: { currentUser: CurrentUser }) {
                           <MenuItem icon={KeyRound} onSelect={() => setResetting(user)}>
                             Reset password
                           </MenuItem>
+                          {user.avatarVersion ? (
+                            <MenuItem icon={ImageOff} onSelect={() => removePhoto.mutate(user)}>
+                              Remove photo
+                            </MenuItem>
+                          ) : null}
                           {user.role !== 'admin' && user.id !== currentUser.id ? (
                             <>
                               <MenuItem icon={user.isActive ? UserX : UserCheck} onSelect={() => setActive.mutate({ user, isActive: !user.isActive })}>

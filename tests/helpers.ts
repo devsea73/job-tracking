@@ -154,8 +154,15 @@ export class ApiClient {
     return response.json;
   }
 
+  /** The first profile of the signed-in user, created along with their account. */
+  async defaultProfileId(): Promise<number> {
+    const response = await this.get('/api/profiles');
+    if (response.status !== 200) throw new Error(`Listing profiles failed: ${JSON.stringify(response.json)}`);
+    return Math.min(...response.json.profiles.map((profile: { id: number }) => profile.id));
+  }
+
   async addJob(url: string, extra: Record<string, unknown> = {}): Promise<CreateApplicationResponse> {
-    const response = await this.post('/api/applications', { url, ...extra });
+    const response = await this.post('/api/applications', { url, profileId: extra.profileId ?? (await this.defaultProfileId()), ...extra });
     if (response.status !== 200) throw new Error(`Adding ${url} failed: ${response.status} ${JSON.stringify(response.json)}`);
     return response.json;
   }

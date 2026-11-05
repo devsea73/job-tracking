@@ -126,7 +126,7 @@ describe('duplicate jobs', () => {
 
     const detail = (await users.tyler.get(`/api/jobs/${(first as any).jobId}`)).json;
     expect(detail.urls.map((url: any) => url.sourcePlatform).sort()).toEqual(['builtin', 'jobright']);
-    expect(detail.applicants.map((user: any) => user.username)).toEqual(['tyler', 'john']);
+    expect(detail.applications.map((application: any) => application.owner.username)).toEqual(['tyler', 'john']);
   });
 
   it('layer D: same company and title with a different description asks instead of merging', async () => {
@@ -279,7 +279,7 @@ describe('application-level duplicates', () => {
     expect(jobCount(ctx)).toBe(1);
     const list = (await users.john.get('/api/jobs')).json;
     expect(list.items[0].id).toBe(first.jobId);
-    expect(list.items[0].applicants.map((user: any) => user.username)).toEqual(['tyler', 'john']);
+    expect(list.items[0].applications.map((application: any) => application.owner.username)).toEqual(['tyler', 'john']);
   });
 
   it('the same user applying twice is shown the existing application', async () => {
@@ -292,7 +292,7 @@ describe('application-level duplicates', () => {
     expect(again).toMatchObject({ outcome: 'already_applied', applicationId: first.applicationId, jobId: first.jobId, title: 'Engineer' });
     expect(applicationCount(ctx)).toBe(1);
     const detail = (await users.tyler.get(`/api/jobs/${first.jobId}`)).json;
-    expect(detail.myApplication.memo).toBe('original memo');
+    expect(detail.applications[0].memo).toBe('original memo');
   });
 
   it('two users adding the same new URL at the same moment get one job', async () => {
@@ -354,7 +354,8 @@ describe('application-level duplicates', () => {
     const first: any = await users.tyler.addJob('https://company.com/jobs/1');
     const userId = (await users.tyler.get('/api/auth/me')).json.id;
     const sqlite = ctx.db.$client;
-    expect(() => sqlite.prepare('INSERT INTO applications (user_id, job_id) VALUES (?, ?)').run(userId, first.jobId)).toThrow(/UNIQUE/);
+    const profileId = await users.tyler.defaultProfileId();
+    expect(() => sqlite.prepare('INSERT INTO applications (user_id, profile_id, job_id) VALUES (?, ?, ?)').run(userId, profileId, first.jobId)).toThrow(/UNIQUE/);
     expect(() =>
       sqlite
         .prepare('INSERT INTO job_urls (job_id, original_url, normalized_url) VALUES (?, ?, ?)')

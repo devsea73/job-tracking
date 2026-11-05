@@ -1,4 +1,5 @@
 import type { ApplicationStatus, InterviewStage, JobScope, JobSort, UserRole } from './constants';
+import type { PipelineStage, ProcessStats } from './pipeline';
 
 export interface ApiErrorBody {
   error: { code: string; message: string; details?: unknown };
@@ -12,6 +13,7 @@ export interface CurrentUser {
   mustChangePassword: boolean;
   initials: string;
   color: string;
+  avatarVersion: string | null;
 }
 
 export interface LoginResponse {
@@ -32,22 +34,43 @@ export interface AdminUser {
   updatedAt: string;
   initials: string;
   color: string;
+  avatarVersion: string | null;
 }
 
-/** Public information about a user who applied. Never contains personal application data. */
-export interface Applicant {
+/** Enough to draw an avatar. The version changes when the image does, so it doubles as a cache key. */
+export interface AvatarSubject {
+  kind: 'user' | 'profile';
   id: number;
-  username: string;
-  displayName: string | null;
   initials: string;
   color: string;
+  avatarVersion: string | null;
 }
 
-export interface MyApplicationSummary {
+export interface UserRef extends AvatarSubject {
+  kind: 'user';
+  username: string;
+  displayName: string | null;
+}
+
+export interface ProfileRef extends AvatarSubject {
+  kind: 'profile';
+  name: string;
+  isArchived: boolean;
+}
+
+/** One profile's application to a job. Everyone on the host can read all of this. */
+export interface ApplicationSummary {
   id: number;
+  owner: UserRef;
+  profile: ProfileRef;
+  /** Whether the person asking owns it. Only the owner can change it. */
+  isMine: boolean;
   status: ApplicationStatus;
+  /** The highest stage it ever reached, which stays put after a rejection. */
+  furthestStage: PipelineStage;
   memoPreview: string;
   nextInterviewAt: string | null;
+  interviewCount: number;
   appliedAt: string;
   updatedAt: string;
 }
@@ -60,8 +83,7 @@ export interface JobListItem {
   isHighlighted: boolean;
   createdAt: string;
   updatedAt: string;
-  applicants: Applicant[];
-  myApplication: MyApplicationSummary | null;
+  applications: ApplicationSummary[];
 }
 
 export interface JobListQuery {
@@ -73,6 +95,8 @@ export interface JobListQuery {
   interviewTo?: string;
   highlighted?: boolean;
   scope?: JobScope;
+  personId?: number;
+  profileId?: number;
   sort?: JobSort;
   highlightFirst?: boolean;
   limit?: number;
@@ -114,12 +138,8 @@ export interface StatusHistoryEntry {
   changedAt: string;
 }
 
-export interface MyApplicationDetail {
-  id: number;
-  status: ApplicationStatus;
+export interface ApplicationDetail extends ApplicationSummary {
   memo: string;
-  appliedAt: string;
-  updatedAt: string;
   interviews: Interview[];
   history: StatusHistoryEntry[];
 }
@@ -139,8 +159,7 @@ export interface JobDetail {
   lastExtractedAt: string | null;
   extractionMethod: string | null;
   urls: JobUrl[];
-  applicants: Applicant[];
-  myApplication: MyApplicationDetail | null;
+  applications: ApplicationDetail[];
 }
 
 export interface DuplicateCandidate {
@@ -152,7 +171,7 @@ export interface DuplicateCandidate {
   reasons: string[];
   descriptionPreview: string;
   urls: string[];
-  applicants: Applicant[];
+  applications: ApplicationSummary[];
 }
 
 export interface ExtractedJobFields {
@@ -175,6 +194,8 @@ export type DuplicateResolution =
 
 export interface CreateApplicationRequest {
   url: string;
+  /** The profile applying. Must be one of the signed-in user's active profiles. */
+  profileId: number;
   memo?: string;
   /** Sent when the user confirms a possible-duplicate dialog. */
   resolution?: DuplicateResolution;
@@ -200,7 +221,7 @@ export type CreateApplicationResponse =
       jobWasNew: boolean;
       matchedBy: MatchedBy;
     }
-  | { outcome: 'already_applied'; applicationId: number; jobId: number; title: string; company: string }
+  | { outcome: 'already_applied'; applicationId: number; jobId: number; title: string; company: string; profileName: string }
   | {
       outcome: 'possible_duplicate';
       draftId: string;
@@ -243,6 +264,43 @@ export interface InterviewListItem extends Interview {
   jobId: number;
   title: string;
   company: string;
+  owner: UserRef;
+  profile: ProfileRef;
+  isMine: boolean;
+}
+
+export interface InterviewQuery {
+  from?: string;
+  to?: string;
+  stage?: InterviewStage;
+  /** A user id, or "all" for everyone. Without it, the signed-in user's own interviews. */
+  person?: number | 'all';
+  profileId?: number;
+  limit?: number;
+}
+
+export interface MyProfile extends ProfileRef {
+  applicationCount: number;
+  createdAt: string;
+}
+
+export interface MyProfilesResponse {
+  profiles: MyProfile[];
+  /** Offered first when adding a job. */
+  lastUsedProfileId: number | null;
+}
+
+export interface TeamProfile {
+  profile: ProfileRef;
+  stats: ProcessStats;
+}
+
+export interface TeamMember {
+  user: UserRef;
+  isActive: boolean;
+  /** All of this person's profiles added together. */
+  stats: ProcessStats;
+  profiles: TeamProfile[];
 }
 
 export interface DashboardResponse {

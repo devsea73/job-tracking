@@ -127,7 +127,9 @@ describe('client and host over real TLS', () => {
       await opened;
 
       server.http.serve('https://company.com/jobs/1', jobPage({ title: 'Engineer', company: 'Acme' }));
-      const added = await client.call<{ jobId: number }>('POST', '/api/applications', { url: 'https://company.com/jobs/1' }, token);
+      const mine = await client.call<{ profiles: Array<{ id: number }> }>('GET', '/api/profiles', undefined, token);
+      const profileId = mine.data?.profiles[0].id;
+      const added = await client.call<{ jobId: number }>('POST', '/api/applications', { url: 'https://company.com/jobs/1', profileId }, token);
       expect(added.ok).toBe(true);
       await expect.poll(() => events.map((event) => event.type)).toContain('jobs_changed');
       expect(events[0].jobId).toBe(added.data?.jobId);

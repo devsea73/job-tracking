@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { check, index, integer, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { blob, check, index, integer, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 import type { ApplicationStatus, InterviewStage, UserRole } from '../../shared/constants';
 
 /** All instants are stored as ISO-8601 UTC strings so that they sort lexicographically. */
@@ -23,6 +23,41 @@ export const users = sqliteTable(
     check('users_role_check', sql`${t.role} in ('admin', 'user')`)
   ]
 );
+
+/** A persona a user applies under. Archived profiles keep their history but take no new applications. */
+export const profiles = sqliteTable(
+  'profiles',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    isArchived: integer('is_archived', { mode: 'boolean' }).notNull().default(false),
+    createdAt: text('created_at').notNull().default(nowIso),
+    updatedAt: text('updated_at').notNull().default(nowIso)
+  },
+  (t) => [uniqueIndex('profiles_user_name_nocase_unique').on(t.userId, sql`lower(${t.name})`), index('profiles_user_idx').on(t.userId)]
+);
+
+/** Images live apart from their owners, so that ordinary queries never load them by accident. */
+export const userAvatars = sqliteTable('user_avatars', {
+  userId: integer('user_id')
+    .primaryKey()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  mime: text('mime').notNull(),
+  data: blob('data', { mode: 'buffer' }).notNull(),
+  updatedAt: text('updated_at').notNull().default(nowIso)
+});
+
+export const profileAvatars = sqliteTable('profile_avatars', {
+  profileId: integer('profile_id')
+    .primaryKey()
+    .references(() => profiles.id, { onDelete: 'cascade' }),
+  mime: text('mime').notNull(),
+  data: blob('data', { mode: 'buffer' }).notNull(),
+  updatedAt: text('updated_at').notNull().default(nowIso)
+});
 
 export const sessions = sqliteTable(
   'sessions',
@@ -59,7 +94,10 @@ export const jobs = sqliteTable(
     createdBy: integer('created_by').references(() => users.id, { onDelete: 'set null' }),
     createdAt: text('created_at').notNull().default(nowIso),
     updatedAt: text('updated_at').notNull().default(nowIso),
-    lastExtractedAt: text('last_extracted_at')
+    lastExtractedAt: text('last_extracted_at'),
+    /** Kept up to date by triggers, so that sorting by them never has to count or scan. */
+    applicationCount: integer('application_count').notNull().default(0),
+    lastActivityAt: text('last_activity_at')
   },
   (t) => [
     index('jobs_company_key_idx').on(t.companyKey),
@@ -68,7 +106,9 @@ export const jobs = sqliteTable(
     index('jobs_created_at_idx').on(t.createdAt),
     index('jobs_updated_at_idx').on(t.updatedAt),
     index('jobs_company_name_idx').on(sql`${t.companyName} collate nocase`),
-    index('jobs_highlighted_idx').on(t.isHighlighted)
+    index('jobs_highlighted_idx').on(t.isHighlighted),
+    index('jobs_application_count_idx').on(t.applicationCount, t.id),
+    index('jobs_last_activity_idx').on(t.lastActivityAt, t.id)
   ]
 );
 
@@ -124,18 +164,25 @@ export const applications = sqliteTable(
     userId: integer('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
+    profileId: integer('profile_id')
+      .notNull()
+      .references(() => profiles.id, { onDelete: 'cascade' }),
     jobId: integer('job_id')
       .notNull()
       .references(() => jobs.id, { onDelete: 'cascade' }),
     status: text('status').$type<ApplicationStatus>().notNull().default('Applied'),
     memo: text('memo').notNull().default(''),
+    /** The highest pipeline stage ever reached, as an index into PIPELINE_STAGES. Kept up to date by a trigger. */
+    furthestRank: integer('furthest_rank').notNull().default(0),
     appliedAt: text('applied_at').notNull().default(nowIso),
     updatedAt: text('updated_at').notNull().default(nowIso)
   },
   (t) => [
-    // One user has at most one application per shared job.
-    uniqueIndex('applications_user_job_unique').on(t.userId, t.jobId),
+    // A profile applies to a shared job at most once. One person can apply under several profiles.
+    uniqueIndex('applications_profile_job_unique').on(t.profileId, t.jobId),
     index('applications_job_idx').on(t.jobId),
+    index('applications_user_job_idx').on(t.userId, t.jobId),
+    index('applications_status_idx').on(t.status),
     index('applications_user_status_idx').on(t.userId, t.status),
     check(
       'applications_status_check',
@@ -180,6 +227,9 @@ export const applicationStatusHistory = sqliteTable(
 
 export const schema = {
   users,
+  profiles,
+  userAvatars,
+  profileAvatars,
   sessions,
   jobs,
   jobUrls,

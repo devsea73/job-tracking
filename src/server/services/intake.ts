@@ -20,7 +20,8 @@ import { assertSafeUrlShape, UnsafeUrlError } from '../extraction/ip-guard';
 import { extractJob } from '../extraction/pipeline';
 import { MIN_DESCRIPTION_LENGTH, type ExtractionResult, type ExtractionSuccess } from '../extraction/types';
 import { loggableUrl } from '../logger';
-import { getJobDetail } from './job-queries';
+import { listApplicationsForJobs } from './job-queries';
+import { requireOwnActiveProfile } from './profiles';
 
 /** Pages being read right now. Two people adding the same link share one fetch. */
 const inFlight = new WeakMap<AppContext, Map<string, Promise<ExtractionResult>>>();
@@ -146,10 +147,17 @@ function addAliases(ctx: AppContext, jobId: number, evidence: UrlEvidence[]): bo
   return added;
 }
 
-/** Links the current user to a job: exactly one application per person per job, enforced by a unique index. */
-function linkUser(
+/** Who is applying: a signed-in user, under one of their own profiles. */
+interface ApplyingProfile {
+  userId: number;
+  profileId: number;
+  profileName: string;
+}
+
+/** Links a profile to a job: each profile applies to a job once, enforced by a unique index. */
+function linkProfile(
   ctx: AppContext,
-  userId: number,
+  applicant: ApplyingProfile,
   jobId: number,
   memo: string,
   evidence: UrlEvidence[],
@@ -178,13 +186,17 @@ function linkUser(
       const existing = db
         .select({ id: applications.id })
         .from(applications)
-        .where(and(eq(applications.userId, userId), eq(applications.jobId, jobId)))
+        .where(and(eq(applications.profileId, applicant.profileId), eq(applications.jobId, jobId)))
         .get();
       if (existing) {
-        return { outcome: 'already_applied', applicationId: existing.id, jobId, title: job.title, company: job.companyName };
+        return { outcome: 'already_applied', applicationId: existing.id, jobId, title: job.title, company: job.companyName, profileName: applicant.profileName };
       }
 
-      const application = db.insert(applications).values({ userId, jobId, memo, status: DEFAULT_STATUS }).returning({ id: applications.id }).get();
+      const application = db
+        .insert(applications)
+        .values({ userId: applicant.userId, profileId: applicant.profileId, jobId, memo, status: DEFAULT_STATUS })
+        .returning({ id: applications.id })
+        .get();
       db.insert(applicationStatusHistory).values({ applicationId: application.id, oldStatus: null, newStatus: DEFAULT_STATUS }).run();
       if (aliasAdded || !jobWasNew) db.update(jobs).set({ updatedAt: nowIso() }).where(eq(jobs.id, jobId)).run();
       return { outcome: 'created', applicationId: application.id, jobId, jobWasNew, matchedBy };
@@ -197,18 +209,30 @@ function linkUser(
 }
 
 function toCandidates(ctx: AppContext, userId: number, matches: Array<{ jobId: number; comparison: { score: number; reasons: string[] } }>): DuplicateCandidate[] {
+  const applicationsByJob = listApplicationsForJobs(
+    ctx.db,
+    userId,
+    matches.map((match) => match.jobId)
+  );
   return matches.map(({ jobId, comparison }) => {
-    const job = getJobDetail(ctx, userId, jobId);
+    const job = ctx.db.select().from(jobs).where(eq(jobs.id, jobId)).get();
+    if (!job) throw notFound('That job no longer exists.');
     return {
       jobId,
       title: job.title,
-      company: job.company,
+      company: job.companyName,
       location: job.location,
       score: Math.round(comparison.score * 100) / 100,
       reasons: comparison.reasons,
       descriptionPreview: job.description.slice(0, 400),
-      urls: job.urls.map((url) => url.originalUrl).slice(0, 5),
-      applicants: job.applicants
+      urls: ctx.db
+        .select({ url: jobUrls.originalUrl })
+        .from(jobUrls)
+        .where(eq(jobUrls.jobId, jobId))
+        .limit(5)
+        .all()
+        .map((row) => row.url),
+      applications: applicationsByJob.get(jobId) ?? []
     };
   });
 }
@@ -233,6 +257,9 @@ function validateUrl(input: string): URL {
  */
 export async function createApplication(ctx: AppContext, userId: number, body: CreateApplicationRequest): Promise<CreateApplicationResponse> {
   const url = validateUrl(body.url);
+  // Checked before the page is read: a wrong profile should not cost a slow fetch.
+  const profile = requireOwnActiveProfile(ctx.db, userId, body.profileId);
+  const applicant: ApplyingProfile = { userId, profileId: profile.id, profileName: profile.name };
   const memo = body.memo?.trim() ?? '';
   const original = buildEvidence(url, 'original');
   if (!original) throw new ApiError(400, 'invalid_url', 'That does not look like a valid job URL.');
@@ -241,14 +268,14 @@ export async function createApplication(ctx: AppContext, userId: number, body: C
   if (body.resolution?.action === 'merge') {
     const draft = ctx.drafts.get(body.draftId, userId, original.normalized);
     const evidence = toEvidence(url, draft?.extraction ?? null);
-    const response = linkUser(ctx, userId, body.resolution.jobId, memo, evidence, false, 'user_confirmed', fieldsFrom(draft?.extraction ?? null, body.manual));
+    const response = linkProfile(ctx, applicant, body.resolution.jobId, memo, evidence, false, 'user_confirmed', fieldsFrom(draft?.extraction ?? null, body.manual));
     ctx.drafts.delete(body.draftId);
     return response;
   }
 
   // Layers A and C need no network: most repeats end here.
   const early = findExactMatch(ctx.db, [original]);
-  if (early) return linkUser(ctx, userId, early.jobId, memo, [original], false, early.matchedBy, null);
+  if (early) return linkProfile(ctx, applicant, early.jobId, memo, [original], false, early.matchedBy, null);
 
   const draft = ctx.drafts.get(body.draftId, userId, original.normalized);
   const extraction = draft?.extraction ?? (await extractOnce(ctx, original.normalized, original.raw));
@@ -264,7 +291,7 @@ export async function createApplication(ctx: AppContext, userId: number, body: C
   const exact = findExactMatch(ctx.db, evidence, fields?.title ?? extractedFields(extraction).title);
   if (exact) {
     ctx.drafts.delete(body.draftId);
-    return linkUser(ctx, userId, exact.jobId, memo, evidence, false, exact.matchedBy, fields);
+    return linkProfile(ctx, applicant, exact.jobId, memo, evidence, false, exact.matchedBy, fields);
   }
 
   if (!fields) {
@@ -289,7 +316,7 @@ export async function createApplication(ctx: AppContext, userId: number, body: C
     const content = findContentMatches(ctx.db, { company: fields.company, title: fields.title, location: fields.location, description: fields.description }, evidence);
     if (content.auto) {
       ctx.drafts.delete(body.draftId);
-      return linkUser(ctx, userId, content.auto.jobId, memo, evidence, false, 'content', fields);
+      return linkProfile(ctx, applicant, content.auto.jobId, memo, evidence, false, 'content', fields);
     }
     if (content.possible.length > 0) {
       return {
@@ -321,7 +348,7 @@ export async function createApplication(ctx: AppContext, userId: number, body: C
         })
         .returning({ id: jobs.id })
         .get();
-      return linkUser(ctx, userId, job.id, memo, evidence, true, 'new', null);
+      return linkProfile(ctx, applicant, job.id, memo, evidence, true, 'new', null);
     })
     .immediate();
   ctx.drafts.delete(body.draftId);
@@ -329,6 +356,7 @@ export async function createApplication(ctx: AppContext, userId: number, body: C
 }
 
 /** "I applied too": joins a job already in the shared catalog, no link needed. */
-export function applyToExistingJob(ctx: AppContext, userId: number, jobId: number, memo: string): CreateApplicationResponse {
-  return linkUser(ctx, userId, jobId, memo.trim(), [], false, 'user_confirmed', null);
+export function applyToExistingJob(ctx: AppContext, userId: number, jobId: number, profileId: number, memo: string): CreateApplicationResponse {
+  const profile = requireOwnActiveProfile(ctx.db, userId, profileId);
+  return linkProfile(ctx, { userId, profileId: profile.id, profileName: profile.name }, jobId, memo.trim(), [], false, 'user_confirmed', null);
 }

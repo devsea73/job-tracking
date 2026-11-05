@@ -16,6 +16,8 @@
     "test:watch": "node scripts/run-tests.mjs",
     "db:generate": "drizzle-kit generate",
     "survey": "node scripts/run-tests.mjs --survey",
+    "loadtest": "node scripts/run-tests.mjs --load && node scripts/show-load-report.mjs",
+    "loadtest:ui": "node tests/live/load-ui.mjs",
     "dist": "npm run build && electron-builder --win --x64 --publish never",
     "dist:dir": "npm run build && electron-builder --win --x64 --dir --publish never",
     "make-icon": "node scripts/make-icon.mjs",
@@ -37,6 +39,7 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.4",
     "@tanstack/react-query": "^5.106.0",
+    "@tanstack/react-virtual": "^3.14.26",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",

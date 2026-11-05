@@ -1,17 +1,18 @@
-import { useEffect, useState, type FormEvent } from 'react';
-import { CheckCircle2, Copy, ExternalLink, Loader2 } from 'lucide-react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { Check, CheckCircle2, Copy, ExternalLink, Link2, Loader2, StickyNote, User } from 'lucide-react';
 import type { CreateApplicationRequest, CreateApplicationResponse, DuplicateCandidate, ExtractedJobFields, ManualJobFields } from '@shared/api';
 import { AvatarStack } from '@/components/job-bits';
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { Field, Input, Textarea } from '@/components/ui/field';
 import { Notice } from '@/components/ui/misc';
+import { Select } from '@/components/ui/select';
 import { useToast } from '@/components/ui/toast';
-import { errorMessage, useCreateApplication } from '@/lib/api';
+import { errorMessage, useCreateApplication, useProfiles } from '@/lib/api';
 
 type Step =
   | { kind: 'form' }
-  | { kind: 'already'; applicationId: number; jobId: number; title: string; company: string }
+  | { kind: 'already'; applicationId: number; jobId: number; title: string; company: string; profileName: string }
   | { kind: 'duplicate'; draftId: string; extracted: ExtractedJobFields; candidates: DuplicateCandidate[] }
   | { kind: 'manual'; draftId: string; message: string; reason: string; fields: ManualJobFields };
 
@@ -26,11 +27,14 @@ const MATCH_MESSAGES: Record<string, string> = {
 export function AddJobDialog({ open, onOpenChange, onOpenJob }: { open: boolean; onOpenChange: (open: boolean) => void; onOpenJob: (jobId: number) => void }) {
   const [url, setUrl] = useState('');
   const [memo, setMemo] = useState('');
+  const [profileId, setProfileId] = useState<number | null>(null);
   const [step, setStep] = useState<Step>({ kind: 'form' });
   const [error, setError] = useState<string | null>(null);
 
   const create = useCreateApplication();
   const toast = useToast();
+  const profiles = useProfiles();
+  const activeProfiles = useMemo(() => (profiles.data?.profiles ?? []).filter((profile) => !profile.isArchived), [profiles.data]);
 
   useEffect(() => {
     if (!open) return;
@@ -38,7 +42,12 @@ export function AddJobDialog({ open, onOpenChange, onOpenJob }: { open: boolean;
     setMemo('');
     setStep({ kind: 'form' });
     setError(null);
+    setProfileId(null);
   }, [open]);
+
+  // Offers the profile used last, until the person picks another.
+  const lastUsed = profiles.data?.lastUsedProfileId ?? null;
+  const chosenProfile = activeProfiles.find((profile) => profile.id === profileId)?.id ?? activeProfiles.find((profile) => profile.id === lastUsed)?.id ?? activeProfiles[0]?.id ?? null;
 
   const finish = (response: Extract<CreateApplicationResponse, { outcome: 'created' }>) => {
     toast.show(response.jobWasNew ? 'Application saved.' : MATCH_MESSAGES[response.matchedBy] ?? 'Application saved.');
@@ -48,14 +57,18 @@ export function AddJobDialog({ open, onOpenChange, onOpenJob }: { open: boolean;
 
   const submit = async (extra: Partial<CreateApplicationRequest> = {}) => {
     setError(null);
+    if (chosenProfile === null) {
+      setError('Choose a profile first.');
+      return;
+    }
     try {
-      const response = await create.mutateAsync({ url, memo, ...extra });
+      const response = await create.mutateAsync({ url, memo, profileId: chosenProfile, ...extra });
       switch (response.outcome) {
         case 'created':
           finish(response);
           break;
         case 'already_applied':
-          setStep({ kind: 'already', applicationId: response.applicationId, jobId: response.jobId, title: response.title, company: response.company });
+          setStep({ kind: 'already', applicationId: response.applicationId, jobId: response.jobId, title: response.title, company: response.company, profileName: response.profileName });
           break;
         case 'possible_duplicate':
           setStep({ kind: 'duplicate', draftId: response.draftId, extracted: response.extracted, candidates: response.candidates });
@@ -87,9 +100,10 @@ export function AddJobDialog({ open, onOpenChange, onOpenJob }: { open: boolean;
       <Dialog
         open={open}
         onOpenChange={onOpenChange}
-        title="You already applied to this job"
+        title="This profile already applied to this job"
         footer={
           <>
+            <Button onClick={() => setStep({ kind: 'form' })}>Use another profile</Button>
             <Button onClick={() => onOpenChange(false)}>Close</Button>
             <Button
               variant="primary"
@@ -98,7 +112,7 @@ export function AddJobDialog({ open, onOpenChange, onOpenJob }: { open: boolean;
                 onOpenJob(step.jobId);
               }}
             >
-              Open my application
+              Open the job
             </Button>
           </>
         }
@@ -108,7 +122,7 @@ export function AddJobDialog({ open, onOpenChange, onOpenJob }: { open: boolean;
           <div>
             <p className="font-medium">{step.title}</p>
             <p className="text-ink-2">{step.company}</p>
-            <p className="mt-2 text-ink-2">Nothing new was created, and your existing memo and status were left as they are.</p>
+            <p className="mt-2 text-ink-2">"{step.profileName}" has already applied here. Nothing new was created, and its memo and status were left as they are.</p>
           </div>
         </div>
       </Dialog>
@@ -161,7 +175,7 @@ export function AddJobDialog({ open, onOpenChange, onOpenJob }: { open: boolean;
               ) : null}
               <p className="selectable mt-2 line-clamp-3 text-[12.5px] text-ink-2">{candidate.descriptionPreview}</p>
               <div className="mt-2 flex items-center gap-2 text-[12px] text-ink-3">
-                <AvatarStack users={candidate.applicants} />
+                <AvatarStack applications={candidate.applications} />
                 {candidate.urls[0] ? (
                   <button type="button" className="inline-flex min-w-0 items-center gap-1 truncate hover:text-ink" onClick={() => void window.jobTracker.openExternal(candidate.urls[0])}>
                     <ExternalLink className="size-3 shrink-0" />
@@ -233,8 +247,8 @@ export function AddJobDialog({ open, onOpenChange, onOpenJob }: { open: boolean;
           <Button onClick={() => onOpenChange(false)} disabled={busy}>
             Cancel
           </Button>
-          <Button variant="primary" type="submit" form="add-job-form" loading={busy} disabled={!url.trim()}>
-            Save Application
+          <Button variant="primary" type="submit" form="add-job-form" aria-label="Save Application" title="Save" className="min-w-16" loading={busy} disabled={!url.trim() || chosenProfile === null}>
+            {busy ? null : <Check />}
           </Button>
         </>
       }
@@ -244,29 +258,42 @@ export function AddJobDialog({ open, onOpenChange, onOpenJob }: { open: boolean;
         className="space-y-3"
         onSubmit={(event: FormEvent) => {
           event.preventDefault();
-          if (url.trim() && !busy) void submit();
+          if (url.trim() && chosenProfile !== null && !busy) void submit();
         }}
       >
-        <Field label="Job URL" htmlFor="job-url">
-          <Input id="job-url" autoFocus disabled={busy} value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://builtin.com/job/senior-software-engineer/123456" />
-        </Field>
-        <Field label="Memo (optional)" htmlFor="job-memo" hint="Private to you. Nobody else can see it.">
+        <div className="relative">
+          <Link2 className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-ink-3" aria-hidden />
+          <Input id="job-url" aria-label="Job URL" className="pl-8" autoFocus disabled={busy} value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://" />
+        </div>
+        <Select
+            ariaLabel="Profile"
+            className="w-full"
+            leading={<User className="size-4 text-ink-3" aria-hidden />}
+            disabled={busy || activeProfiles.length === 0}
+            placeholder={profiles.isPending ? 'Loading…' : 'No profile available'}
+            value={chosenProfile === null ? '' : String(chosenProfile)}
+            onChange={(value) => setProfileId(Number(value))}
+            options={activeProfiles.map((profile) => ({ value: String(profile.id), label: profile.name }))}
+          />
+        <div className="relative">
+          <StickyNote className="pointer-events-none absolute left-2.5 top-2.5 size-4 text-ink-3" aria-hidden />
           <Textarea
             id="job-memo"
-            rows={4}
+            aria-label="Memo (optional)"
+            className="pl-8"
+            rows={3}
             disabled={busy}
             value={memo}
             onChange={(event) => setMemo(event.target.value)}
-            placeholder="Applied through LinkedIn. Recruiter contacted me."
+            placeholder="Memo"
             onKeyDown={(event) => {
-              if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && url.trim() && !busy) void submit();
+              if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && url.trim() && chosenProfile !== null && !busy) void submit();
             }}
           />
-        </Field>
+        </div>
         {busy ? (
-          <div className="flex items-center gap-2 text-ink-2" role="status">
+          <div className="flex items-center justify-center text-ink-2" role="status" aria-label="Reading the job page" title="Reading the job page">
             <Loader2 className="spin size-4" aria-hidden />
-            Reading the job page. Sites that need a browser can take up to a minute.
           </div>
         ) : null}
         {error ? <Notice kind="error">{error}</Notice> : null}

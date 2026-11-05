@@ -19,6 +19,10 @@ if (args[0] === '--survey') {
   const crossPlatform = args.includes('--cross-platform');
   env = { ...env, JOB_TRACKER_SURVEY: '1', SURVEY_ARGS: args.slice(1).join(' ') };
   commandArgs = [entry, 'run', '--config', 'vitest.survey.config.ts', crossPlatform ? 'tests/live/cross-platform.test.ts' : 'tests/live/survey.test.ts'];
+} else if (args[0] === '--load') {
+  // Speed with 10,000 jobs. Opt-in: it takes a while and proves nothing unless someone reads it.
+  env = { ...env, JOB_TRACKER_SURVEY: '1', SURVEY_ARGS: args.slice(1).join(' ') };
+  commandArgs = [entry, 'run', '--config', 'vitest.survey.config.ts', 'tests/live/load.test.ts'];
 } else {
   commandArgs = [entry, ...args];
 }

@@ -6,6 +6,7 @@ import type { HttpClient } from './extraction/safe-fetch';
 import type { PageRenderer } from './extraction/types';
 import type { DraftStore } from './services/drafts';
 import type { Logger } from './logger';
+import type { ReadCache } from './read-cache';
 
 /** Everything request handlers share. */
 export class AppContext {
@@ -20,7 +21,8 @@ export class AppContext {
     public readonly drafts: DraftStore,
     public readonly logger: Logger,
     public readonly paths: { dataDir: string; migrationsDir: string; backupDir: string },
-    public readonly version: string
+    public readonly version: string,
+    public readonly readCache: ReadCache
   ) {}
 
   get db(): Db {

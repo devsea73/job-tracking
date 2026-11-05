@@ -8,10 +8,13 @@ import { ApiClient, createTestServer, createUsers, jobPage, signInAdmin, tempDir
 async function jobWithTwoApplicants(server: TestServer) {
   const { admin, users } = await createUsers(server.app, 'tyler', 'john');
   server.http.serve('https://company.com/jobs/1', jobPage({ title: 'Engineer', company: 'Stripe' }));
-  const tyler: any = await users.tyler.addJob('https://company.com/jobs/1', { memo: 'tyler private memo' });
-  const john: any = await users.john.addJob('https://company.com/jobs/1', { memo: 'john private memo' });
+  const tyler: any = await users.tyler.addJob('https://company.com/jobs/1', { memo: 'tyler memo' });
+  const john: any = await users.john.addJob('https://company.com/jobs/1', { memo: 'john memo' });
   return { admin, tyler: users.tyler, john: users.john, jobId: tyler.jobId as number, tylerApp: tyler.applicationId as number, johnApp: john.applicationId as number };
 }
+
+/** The signed-in user's application within a job's details. */
+const mine = (job: any) => job.applications.find((application: any) => application.isMine);
 
 const INTERVIEW = { stage: 'Technical Interview', scheduledAt: '2030-11-13T14:00:00-05:00', timezone: 'America/New_York' };
 
@@ -19,13 +22,13 @@ describe('application status', () => {
   it('starts as Applied and stays independent per user', async () => {
     const server = await createTestServer();
     const { tyler, john, jobId, tylerApp, johnApp } = await jobWithTwoApplicants(server);
-    expect((await tyler.get(`/api/jobs/${jobId}`)).json.myApplication.status).toBe('Applied');
+    expect(mine((await tyler.get(`/api/jobs/${jobId}`)).json).status).toBe('Applied');
 
     await tyler.patch(`/api/applications/${tylerApp}`, { status: 'Technical Interview' });
     await john.patch(`/api/applications/${johnApp}`, { status: 'Recruiter Screen' });
 
-    expect((await tyler.get(`/api/jobs/${jobId}`)).json.myApplication.status).toBe('Technical Interview');
-    expect((await john.get(`/api/jobs/${jobId}`)).json.myApplication.status).toBe('Recruiter Screen');
+    expect(mine((await tyler.get(`/api/jobs/${jobId}`)).json).status).toBe('Technical Interview');
+    expect(mine((await john.get(`/api/jobs/${jobId}`)).json).status).toBe('Recruiter Screen');
   });
 
   it('records history, including the first status', async () => {
@@ -34,7 +37,7 @@ describe('application status', () => {
     await tyler.patch(`/api/applications/${tylerApp}`, { status: 'Recruiter Screen' });
     await tyler.patch(`/api/applications/${tylerApp}`, { status: 'Recruiter Screen' }); // no change, no entry
     await tyler.patch(`/api/applications/${tylerApp}`, { status: 'Offer' });
-    const history = (await tyler.get(`/api/jobs/${jobId}`)).json.myApplication.history;
+    const history = mine((await tyler.get(`/api/jobs/${jobId}`)).json).history;
     expect(history.map((entry: any) => [entry.oldStatus, entry.newStatus])).toEqual([
       ['Recruiter Screen', 'Offer'],
       ['Applied', 'Recruiter Screen'],
@@ -55,8 +58,7 @@ describe('application status', () => {
     expect((await john.patch(`/api/applications/${tylerApp}`, { memo: 'hacked' })).status).toBe(404);
     expect((await john.delete(`/api/applications/${tylerApp}`)).status).toBe(404);
     expect((await john.post(`/api/applications/${tylerApp}/interviews`, INTERVIEW)).status).toBe(404);
-    const mine = (await tyler.get(`/api/jobs/${jobId}`)).json.myApplication;
-    expect(mine).toMatchObject({ status: 'Applied', memo: 'tyler private memo' });
+    expect(mine((await tyler.get(`/api/jobs/${jobId}`)).json)).toMatchObject({ status: 'Applied', memo: 'tyler memo' });
   });
 });
 
@@ -65,20 +67,20 @@ describe('memos', () => {
     const server = await createTestServer();
     const { tyler, jobId, tylerApp } = await jobWithTwoApplicants(server);
     await tyler.patch(`/api/applications/${tylerApp}`, { memo: 'updated' });
-    expect((await tyler.get(`/api/jobs/${jobId}`)).json.myApplication.memo).toBe('updated');
+    expect(mine((await tyler.get(`/api/jobs/${jobId}`)).json).memo).toBe('updated');
   });
 
-  it('never reach other users through any shared route', async () => {
+  it('are shared with everyone, along with interview notes', async () => {
     const server = await createTestServer();
     const { john, jobId, tylerApp, tyler } = await jobWithTwoApplicants(server);
-    await tyler.post(`/api/applications/${tylerApp}/interviews`, { ...INTERVIEW, note: 'tyler private note' });
-    const responses = await Promise.all([john.get(`/api/jobs/${jobId}`), john.get('/api/jobs'), john.get('/api/dashboard'), john.get('/api/interviews')]);
-    for (const response of responses) {
-      const text = JSON.stringify(response.json);
-      expect(text).not.toContain('tyler private');
-    }
-    // Searching for someone else's memo finds nothing.
-    expect((await john.get('/api/jobs?q=tyler%20private')).json.total).toBe(0);
+    await tyler.post(`/api/applications/${tylerApp}/interviews`, { ...INTERVIEW, note: 'tyler note' });
+    const job = (await john.get(`/api/jobs/${jobId}`)).json;
+    const tylers = job.applications.find((application: any) => application.owner.username === 'tyler');
+    expect(tylers).toMatchObject({ memo: 'tyler memo', isMine: false });
+    expect(tylers.interviews[0].note).toBe('tyler note');
+    expect((await john.get('/api/jobs')).json.items[0].applications[0].memoPreview).toBe('tyler memo');
+    // Anyone's memo can be found by searching.
+    expect((await john.get('/api/jobs?q=tyler%20memo')).json.total).toBe(1);
   });
 });
 
@@ -91,7 +93,7 @@ describe('interviews', () => {
     expect(created.json).toMatchObject({ scheduledAt: '2030-11-13T19:00:00.000Z', timezone: 'America/New_York', stage: 'Technical Interview' });
     await tyler.post(`/api/applications/${tylerApp}/interviews`, { stage: 'Recruiter Screen', scheduledAt: '2030-11-10T10:00:00Z', timezone: 'UTC', note: 'Call' });
     await tyler.post(`/api/applications/${tylerApp}/interviews`, { stage: 'Final Interview', scheduledAt: '2030-11-18T11:00:00Z', timezone: 'UTC' });
-    const list = (await tyler.get(`/api/jobs/${jobId}`)).json.myApplication.interviews;
+    const list = mine((await tyler.get(`/api/jobs/${jobId}`)).json).interviews;
     expect(list.map((item: any) => item.stage)).toEqual(['Recruiter Screen', 'Technical Interview', 'Final Interview']);
   });
 
@@ -180,12 +182,16 @@ describe('avatars', () => {
     expect(new Set([1, 2, 3, 4, 5, 6].map(avatarColor)).size).toBeGreaterThan(1);
   });
 
-  it('show who applied without saying anything else about them', async () => {
+  it('show who applied, and under which profile', async () => {
     const server = await createTestServer();
     const { john, jobId } = await jobWithTwoApplicants(server);
-    const { applicants } = (await john.get(`/api/jobs/${jobId}`)).json;
-    expect(applicants.map((applicant: any) => applicant.username)).toEqual(['tyler', 'john']);
-    expect(Object.keys(applicants[0]).sort()).toEqual(['color', 'displayName', 'id', 'initials', 'username']);
+    const { applications } = (await john.get(`/api/jobs/${jobId}`)).json;
+    expect(applications.map((application: any) => [application.owner.username, application.profile.name])).toEqual([
+      ['tyler', 'tyler'],
+      ['john', 'john']
+    ]);
+    expect(applications[0].owner.passwordHash).toBeUndefined();
+    expect(applications[0].profile).toMatchObject({ kind: 'profile', avatarVersion: null });
   });
 
   it('appear on a job once its second applicant joins, with one avatar each', async () => {
@@ -193,11 +199,12 @@ describe('avatars', () => {
     const { users } = await createUsers(server.app, 'tyler', 'john');
     server.http.serve('https://company.com/jobs/1', jobPage({ title: 'Engineer', company: 'Stripe' }));
     const first: any = await users.tyler.addJob('https://company.com/jobs/1');
-    expect((await users.john.get('/api/jobs')).json.items[0].applicants).toHaveLength(1);
-    const joined = await users.john.post(`/api/jobs/${first.jobId}/apply`, { memo: 'me too' });
+    expect((await users.john.get('/api/jobs')).json.items[0].applications).toHaveLength(1);
+    const profileId = await users.john.defaultProfileId();
+    const joined = await users.john.post(`/api/jobs/${first.jobId}/apply`, { memo: 'me too', profileId });
     expect(joined.json.outcome).toBe('created');
-    expect((await users.tyler.get('/api/jobs')).json.items[0].applicants).toHaveLength(2);
-    expect((await users.john.post(`/api/jobs/${first.jobId}/apply`, {})).json.outcome).toBe('already_applied');
+    expect((await users.tyler.get('/api/jobs')).json.items[0].applications).toHaveLength(2);
+    expect((await users.john.post(`/api/jobs/${first.jobId}/apply`, { profileId })).json.outcome).toBe('already_applied');
   });
 });
 
@@ -227,11 +234,11 @@ describe('search and filtering', () => {
     expect(titles(await tyler.get('/api/jobs?q=zzzz'))).toEqual([]);
   });
 
-  it('searches your own memo only', async () => {
+  it("searches everyone's memos", async () => {
     const { tyler, john } = await catalog();
     expect(titles(await tyler.get('/api/jobs?q=recruiter'))).toEqual(['Stripe']);
-    expect(titles(await john.get('/api/jobs?q=recruiter'))).toEqual([]);
-    expect(titles(await john.get('/api/jobs?q=john%20note'))).toEqual(['Notion']);
+    expect(titles(await john.get('/api/jobs?q=recruiter'))).toEqual(['Stripe']);
+    expect(titles(await tyler.get('/api/jobs?q=john%20note'))).toEqual(['Notion']);
   });
 
   it('survives search text with special characters', async () => {
@@ -257,12 +264,12 @@ describe('search and filtering', () => {
     expect(titles(await john.get('/api/jobs?scope=mine'))).toEqual(['Notion']);
   });
 
-  it('keeps personal filters to your own application', async () => {
+  it("matches status and stage on anyone's application, unless narrowed to your own", async () => {
     const { tyler, john } = await catalog();
-    // Tyler's status does not make the job match for John, who has not applied to it.
-    expect(titles(await john.get('/api/jobs?status=Technical%20Interview'))).toEqual([]);
-    expect(titles(await john.get('/api/jobs?stage=Technical%20Interview'))).toEqual([]);
-    expect(titles(await tyler.get('/api/jobs?status=Technical%20Interview'))).toEqual(['Stripe']);
+    expect(titles(await john.get('/api/jobs?status=Technical%20Interview'))).toEqual(['Stripe']);
+    expect(titles(await john.get('/api/jobs?stage=Technical%20Interview'))).toEqual(['Stripe']);
+    expect(titles(await john.get('/api/jobs?status=Technical%20Interview&scope=mine'))).toEqual([]);
+    expect(titles(await tyler.get('/api/jobs?status=Technical%20Interview&scope=mine'))).toEqual(['Stripe']);
   });
 
   it('filters by interview stage and date range', async () => {
@@ -308,10 +315,9 @@ describe('search and filtering', () => {
     expect(titles(await tyler.get('/api/jobs?q=wizard'))).toEqual([]);
   });
 
-  it('lets only the administrator change or delete shared job details', async () => {
+  it('lets only the administrator change shared job details', async () => {
     const { tyler, stripe } = await catalog();
     expect((await tyler.patch(`/api/jobs/${stripe.jobId}`, { title: 'Mine now' })).status).toBe(403);
-    expect((await tyler.delete(`/api/jobs/${stripe.jobId}`)).status).toBe(403);
   });
 });
 
@@ -335,7 +341,7 @@ describe('manual entry', () => {
     expect(saved).toMatchObject({ outcome: 'created', jobWasNew: true });
     const job = (await users.tyler.get(`/api/jobs/${saved.jobId}`)).json;
     expect(job).toMatchObject({ title: 'Typed Role', company: 'Typed Co', location: 'Remote', extractionMethod: 'manual', lastExtractedAt: null });
-    expect(job.myApplication.memo).toBe('my memo');
+    expect(job.applications[0].memo).toBe('my memo');
     expect(job.urls[0].originalUrl).toBe('https://blocked.com/jobs/1');
     // Only one read of the page: the draft carried the result over.
     expect(server.http.requests.filter((url) => url.includes('blocked.com'))).toHaveLength(1);
@@ -376,14 +382,16 @@ describe('persistence and backups', () => {
     const second = await createTestServer({ dataDir });
     const tyler = new ApiClient(second.app);
     await tyler.login('tyler', 'tyler-password');
-    expect((await tyler.get(`/api/jobs/${added.jobId}`)).json).toMatchObject({ title: 'Engineer', isHighlighted: true, myApplication: { status: 'Offer', memo: 'keep me' } });
+    const kept = (await tyler.get(`/api/jobs/${added.jobId}`)).json;
+    expect(kept).toMatchObject({ title: 'Engineer', isHighlighted: true });
+    expect(mine(kept)).toMatchObject({ status: 'Offer', memo: 'keep me' });
   });
 
   it('uses WAL mode and enforces foreign keys', async () => {
     const { ctx } = await createTestServer();
     expect(ctx.handle.sqlite.pragma('journal_mode', { simple: true })).toBe('wal');
     expect(ctx.handle.sqlite.pragma('foreign_keys', { simple: true })).toBe(1);
-    expect(() => ctx.db.$client.prepare('INSERT INTO applications (user_id, job_id) VALUES (999, 999)').run()).toThrow(/FOREIGN KEY/);
+    expect(() => ctx.db.$client.prepare('INSERT INTO applications (user_id, profile_id, job_id) VALUES (999, 999, 999)').run()).toThrow(/FOREIGN KEY/);
   });
 
   it('backs up and restores, saving the current data first', async () => {

@@ -1,6 +1,6 @@
 # Job Tracker
 
-A desktop app for tracking job applications across several people on the same local network. One computer hosts the data, the others connect to it, and everyone shares one list of jobs while keeping their own status, memos and interviews private.
+A desktop app for tracking job applications across several people on the same local network. One computer hosts the data, the others connect to it, and everyone shares everything: one list of jobs, and each other's profiles, statuses, memos and interviews. Each person can only change their own.
 
 Nothing leaves your network except requests to read the job postings you add. There are no cloud databases and no accounts with anyone else.
 
@@ -63,17 +63,58 @@ If the connection fails, see [Network setup](#network-setup).
 
 ### 5. Add and track a job
 
-1. Choose **Add job**, paste the job's URL and optionally a memo, then choose **Save Application**.
+1. Choose **+** (or press Ctrl+N), paste the job's URL, pick the **profile** you applied with, optionally add a memo, then choose **✓**.
 2. The host reads the page and fills in the title, company, location and full description.
 3. Open the job to change your status, edit your memo, or schedule interviews. Changes save as you make them.
+
+### 6. Set up profiles and photos
+
+Under **Settings**, you can upload your own photo and manage **My profiles**. Everyone starts with one profile, named after them. Each profile has its own name and photo, and you can have as many as you like. A profile with applications can be archived but not deleted, so that its history stays. You always keep at least one active profile.
+
+Each profile can apply to a job once, so one person can apply to the same job under several profiles. Photos can be PNG, JPG or WebP. They are cropped to a square and shrunk before upload. Where there is no photo, the initials are shown. An administrator can remove any photo.
+
+### 7. See how everyone is doing
+
+**All Jobs** shows every job with an avatar per profile that applied, marked with its current stage. Use the arrow on a row, or the expand button at the top, to see each profile's stages and next interview. The filter button opens filters for **Person**, **Profile**, status and dates, and the sort menu includes **Most applied**, to see which jobs the most people went for.
+
+**Team** has a summary table and a chart per person, for all their profiles together or one at a time:
+
+| Rate | Calculation |
+| --- | --- |
+| Screen pass | Reached Recruiter Screen ÷ all applications |
+| Technical pass | Reached Technical Interview ÷ reached Recruiter Screen |
+| Interview pass | Reached Final Interview ÷ reached Technical Interview |
+| Offer pass | Reached Offer ÷ reached Final Interview |
+| Success | Reached Offer ÷ all applications |
+
+"Reached" means the highest stage in the status history. A job that got to Technical Interview and was later rejected still counts as reaching it, and a skipped stage counts as passed. A rate shows **–** when nothing reached the stage before it.
 
 | What happens | When |
 | --- | --- |
 | A new shared job is created | Nobody has added this job before |
-| You are added to the existing job | The link, posting ID or content shows it is a job already in the list |
+| Your profile is added to the existing job | The link, posting ID or content shows it is a job already in the list |
 | You are asked "Is this one of these jobs?" | It looks similar but the evidence is not conclusive |
-| You are shown your existing application | You already applied to this job |
+| You are shown the existing application | That profile already applied to this job. Choose another profile to apply under it too |
 | You are asked to type in the details | The page could not be read, for example behind a bot check, or the posting was removed |
+
+### 8. Delete a job
+
+You can delete a job when only your own profiles have applied to it: hover over its row, or open it, and choose the trash icon. This removes the job, its links and those applications. If anyone else has applied, it is not offered and the host refuses it, so nobody loses their data. An administrator can delete any job.
+
+## What the symbols mean
+
+The app uses symbols instead of words. Hover over any of them to see its name.
+
+| Symbol | Meaning |
+| --- | --- |
+| ✈ | Applied |
+| 📞 | Recruiter Screen |
+| `</>` | Technical Interview |
+| 👥 | Final Interview |
+| 🏆 | Offer |
+| ✕ | Rejected |
+
+In a process line, stages already passed are green, the current stage is outlined in its color, and stages still to come are grey.
 
 ## Network setup
 
@@ -143,19 +184,20 @@ Each new link goes through these layers, stopping at the first conclusive one. A
 
 Layer D merges automatically only when the company and title match and either the description is at least 85% the same or a substantial description is at least 85% contained in the other, or when both quote the same requisition number. Different requisition numbers, different IDs on the same system, or different locations all block a merge. In those cases you are asked if the text is nearly identical, and otherwise they stay separate jobs.
 
-These rules are backed by database constraints: one application per person per job, one job per normalized link, one job per posting ID. So concurrent submissions cannot create duplicates.
+These rules are backed by database constraints: one application per profile per job, one job per normalized link, one job per posting ID. So concurrent submissions cannot create duplicates.
 
 ## Who can see what
+
+Everything about applications is shared with everyone who can sign in. Only the owner can change it.
 
 | | Everyone | Only you | Administrator only |
 | --- | --- | --- | --- |
 | Job title, company, description, links | See | | Correct or delete |
-| Who applied (avatars) | See | | |
 | Highlights | See and change | | |
-| Your status, memo, interviews, history | | See and change | |
+| Statuses, memos, interviews, history, profiles, photos, statistics | See | Change your own | Remove any photo |
 | User accounts and backups | | | Manage |
 
-The administrator cannot read other people's memos or interviews through the app.
+Memos and interview notes are visible to everyone on the host, so keep anything truly private out of them. Passwords and sessions are never shown to anyone.
 
 ## Security
 
@@ -196,14 +238,35 @@ tests/live     Opt-in checks against real job sites
 
 To change the database schema, edit `src/server/db/schema.ts` and run `npm run db:generate`. Migrations are applied automatically when the host starts.
 
+## Speed
+
+Measured on one Windows PC with 10,000 jobs, 10 users, 5 profiles each, about 22,000 applications and 13,500 interviews. Run it yourself with the commands under [Testing](#testing).
+
+- **Long lists:** the job list only creates the rows on screen and loads pages as you scroll, so it costs the same at job 10,000 as at job 1.
+- **Sorting:** the number of applications and latest activity are kept on each job by database triggers and indexed, so sorting by them does not count anything.
+- **Search:** memos and job text use SQLite full-text indexes with prefix support. Search matches the beginning of words in memos and descriptions, and any part of a company or job title.
+- **Repeat requests:** finished responses are reused until something changes. Any write clears them, and none lives longer than 15 seconds, so nobody sees old data.
+- **Live updates:** a burst of changes refreshes once, and only what is on screen.
+
 ## Testing
 
 ```powershell
 npm test                                 # the full suite: no internet needed
 npm run typecheck
+npm run loadtest                         # server speed with 10,000 jobs, no internet needed
+npm run build; npm run loadtest:ui       # desktop app speed with 10,000 jobs, no internet needed
 npm run survey -- --file links.txt       # live: extraction over your own links
 npm run survey -- --cross-platform       # live: one real job through several sites
 npm run build; npm run e2e               # live: drives the real app, one host and two clients
 ```
 
 To run the end-to-end script against a packaged or installed copy, set `E2E_EXECUTABLE` to the path of `Job Tracker.exe` first.
+
+To explore the 10,000-job data yourself, keep the data from a speed test and open it in development mode:
+
+```powershell
+npm run build; npm run loadtest:ui -- --keep "$env:TEMP\jt-load"
+$env:JOB_TRACKER_USER_DATA = "$env:TEMP\jt-load"; npm run dev
+```
+
+Sign in as `load-user-01` to `load-user-10` with the password `load-password`, or as `admin` with `load-admin-password`. All of the jobs are made up.

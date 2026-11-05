@@ -109,8 +109,8 @@ try {
   await host.page.getByLabel('New password', { exact: true }).fill('host-admin-password');
   await host.page.getByLabel('New password again').fill('host-admin-password');
   await host.page.getByRole('button', { name: 'Save and continue' }).click();
-  await host.page.getByRole('heading', { name: /Welcome back, admin/ }).waitFor();
-  check('admin reaches the dashboard', true);
+  await host.page.getByRole('heading', { name: 'All Jobs' }).waitFor();
+  check('admin lands on All Jobs', true);
 
   await nav(host.page, 'Users');
   await addUser(host.page, 'tyler', 'tyler-password', 'Tyler Morgan');
@@ -132,7 +132,7 @@ try {
   await pairClient(tyler.page, address, state.host.fingerprint);
   await tyler.page.getByRole('heading', { name: 'Sign in' }).waitFor({ timeout: 15_000 });
   await signIn(tyler.page, 'tyler', 'tyler-password');
-  await tyler.page.getByRole('heading', { name: /Welcome back, Tyler Morgan/ }).waitFor();
+  await tyler.page.getByRole('heading', { name: 'All Jobs' }).waitFor();
   check('Tyler signed in from "computer B"', true);
   check('regular user has no Users page', (await tyler.page.getByRole('navigation', { name: 'Main' }).getByRole('button', { name: 'Users' }).count()) === 0);
 
@@ -140,7 +140,7 @@ try {
   await pairClient(john.page, address, state.host.fingerprint);
   await john.page.getByRole('heading', { name: 'Sign in' }).waitFor({ timeout: 15_000 });
   await signIn(john.page, 'john', 'john-password');
-  await john.page.getByRole('heading', { name: /Welcome back, John Doe/ }).waitFor();
+  await john.page.getByRole('heading', { name: 'All Jobs' }).waitFor();
   check('John signed in from "computer C"', true);
 
   console.log('\nTyler adds a Built In link');
@@ -155,7 +155,7 @@ try {
   await shot(tyler.page, '07-job-detail');
   console.log(`  extracted: ${title}`);
   check('title, company and description were extracted automatically', !!title);
-  check('memo was saved', (await tyler.page.getByLabel('Memo').inputValue()) === MEMO);
+  check('memo was saved', (await tyler.page.locator('textarea[aria-label="Memo"]').inputValue()) === MEMO);
   await tyler.page.getByRole('button', { name: 'Close', exact: true }).click();
 
   console.log('\nJohn adds the equivalent Jobright link');
@@ -188,27 +188,28 @@ try {
   await nav(tyler.page, 'My Applications');
   await tyler.page.getByRole('combobox', { name: 'Application status' }).first().click();
   await tyler.page.getByRole('option', { name: 'Technical Interview' }).click();
-  await tyler.page.getByRole('combobox', { name: 'Application status' }).first().getByText('Technical Interview').waitFor();
+  await tyler.page.getByRole('combobox', { name: 'Application status' }).first().getByRole('img', { name: 'Technical Interview' }).waitFor();
   await john.page.getByRole('combobox', { name: 'Application status' }).first().click();
   await john.page.getByRole('option', { name: 'Recruiter Screen' }).click();
-  await john.page.getByRole('combobox', { name: 'Application status' }).first().getByText('Recruiter Screen').waitFor();
+  await john.page.getByRole('combobox', { name: 'Application status' }).first().getByRole('img', { name: 'Recruiter Screen' }).waitFor();
 
-  const statusOf = (instance) => instance.page.evaluate(async () => (await window.jobTracker.api('GET', '/api/jobs')).data.items[0].myApplication.status);
+  const statusOf = (instance) => instance.page.evaluate(async () => (await window.jobTracker.api('GET', '/api/jobs')).data.items[0].applications.find((application) => application.isMine).status);
   check('Tyler is at Technical Interview', (await statusOf(tyler)) === 'Technical Interview');
   check('John is at Recruiter Screen, independently', (await statusOf(john)) === 'Recruiter Screen');
 
   console.log('\nTyler schedules an interview');
   await tyler.page.getByRole('row').nth(1).click();
   await tyler.page.getByRole('button', { name: 'Schedule' }).click();
-  await tyler.page.getByLabel('Date').fill('2030-11-13');
-  await tyler.page.getByLabel('Time').fill('14:00');
-  await tyler.page.getByLabel('Note (optional)').fill('Video call with the hiring team');
+  const scheduleForm = tyler.page.getByRole('dialog', { name: 'Schedule interview' });
+  await scheduleForm.getByLabel('Date').fill('2030-11-13');
+  await scheduleForm.getByLabel('Time').fill('14:00');
+  await scheduleForm.getByLabel('Note (optional)').fill('Video call with the hiring team');
   await tyler.page.getByRole('dialog', { name: 'Schedule interview' }).getByRole('button', { name: 'Save' }).click();
   await tyler.page.getByText('Video call with the hiring team').waitFor();
   await shot(tyler.page, '10-interview-history');
   await tyler.page.getByRole('button', { name: 'Close', exact: true }).click();
-  const hidden = await john.page.evaluate(async () => JSON.stringify((await window.jobTracker.api('GET', '/api/jobs')).data) + JSON.stringify((await window.jobTracker.api('GET', '/api/interviews')).data));
-  check("Tyler's memo and interview stay hidden from John", !hidden.includes('Recruiter contacted') && !hidden.includes('Video call'));
+  const shared = await john.page.evaluate(async () => JSON.stringify((await window.jobTracker.api('GET', '/api/jobs')).data) + JSON.stringify((await window.jobTracker.api('GET', '/api/interviews?person=all')).data));
+  check("Tyler's memo and interview are visible to John", shared.includes('Recruiter contacted') && shared.includes('Video call'));
 
   console.log('\nJohn highlights the job');
   await john.page.getByRole('button', { name: 'Close', exact: true }).click().catch(() => undefined);
@@ -223,16 +224,17 @@ try {
 
   console.log('\nFiltering');
   await nav(tyler.page, 'My Applications');
-  const company = (await tyler.page.getByRole('row').nth(1).getByRole('cell').first().innerText()).trim();
-  const results = () => tyler.page.locator('tbody tr').count();
+  const company = (await tyler.page.getByRole('row').nth(1).getByRole('cell').nth(1).innerText()).trim();
+  const results = () => tyler.page.locator('[data-job-row]').count();
+  await tyler.page.getByRole('button', { name: 'Filters' }).click();
   const settle = () => tyler.page.waitForTimeout(500);
-  await tyler.page.getByLabel('Company').fill(company.slice(0, 6));
+  await tyler.page.locator('input[aria-label="Company"]').fill(company.slice(0, 6));
   await settle();
   check('company filter finds it', (await results()) === 1);
   await tyler.page.getByLabel('Search').fill('recruiter');
   await settle();
   check('memo search finds it', (await results()) === 1);
-  await tyler.page.getByRole('combobox', { name: 'My status' }).click();
+  await tyler.page.getByRole('combobox', { name: 'Status filter' }).click();
   await tyler.page.getByRole('option', { name: 'Technical Interview' }).click();
   await settle();
   await tyler.page.getByLabel('Interviews from').fill('2030-11-01');
@@ -264,6 +266,77 @@ try {
   check('the theme setting really changes the app', darkBackground === 'rgb(15, 17, 21)' && lightBackground === 'rgb(247, 247, 248)', `${darkBackground} / ${lightBackground}`);
   await tyler.page.evaluate(() => window.jobTracker.setTheme('system'));
 
+  console.log('\nProfiles, photos and the shared process view');
+  // A one-pixel PNG: the app decodes, crops and re-encodes it, as it would a real photo.
+  const PIXEL = { name: 'photo.png', mimeType: 'image/png', buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64') };
+  await nav(tyler.page, 'Settings');
+  await tyler.page.getByRole('heading', { name: 'My profiles' }).waitFor();
+  await tyler.page.getByLabel('Upload photo for Tyler Morgan (tyler)').setInputFiles(PIXEL);
+  await tyler.page.getByText('Photo updated.').first().waitFor();
+  const avatarVersion = await tyler.page.evaluate(async () => (await window.jobTracker.api('GET', '/api/auth/me')).data.avatarVersion);
+  check('Tyler uploaded his own photo', !!avatarVersion);
+  await tyler.page.getByRole('button', { name: 'New profile' }).click();
+  await tyler.page.getByLabel('Profile name').fill('Backend');
+  await tyler.page.getByRole('dialog').getByRole('button', { name: 'Create profile' }).click();
+  await tyler.page.getByRole('button', { name: 'Rename Backend' }).waitFor();
+  await tyler.page.getByLabel('Upload photo for Backend').setInputFiles(PIXEL);
+  await tyler.page.waitForFunction(async () => (await window.jobTracker.api('GET', '/api/profiles')).data.profiles.some((profile) => profile.name === 'Backend' && profile.avatarVersion));
+  check('...and a second profile with its own photo', true);
+  await shot(tyler.page, '21-profiles');
+
+  await nav(tyler.page, 'All Jobs');
+  await tyler.page.locator('[data-job-row]').first().click();
+  await tyler.page.getByRole('button', { name: 'I applied with this profile' }).click();
+  await tyler.page.getByRole('img', { name: /Backend \(Tyler Morgan\)/ }).first().waitFor({ timeout: 10_000 });
+  check('one person can apply to a job under a second profile', true);
+  await tyler.page.getByRole('button', { name: 'Close', exact: true }).click();
+
+  await john.page.getByRole('img', { name: /Backend \(Tyler Morgan\)/ }).first().waitFor({ timeout: 10_000 });
+  check("the new profile's avatar reached John's screen live", true);
+  await john.page.locator('img[src^="data:image/"]').first().waitFor({ timeout: 10_000 });
+  check("John's screen shows the uploaded photo, not initials", true);
+  await john.page.getByRole('button', { name: /Show interview process/ }).first().click();
+  await john.page.getByLabel('Current stage: Technical Interview').first().waitFor();
+  await john.page.getByLabel('Next interview').first().waitFor();
+  check("All Jobs shows each profile's interview process to everyone", true);
+  await shot(john.page, '22-all-jobs-process');
+
+  await john.page.getByRole('combobox', { name: 'Sort by' }).click();
+  await john.page.getByRole('option', { name: 'Most applied' }).click();
+  await john.page.waitForTimeout(400);
+  check('Most applied sort is offered and leaves the list intact', (await john.page.locator('[data-job-row]').getByRole('img', { name: /Backend/ }).count()) > 0);
+
+  await john.page.locator('[data-job-row]').first().click();
+  await john.page.getByText('Recruiter contacted me.').first().waitFor();
+  await john.page.getByText('Video call with the hiring team').first().waitFor();
+  check("John can read Tyler's memo and interview in the job details", true);
+  await shot(john.page, '23-job-detail-shared');
+  const johnCanEdit = await john.page.evaluate(async () => {
+    const list = (await window.jobTracker.api('GET', '/api/jobs')).data;
+    const theirs = list.items[0].applications.find((application) => !application.isMine);
+    return (await window.jobTracker.api('PATCH', `/api/applications/${theirs.id}`, { status: 'Rejected' })).status;
+  });
+  check("John still cannot change Tyler's application", johnCanEdit === 404, String(johnCanEdit));
+  await john.page.getByRole('button', { name: 'Close', exact: true }).click();
+
+  await nav(tyler.page, 'Team');
+  await tyler.page.getByRole('heading', { name: 'Team', exact: true }).waitFor();
+  await tyler.page.getByLabel('Technical pass').first().waitFor();
+  await tyler.page.evaluate(() => window.jobTracker.setTheme('light'));
+  await tyler.page.waitForTimeout(400);
+  await shot(tyler.page, '24-team');
+  const team = await tyler.page.evaluate(async () => (await window.jobTracker.api('GET', '/api/team')).data);
+  const tylerStats = team.find((member) => member.user.username === 'tyler').stats;
+  check(
+    'Team reports the right numbers for Tyler',
+    tylerStats.applications === 2 && tylerStats.interviews === 1 && tylerStats.technical === 1 && tylerStats.offers === 0 && tylerStats.screenPass.percent === 50 && tylerStats.technicalPass.percent === 100,
+    JSON.stringify(tylerStats)
+  );
+  await tyler.page.evaluate(() => window.jobTracker.setTheme('dark'));
+  await tyler.page.waitForTimeout(300);
+  await shot(tyler.page, '25-team-dark');
+  await tyler.page.evaluate(() => window.jobTracker.setTheme('system'));
+
   console.log('\nHost goes away');
   await close(host);
   await tyler.page.getByText('Cannot reach the host.').waitFor({ timeout: 40_000 });
@@ -280,18 +353,19 @@ try {
   await close(tyler);
   await close(john);
   const hostAgain = await launch('computer-a');
-  await hostAgain.page.getByRole('heading', { name: /Welcome back, admin/ }).waitFor({ timeout: 30_000 });
+  await hostAgain.page.getByRole('heading', { name: 'All Jobs' }).waitFor({ timeout: 30_000 });
   check('host restarted by itself and remembered the session', true);
   const tylerAgain = await launch('computer-b');
-  await tylerAgain.page.getByRole('heading', { name: /Welcome back, Tyler Morgan/ }).waitFor({ timeout: 20_000 });
+  await tylerAgain.page.getByRole('heading', { name: 'All Jobs' }).waitFor({ timeout: 20_000 });
   check('client reconnected by itself and remembered the session', true);
   const after = await tylerAgain.page.evaluate(async () => {
     const list = (await window.jobTracker.api('GET', '/api/jobs')).data;
     const detail = (await window.jobTracker.api('GET', `/api/jobs/${list.items[0].id}`)).data;
-    return { total: list.total, applicants: detail.applicants.length, highlighted: detail.isHighlighted, status: detail.myApplication.status, memo: detail.myApplication.memo, interviews: detail.myApplication.interviews.length, urls: detail.urls.length };
+    const first = detail.applications.find((application) => application.isMine);
+    return { total: list.total, applications: detail.applications.length, highlighted: detail.isHighlighted, status: first.status, memo: first.memo, interviews: first.interviews.length, urls: detail.urls.length };
   });
   console.log(`  after restart: ${JSON.stringify(after)}`);
-  check('job, applicants, highlight, status, memo and interview all persisted', after.total === 1 && after.applicants === 2 && after.highlighted && after.status === 'Technical Interview' && after.memo === MEMO && after.interviews === 1 && after.urls >= 2);
+  check('job, applications, highlight, status, memo and interview all persisted', after.total === 1 && after.applications === 3 && after.highlighted && after.status === 'Technical Interview' && after.memo === MEMO && after.interviews === 1 && after.urls >= 2);
 
   console.log('\nThe other ways adding a job can go');
   const addJob = async (url) => {
@@ -302,12 +376,12 @@ try {
   const closeDetail = () => tylerAgain.page.getByRole('button', { name: 'Close', exact: true }).click();
 
   await addJob(BUILT_IN_URL);
-  await tylerAgain.page.getByRole('heading', { name: 'You already applied to this job' }).waitFor({ timeout: 30_000 });
+  await tylerAgain.page.getByRole('heading', { name: 'This profile already applied to this job' }).waitFor({ timeout: 30_000 });
   await shot(tylerAgain.page, '18-already-applied');
-  check('adding a job twice shows the existing application', true);
-  await tylerAgain.page.getByRole('button', { name: 'Open my application' }).click();
-  await tylerAgain.page.getByLabel('Memo').waitFor();
-  check('...and offers to open it', (await tylerAgain.page.getByLabel('Memo').inputValue()) === MEMO);
+  check('adding a job twice under one profile shows the existing application', true);
+  await tylerAgain.page.getByRole('button', { name: 'Open the job' }).click();
+  await tylerAgain.page.locator('textarea[aria-label="Memo"]').first().waitFor();
+  check('...and offers to open it', (await tylerAgain.page.locator('textarea[aria-label="Memo"]').first().inputValue()) === MEMO);
   await closeDetail();
 
   const JOBDIVA_URL = 'https://www1.jobdiva.com/portal/?a=9xjdnw687b7a7nvvdyut936kpjlgy0023blrozaecads0pdnwppcswnaaku8ji2g#/jobs/29382464';
@@ -316,12 +390,13 @@ try {
   await tylerAgain.page.getByText(/bot check|could not find|closed or removed/i).first().waitFor();
   await shot(tylerAgain.page, '19-manual-entry');
   check('an unreadable page explains why and asks for the details', true);
-  await tylerAgain.page.getByLabel('Job title').fill('Data Engineer');
-  await tylerAgain.page.getByLabel('Company', { exact: true }).fill('Typed By Hand Inc');
-  await tylerAgain.page.getByLabel('Job description').fill('The description, pasted in by hand because the site showed a bot check.');
+  const manualForm = tylerAgain.page.getByRole('dialog');
+  await manualForm.getByLabel('Job title').fill('Data Engineer');
+  await manualForm.getByLabel('Company', { exact: true }).fill('Typed By Hand Inc');
+  await manualForm.getByLabel('Job description').fill('The description, pasted in by hand because the site showed a bot check.');
   await tylerAgain.page.getByRole('button', { name: 'Save application' }).click();
   await tylerAgain.page.getByRole('heading', { level: 2, name: 'Data Engineer' }).waitFor({ timeout: 30_000 });
-  await tylerAgain.page.getByText('Details entered by hand.').waitFor();
+  await tylerAgain.page.getByLabel('Details entered by hand.').waitFor();
   check('...and saves what was typed', true);
   await closeDetail();
 
@@ -334,7 +409,7 @@ try {
   await shot(tylerAgain.page, '20-possible-duplicate');
   check('an uncertain match asks, and says why', true);
   await tylerAgain.page.getByRole('button', { name: 'Same job' }).first().click();
-  await tylerAgain.page.getByRole('heading', { name: 'You already applied to this job' }).waitFor({ timeout: 30_000 });
+  await tylerAgain.page.getByRole('heading', { name: 'This profile already applied to this job' }).waitFor({ timeout: 30_000 });
   await tylerAgain.page.getByRole('button', { name: 'Close', exact: true }).last().click();
   const gravie = await tylerAgain.page.evaluate(async () => {
     const list = (await window.jobTracker.api('GET', '/api/jobs?q=gravie')).data;
@@ -342,6 +417,24 @@ try {
     return { total: list.total, platforms: detail.urls.map((url) => url.sourcePlatform) };
   });
   check('confirming keeps one job and saves the new link for it', gravie.total === 1 && gravie.platforms.includes('jobright') && gravie.platforms.includes('ashby'), JSON.stringify(gravie));
+
+  console.log('\nDeleting a job');
+  const typed = await tylerAgain.page.evaluate(async () => (await window.jobTracker.api('GET', '/api/jobs?q=Typed')).data.items[0]);
+  await nav(tylerAgain.page, 'All Jobs');
+  await tylerAgain.page.getByLabel('Search').fill('Typed');
+  const typedRow = tylerAgain.page.locator('[data-job-row]', { hasText: 'Typed By Hand' });
+  await typedRow.waitFor();
+  await typedRow.hover();
+  await typedRow.getByRole('button', { name: /^Delete / }).click();
+  await tylerAgain.page.getByRole('dialog').getByRole('button', { name: 'Delete' }).click();
+  await tylerAgain.page.getByText('Nothing matches these filters').waitFor();
+  const afterDelete = await tylerAgain.page.evaluate(async (id) => (await window.jobTracker.api('GET', `/api/jobs/${id}`)).status, typed.id);
+  check('someone can delete a job only they applied to', afterDelete === 404, String(afterDelete));
+  await tylerAgain.page.getByLabel('Search').fill('');
+  const sharedJob = await tylerAgain.page.evaluate(async () => (await window.jobTracker.api('GET', '/api/jobs?sort=applicants&limit=1')).data.items[0]);
+  check('...and is not offered it on a job someone else applied to', (await tylerAgain.page.locator('[data-job-row]', { hasText: sharedJob.title }).first().getByRole('button', { name: /^Delete / }).count()) === 0);
+  const refusedDelete = await tylerAgain.page.evaluate(async (id) => (await window.jobTracker.api('DELETE', `/api/jobs/${id}`)).status, sharedJob.id);
+  check('...and the server refuses it too', refusedDelete === 403, String(refusedDelete));
 
   console.log('\nBackup');
   await nav(hostAgain.page, 'Settings');

@@ -33,6 +33,17 @@ export function formatRelative(iso: string, now = Date.now()): string {
   return 'just now';
 }
 
+/** "now", "5m", "3h", "2d", "4mo", "1y". The full date is in the tooltip. */
+export function formatShortAgo(iso: string, now = Date.now()): string {
+  const seconds = Math.max(0, (now - new Date(iso).getTime()) / 1000);
+  if (seconds < 60) return 'now';
+  if (seconds < 3_600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3_600)}h`;
+  if (seconds < 2_592_000) return `${Math.floor(seconds / 86_400)}d`;
+  if (seconds < 31_536_000) return `${Math.floor(seconds / 2_592_000)}mo`;
+  return `${Math.floor(seconds / 31_536_000)}y`;
+}
+
 export const localTimeZone = (): string => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 /** What a <input type="datetime-local"> holds, for a UTC instant, in this computer's timezone. */

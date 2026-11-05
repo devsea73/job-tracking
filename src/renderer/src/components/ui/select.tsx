@@ -19,12 +19,16 @@ interface SelectProps {
   /** Replaces the default trigger's look, e.g. a status badge. */
   renderValue?: ReactNode;
   triggerClassName?: string;
+  /** A symbol in front of the value. */
+  leading?: ReactNode;
+  /** Shows only the symbol. The choices appear when opened. */
+  hideValue?: boolean;
 }
 
 /** Radix treats the empty string as "nothing selected", so "all" options travel as this value. */
 export const ANY = '__any__';
 
-export function Select({ value, onChange, options, placeholder, className, ariaLabel, disabled, renderValue, triggerClassName }: SelectProps) {
+export function Select({ value, onChange, options, placeholder, className, ariaLabel, disabled, renderValue, triggerClassName, leading, hideValue }: SelectProps) {
   return (
     <RadixSelect.Root value={value} onValueChange={onChange} disabled={disabled}>
       <RadixSelect.Trigger
@@ -38,7 +42,14 @@ export function Select({ value, onChange, options, placeholder, className, ariaL
           triggerClassName
         )}
       >
-        {renderValue ?? <RadixSelect.Value placeholder={placeholder} />}
+        {renderValue ?? (
+          <span className="flex min-w-0 items-center gap-1.5 truncate">
+            {leading}
+            <span className={hideValue ? 'sr-only' : 'truncate'}>
+              <RadixSelect.Value placeholder={placeholder} />
+            </span>
+          </span>
+        )}
         {renderValue ? null : (
           <RadixSelect.Icon>
             <ChevronDown className="size-3.5 text-ink-3" />

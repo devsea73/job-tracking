@@ -159,6 +159,8 @@ function createWindow(): void {
       sandbox: true,
       webSecurity: true,
       spellcheck: false,
+      // Keeps compiled JavaScript on disk, so that later starts skip compiling it again.
+      v8CacheOptions: 'bypassHeatCheck',
       devTools: !app.isPackaged
     }
   });

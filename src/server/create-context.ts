@@ -7,6 +7,7 @@ import { EventBus } from './events';
 import type { HttpClient } from './extraction/safe-fetch';
 import type { PageRenderer } from './extraction/types';
 import type { Logger } from './logger';
+import { ReadCache } from './read-cache';
 import { DraftStore } from './services/drafts';
 import { ensureInitialAdmin } from './services/users';
 
@@ -34,7 +35,8 @@ export async function createContext(options: ContextOptions): Promise<AppContext
     new DraftStore(),
     options.logger,
     { dataDir: options.dataDir, migrationsDir: options.migrationsDir, backupDir: join(options.dataDir, 'backups') },
-    options.version
+    options.version,
+    new ReadCache()
   );
   await ensureInitialAdmin(ctx);
   return ctx;

@@ -15,6 +15,20 @@
       "when": 1793855051495,
       "tag": "0001_search_index",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1793894563759,
+      "tag": "0002_profiles_and_avatars",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1793896109667,
+      "tag": "0003_speed",
+      "breakpoints": true
     }
   ]
 }

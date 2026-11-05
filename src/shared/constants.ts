@@ -25,11 +25,17 @@ export type InterviewStage = (typeof INTERVIEW_STAGES)[number];
 export const USER_ROLES = ['admin', 'user'] as const;
 export type UserRole = (typeof USER_ROLES)[number];
 
-export const JOB_SORTS = ['recent', 'updated', 'company', 'interview', 'status'] as const;
+export const JOB_SORTS = ['recent', 'updated', 'company', 'interview', 'status', 'applicants'] as const;
 export type JobSort = (typeof JOB_SORTS)[number];
 
 export const JOB_SCOPES = ['all', 'mine', 'others'] as const;
 export type JobScope = (typeof JOB_SCOPES)[number];
+
+export const PROFILE_NAME_MAX = 64;
+
+/** Avatars are shrunk to this square in the app before upload. */
+export const AVATAR_SIZE_PX = 256;
+export const AVATAR_MAX_BYTES = 512 * 1024;
 
 export const DEFAULT_PORT = 3847;
 

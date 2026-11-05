@@ -5,6 +5,7 @@ import {
   JOB_SCOPES,
   JOB_SORTS,
   PASSWORD_MIN_LENGTH,
+  PROFILE_NAME_MAX,
   USERNAME_PATTERN
 } from '../shared/constants';
 import { badRequest } from './errors';
@@ -64,8 +65,11 @@ export const manualJobFields = z.object({
   location: z.string().trim().max(300).nullable().optional()
 });
 
+const profileId = z.number({ message: 'Choose a profile.' }).int().positive('Choose a profile.');
+
 export const createApplicationBody = z.object({
   url: z.string().trim().min(1, 'Job URL is required.').max(4_000, 'That link is too long.'),
+  profileId,
   memo: memo.optional(),
   resolution: z
     .discriminatedUnion('action', [
@@ -77,7 +81,18 @@ export const createApplicationBody = z.object({
   draftId: z.string().uuid().optional()
 });
 
-export const applyToJobBody = z.object({ memo: memo.optional() });
+export const applyToJobBody = z.object({ profileId, memo: memo.optional() });
+
+const profileName = z.string().trim().min(1, 'Give the profile a name.').max(PROFILE_NAME_MAX, `Use at most ${PROFILE_NAME_MAX} characters.`);
+
+export const createProfileBody = z.object({ name: profileName });
+
+export const updateProfileBody = z
+  .object({ name: profileName.optional(), isArchived: z.boolean().optional() })
+  .refine((body) => body.name !== undefined || body.isArchived !== undefined, 'Nothing to update.');
+
+/** Base64 runs a third longer than the image it holds, so this is a generous outer limit. */
+export const avatarBody = z.object({ image: z.string().min(1).max(1_000_000, 'That image is too large.') });
 
 export const updateApplicationBody = z
   .object({ status: z.enum(APPLICATION_STATUSES).optional(), memo: memo.optional() })
@@ -107,10 +122,15 @@ export const interviewBody = z.object({
   note: z.string().trim().max(5_000).nullable().optional()
 });
 
+const queryId = z.coerce.number().int().positive();
+
 export const interviewQuery = z.object({
   from: instant.optional(),
   to: instant.optional(),
-  stage: z.enum(INTERVIEW_STAGES).optional()
+  stage: z.enum(INTERVIEW_STAGES).optional(),
+  person: z.union([z.literal('all'), queryId]).optional(),
+  profileId: queryId.optional(),
+  limit: z.coerce.number().int().min(1).max(5_000).optional()
 });
 
 const queryBoolean = z.enum(['true', 'false']).transform((value) => value === 'true');
@@ -124,9 +144,11 @@ export const jobListQuery = z.object({
   interviewTo: instant.optional(),
   highlighted: queryBoolean.optional(),
   scope: z.enum(JOB_SCOPES).optional(),
+  personId: queryId.optional(),
+  profileId: queryId.optional(),
   sort: z.enum(JOB_SORTS).optional(),
   highlightFirst: queryBoolean.optional(),
-  limit: z.coerce.number().int().min(1).max(500).optional(),
+  limit: z.coerce.number().int().min(1).max(5_000).optional(),
   offset: z.coerce.number().int().min(0).optional()
 });
 

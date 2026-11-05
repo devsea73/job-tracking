@@ -59,6 +59,8 @@ export function compareJobs(incoming: ComparableJob, existing: ComparableJob): C
   const sameCompany = companyA.length > 0 && companyA === companyB;
   const relatedCompany = !sameCompany && companiesRelated(companyA, companyB);
   const titleScore = titleSimilarity(incoming.title, existing.title);
+  // Every match below needs at least this, so unrelated titles skip the costly text comparison.
+  if (titleScore < THRESHOLDS.possibleTitle) return { decision: 'none', score: 0, reasons };
   const location = compareLocations(incoming.location, existing.location);
 
   const hashA = hashDescription(incoming.description);

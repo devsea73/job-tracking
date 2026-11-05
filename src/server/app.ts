@@ -9,9 +9,11 @@ import { hashDescription, normalizeCompany, normalizeTitle } from './dedupe/text
 import { ApiError, forbidden, notFound, unauthorized } from './errors';
 import { isLanAddress } from './network';
 import * as applicationsService from './services/applications';
+import * as avatarsService from './services/avatars';
 import * as backupsService from './services/backups';
 import { applyToExistingJob, createApplication } from './services/intake';
-import { getDashboard, getJobDetail, listCompanies, listJobs, listMyInterviews } from './services/job-queries';
+import { getDashboard, getJobDetail, getTeam, listCompanies, listInterviews, listJobs } from './services/job-queries';
+import * as profilesService from './services/profiles';
 import * as usersService from './services/users';
 import * as v from './validation';
 
@@ -52,6 +54,10 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
 
   app.decorateRequest('session', null);
 
+  // Anything that tells apps about a change also means cached answers are out of date.
+  const unsubscribeCache = ctx.events.subscribe(() => ctx.readCache.invalidate());
+  app.addHook('onClose', async () => unsubscribeCache());
+
   // This server is for the local network. Even if a router forwards the port by
   // mistake, requests from public addresses are refused before anything else runs.
   app.addHook('onRequest', async (request, reply) => {
@@ -75,7 +81,9 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
     if (config.adminOnly && request.session.user.role !== 'admin') throw forbidden('Only the administrator can do this.');
   });
 
-  app.addHook('onSend', async (_request, reply, payload) => {
+  // Runs before the response leaves, so whoever made a change can never read an older answer.
+  app.addHook('onSend', async (request, reply, payload) => {
+    if (request.method !== 'GET' && request.method !== 'HEAD') ctx.readCache.invalidate();
     reply.header('cache-control', 'no-store');
     reply.header('x-content-type-options', 'nosniff');
     return payload;
@@ -105,6 +113,9 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
     reply.code(404).send({ error: { code: 'not_found', message: 'Not found.' } } satisfies ApiErrorBody);
   });
 
+  /** A finished JSON response for a read-only request, shared while the data has not changed. */
+  const cachedJson = (reply: FastifyReply, key: string, compute: () => unknown) => reply.type('application/json; charset=utf-8').send(ctx.readCache.read(key, compute));
+
   // ---- Server info -------------------------------------------------------------------
   app.get('/api/info', { config: { public: true } }, async (): Promise<ServerInfo> => ({ app: 'job-tracker', version: ctx.version, initialized: true }));
 
@@ -119,7 +130,7 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
     return { ok: true };
   });
 
-  app.get('/api/auth/me', { config: { allowPendingPasswordChange: true } }, async (request) => usersService.toCurrentUser(requireSession(request).user));
+  app.get('/api/auth/me', { config: { allowPendingPasswordChange: true } }, async (request) => usersService.toCurrentUser(ctx.db, requireSession(request).user));
 
   app.post('/api/auth/change-password', { config: { allowPendingPasswordChange: true } }, async (request) => {
     const body = v.parse(v.changePasswordBody, request.body);
@@ -153,10 +164,63 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
     return { ok: true };
   });
 
-  // ---- Shared jobs -------------------------------------------------------------------
-  app.get('/api/jobs', async (request) => listJobs(ctx.db, requireSession(request).user.id, v.parse(v.jobListQuery, request.query)));
+  app.delete('/api/admin/users/:id/avatar', admin, async (request) => {
+    avatarsService.removeUserAvatar(ctx, v.parse(v.idParam, request.params).id);
+    return { ok: true };
+  });
 
-  app.get('/api/jobs/companies', async () => listCompanies(ctx.db));
+  app.delete('/api/admin/profiles/:id/avatar', admin, async (request) => {
+    avatarsService.removeAnyProfileAvatar(ctx, v.parse(v.idParam, request.params).id);
+    return { ok: true };
+  });
+
+  // ---- Your own avatar and profiles --------------------------------------------------
+  app.post('/api/me/avatar', async (request) => avatarsService.setUserAvatar(ctx, requireSession(request).user.id, v.parse(v.avatarBody, request.body).image));
+
+  app.delete('/api/me/avatar', async (request) => {
+    avatarsService.removeUserAvatar(ctx, requireSession(request).user.id);
+    return { ok: true };
+  });
+
+  app.get('/api/profiles', async (request) => profilesService.listMyProfiles(ctx.db, requireSession(request).user.id));
+
+  app.post('/api/profiles', async (request, reply) => {
+    const profile = profilesService.createProfile(ctx, requireSession(request).user.id, v.parse(v.createProfileBody, request.body).name);
+    return reply.code(201).send(profile);
+  });
+
+  app.patch('/api/profiles/:id', async (request) => {
+    const { id } = v.parse(v.idParam, request.params);
+    profilesService.updateProfile(ctx, requireSession(request).user.id, id, v.parse(v.updateProfileBody, request.body));
+    return { ok: true };
+  });
+
+  app.delete('/api/profiles/:id', async (request) => profilesService.removeProfile(ctx, requireSession(request).user.id, v.parse(v.idParam, request.params).id));
+
+  app.post('/api/profiles/:id/avatar', async (request) => {
+    const { id } = v.parse(v.idParam, request.params);
+    return avatarsService.setProfileAvatar(ctx, requireSession(request).user.id, id, v.parse(v.avatarBody, request.body).image);
+  });
+
+  app.delete('/api/profiles/:id/avatar', async (request) => {
+    avatarsService.removeOwnProfileAvatar(ctx, requireSession(request).user.id, v.parse(v.idParam, request.params).id);
+    return { ok: true };
+  });
+
+  // ---- Shared by everyone ------------------------------------------------------------
+  app.get('/api/avatars/users/:id', async (request) => avatarsService.getUserAvatar(ctx, v.parse(v.idParam, request.params).id));
+
+  app.get('/api/avatars/profiles/:id', async (request) => avatarsService.getProfileAvatar(ctx, v.parse(v.idParam, request.params).id));
+
+  app.get('/api/team', async (_request, reply) => cachedJson(reply, 'team', () => getTeam(ctx.db)));
+
+  // ---- Shared jobs -------------------------------------------------------------------
+  app.get('/api/jobs', async (request, reply) => {
+    const userId = requireSession(request).user.id;
+    return cachedJson(reply, `jobs:${userId}:${request.url}`, () => listJobs(ctx.db, userId, v.parse(v.jobListQuery, request.query)));
+  });
+
+  app.get('/api/jobs/companies', async (_request, reply) => cachedJson(reply, 'companies', () => listCompanies(ctx.db)));
 
   app.get('/api/jobs/:id', async (request) => getJobDetail(ctx, requireSession(request).user.id, v.parse(v.idParam, request.params).id));
 
@@ -168,10 +232,12 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
 
   app.post('/api/jobs/:id/apply', async (request) => {
     const { id } = v.parse(v.idParam, request.params);
-    return applyToExistingJob(ctx, requireSession(request).user.id, id, v.parse(v.applyToJobBody, request.body ?? {}).memo ?? '');
+    const body = v.parse(v.applyToJobBody, request.body ?? {});
+    return applyToExistingJob(ctx, requireSession(request).user.id, id, body.profileId, body.memo ?? '');
   });
 
   // Job details are shared by everyone, so corrections go through the administrator.
+  // Deleting has its own rule, in the service: see deleteJob.
   app.patch('/api/jobs/:id', admin, async (request) => {
     const { id } = v.parse(v.idParam, request.params);
     const body = v.parse(v.updateJobBody, request.body);
@@ -191,15 +257,12 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
     return getJobDetail(ctx, requireSession(request).user.id, id);
   });
 
-  app.delete('/api/jobs/:id', admin, async (request) => {
-    const { id } = v.parse(v.idParam, request.params);
-    const result = ctx.db.delete(jobs).where(eq(jobs.id, id)).run();
-    if (result.changes === 0) throw notFound('That job no longer exists.');
-    ctx.events.publish('jobs_changed', id);
+  app.delete('/api/jobs/:id', async (request) => {
+    applicationsService.deleteJob(ctx, requireSession(request).user, v.parse(v.idParam, request.params).id);
     return { ok: true };
   });
 
-  // ---- The current user's own applications -------------------------------------------
+  // ---- Applications: readable by everyone, changed only by their owner -------------------------------------------
   app.post('/api/applications', async (request) => {
     const body = v.parse(v.createApplicationBody, request.body) as CreateApplicationRequest;
     return createApplication(ctx, requireSession(request).user.id, body);
@@ -222,7 +285,13 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
     return reply.code(201).send(interview);
   });
 
-  app.get('/api/interviews', async (request) => listMyInterviews(ctx.db, requireSession(request).user.id, v.parse(v.interviewQuery, request.query)));
+  app.get('/api/interviews', async (request, reply) => {
+    const userId = requireSession(request).user.id;
+    return cachedJson(reply, `interviews:${userId}:${request.url}`, () => {
+      const { limit, ...filter } = v.parse(v.interviewQuery, request.query);
+      return listInterviews(ctx.db, userId, filter, limit);
+    });
+  });
 
   app.patch('/api/interviews/:id', async (request) => {
     const { id } = v.parse(v.idParam, request.params);
@@ -235,7 +304,10 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
     return { ok: true };
   });
 
-  app.get('/api/dashboard', async (request) => getDashboard(ctx.db, requireSession(request).user.id));
+  app.get('/api/dashboard', async (request, reply) => {
+    const userId = requireSession(request).user.id;
+    return cachedJson(reply, `dashboard:${userId}`, () => getDashboard(ctx.db, userId));
+  });
 
   // ---- Backups (administrator) -------------------------------------------------------
   app.get('/api/admin/backups', admin, async () => backupsService.listBackups(ctx));
