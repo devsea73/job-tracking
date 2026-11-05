@@ -44,6 +44,8 @@ export interface RenderedPage {
   html: string;
   finalUrl: string;
   status: number | null;
+  /** Embedded documents: career sites often show the posting inside an ATS iframe. */
+  frames?: Array<{ url: string; html: string }>;
 }
 
 /** Renders JavaScript-heavy pages. Injected so tests never launch a real browser. */

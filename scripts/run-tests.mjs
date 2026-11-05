@@ -1,5 +1,5 @@
-// Runs Node tooling under Electron's bundled Node, so native modules compiled
-// for the Electron ABI (better-sqlite3) load without a second rebuild.
+// Runs Node tooling under Electron's bundled Node, so that tests exercise the same
+// runtime and native-module binaries as the packaged app.
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
@@ -12,12 +12,13 @@ const args = process.argv.slice(2);
 
 const entry = join(root, 'node_modules', 'vitest', 'vitest.mjs');
 let commandArgs;
-let env = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
+let env = { ...process.env, ELECTRON_RUN_AS_NODE: '1', VITE_CONFIG_NATIVE_IGNORE_WARNING: 'true' };
 
 if (args[0] === '--survey') {
-  // Live extraction survey against real URLs. Opt-in only: never part of `npm test`.
+  // Live extraction checks against real URLs. Opt-in only: never part of `npm test`.
+  const crossPlatform = args.includes('--cross-platform');
   env = { ...env, JOB_TRACKER_SURVEY: '1', SURVEY_ARGS: args.slice(1).join(' ') };
-  commandArgs = [entry, 'run', '--config', 'vitest.survey.config.ts'];
+  commandArgs = [entry, 'run', '--config', 'vitest.survey.config.ts', crossPlatform ? 'tests/live/cross-platform.test.ts' : 'tests/live/survey.test.ts'];
 } else {
   commandArgs = [entry, ...args];
 }

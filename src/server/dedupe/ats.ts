@@ -47,6 +47,23 @@ function pathRule(
   };
 }
 
+/**
+ * Workday slugs end in "_{requisition}", optionally with a posting suffix: "_JR100704-1"
+ * is the same requisition as "_JR100704", published to a second career site or location.
+ * The suffix only goes when what remains still has letters and digits, so that ids which
+ * are mostly numeric ("_2026-12", "_REQ-12") keep every part that distinguishes them.
+ */
+function workdayIdentity(pathname: string, tenant: string): { id: string; board: string } | null {
+  const path = pathname.replace(/\/apply(\/.*)?$/i, '').replace(/\/+$/, '');
+  const slug = path.match(/\/(?:job|details)\/(?:.*\/)?([^/]+)$/i)?.[1];
+  const req = slug?.match(/_([A-Za-z0-9-]+(?:_[A-Za-z0-9-]+)*)$/)?.[1];
+  if (!req) return null;
+  const upper = req.toUpperCase();
+  const base = upper.replace(/-\d{1,2}$/, '');
+  const id = /[A-Z]/.test(base) && /\d/.test(base) ? base : upper;
+  return { id: `${tenant.toLowerCase()}/${id}`, board: tenant };
+}
+
 const RULES: Rule[] = [
   {
     provider: 'greenhouse',
@@ -71,13 +88,15 @@ const RULES: Rule[] = [
   {
     provider: 'workday',
     host: /^([a-z0-9-]+)\.wd\d+\.myworkdayjobs\.com$/i,
-    match: (url, host) => {
-      const path = url.pathname.match(/\/(?:job|details)\/(?:.*\/)?([^/]+?)(?:\/apply(?:\/.*)?)?\/?$/i);
-      if (!path) return null;
-      const slug = path[1] === 'apply' ? null : path[1];
-      const req = slug?.match(/_([A-Za-z0-9-]+(?:_[A-Za-z0-9-]+)*)$/);
-      if (!req) return null;
-      return { id: `${host[1].toLowerCase()}/${req[1].toUpperCase()}`, board: host[1] };
+    match: (url, host) => workdayIdentity(url.pathname, host[1])
+  },
+  {
+    // The same Workday posting, served from the shared host: /recruiting/{tenant}/{site}/job/...
+    provider: 'workday',
+    host: /^wd\d+\.myworkdaysite\.com$/i,
+    match: (url) => {
+      const tenant = url.pathname.match(/^\/(?:[a-z]{2}-[A-Z]{2}\/)?recruiting\/([^/]+)\//i)?.[1];
+      return tenant ? workdayIdentity(url.pathname, tenant) : null;
     }
   },
   pathRule('smartrecruiters', /^(jobs|careers)\.smartrecruiters\.com$/i, /^\/oneclick-ui\/company\/([^/]+)\/publication\/([^/]+)/i, (m) => ({
@@ -176,10 +195,18 @@ const RULES: Rule[] = [
   })),
   {
     provider: 'ukg',
-    host: /^recruiting\d*\.ultipro\.com$/,
+    host: /^(?:recruiting\d*\.ultipro\.com|[a-z0-9-]+\.rec\.pro\.ukg\.net)$/,
     match: (url) => {
       const id = url.searchParams.get('opportunityId');
       return id ? { id: id.toLowerCase() } : null;
+    }
+  },
+  {
+    provider: 'ripplehire',
+    host: /^([a-z0-9-]+)\.ripplehire\.com$/i,
+    match: (url, host) => {
+      const id = url.hash.match(/detail\/job\/(\d+)/)?.[1];
+      return id ? { id: `${host[1].toLowerCase()}/${id}`, board: host[1] } : null;
     }
   },
   {
@@ -205,9 +232,38 @@ const RULES: Rule[] = [
     host: /^(www\.)?hirebridge\.com$/,
     match: (url) => {
       const id = url.searchParams.get('joblistid');
-      return id ? { id } : null;
+      const tenant = url.searchParams.get('cid');
+      return id ? { id: tenant ? `${tenant}/${id}` : id } : null;
     }
   },
+  pathRule('teamtailor', /^([a-z0-9-]+)(?:\.[a-z]{2})?\.teamtailor\.com$/i, /^\/jobs\/(\d+)/, (m, h) => ({
+    id: `${h[1].toLowerCase()}/${m[1]}`,
+    board: h[1]
+  })),
+  pathRule('kula', /^careers\.kula\.ai$/, /^\/([^/]+)\/(\d+)/, (m) => ({
+    id: `${m[1].toLowerCase()}/${m[2]}`,
+    board: m[1]
+  })),
+  pathRule('careerpuck', /^app\.careerpuck\.com$/, /^\/job-board\/([^/]+)\/job\/([^/]+)/, (m) => ({
+    id: `${m[1].toLowerCase()}/${m[2]}`,
+    board: m[1]
+  })),
+  pathRule('darwinbox', /^([a-z0-9-]+)\.darwinbox\.[a-z.]+$/i, /\/jobDetails\/([a-z0-9]+)/i, (m, h) => ({
+    id: `${h[1].toLowerCase()}/${m[1]}`,
+    board: h[1]
+  })),
+  pathRule('isolved', /^([a-z0-9-]+)\.isolvedhire\.com$/i, /^\/jobs\/(\d+)/, (m, h) => ({
+    id: `${h[1].toLowerCase()}/${m[1]}`,
+    board: h[1]
+  })),
+  pathRule('trakstar', /^([a-z0-9-]+)\.hire\.trakstar\.com$/i, /^\/jobs\/([a-z0-9]+)/i, (m, h) => ({
+    id: `${h[1].toLowerCase()}/${m[1]}`,
+    board: h[1]
+  })),
+  pathRule('trinet', /^app\.trinethire\.com$/, /^\/companies\/([^/]+)\/jobs\/(\d+)/, (m) => ({
+    id: `${m[1].toLowerCase()}/${m[2]}`,
+    board: m[1].replace(/^\d+-/, '')
+  })),
   pathRule('personio', /^([a-z0-9-]+)\.jobs\.personio\.(?:com|de)$/i, /^\/job\/(\d+)/, (m, h) => ({
     id: `${h[1].toLowerCase()}/${m[1]}`,
     board: h[1]
@@ -274,7 +330,11 @@ const RULES: Rule[] = [
     id: `${m[1].toLowerCase()}/${m[2]}`,
     board: m[1]
   })),
-  pathRule('recruiterflow', /(^|\.)recruiterflow\.com$/, /\/jobs\/(\d+)/, (m) => ({ id: m[1] }))
+  // Numbered per tenant: /HR/jobs/716 and /releady/jobs/716 are not the same posting.
+  pathRule('recruiterflow', /(^|\.)recruiterflow\.com$/, /^\/([^/]+)\/jobs\/(\d+)/, (m) => ({
+    id: `${m[1].toLowerCase()}/${m[2]}`,
+    board: m[1]
+  }))
 ];
 
 /** Identifiers that survive being wrapped in a company's own careers page. */

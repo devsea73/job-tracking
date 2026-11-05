@@ -63,6 +63,7 @@ export const jobs = sqliteTable(
   },
   (t) => [
     index('jobs_company_key_idx').on(t.companyKey),
+    index('jobs_title_key_idx').on(t.titleKey),
     index('jobs_description_hash_idx').on(t.descriptionHash),
     index('jobs_created_at_idx').on(t.createdAt),
     index('jobs_updated_at_idx').on(t.updatedAt),

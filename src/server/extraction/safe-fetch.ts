@@ -156,7 +156,7 @@ export class SafeHttpClient implements HttpClient {
           finalUrl: current.toString(),
           chain,
           contentType,
-          body: Buffer.concat(chunks).toString('utf8')
+          body: decodeBody(Buffer.concat(chunks), contentType)
         };
       }
       throw new FetchError('network', 'This link redirected too many times.');
@@ -168,6 +168,18 @@ export class SafeHttpClient implements HttpClient {
   async close(): Promise<void> {
     await this.dispatcher.close();
   }
+}
+
+function decodeBody(body: Buffer, contentType: string): string {
+  const charset = contentType.match(/charset=["']?([\w-]+)/i)?.[1];
+  if (charset && !/^utf-?8$/i.test(charset)) {
+    try {
+      return new TextDecoder(charset).decode(body);
+    } catch {
+      // An unknown label falls through to UTF-8, which is what most pages really are.
+    }
+  }
+  return body.toString('utf8');
 }
 
 function toFetchError(error: unknown): FetchError {

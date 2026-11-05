@@ -8,7 +8,6 @@
   "license": "UNLICENSED",
   "private": true,
   "scripts": {
-    "postinstall": "node scripts/rebuild-native.mjs",
     "dev": "electron-vite dev",
     "build": "npm run typecheck && electron-vite build",
     "preview": "electron-vite preview",
@@ -17,11 +16,12 @@
     "test:watch": "node scripts/run-tests.mjs",
     "db:generate": "drizzle-kit generate",
     "survey": "node scripts/run-tests.mjs --survey",
-    "dist": "npm run build && electron-builder --win --x64",
-    "dist:dir": "npm run build && electron-builder --win --x64 --dir"
+    "dist": "npm run build && electron-builder --win --x64 --publish never",
+    "dist:dir": "npm run build && electron-builder --win --x64 --dir --publish never",
+    "make-icon": "node scripts/make-icon.mjs",
+    "e2e": "node tests/live/e2e-app.mjs"
   },
   "dependencies": {
-    "@electron-toolkit/utils": "^4.0.0",
     "argon2": "^0.45.2",
     "better-sqlite3": "^13.0.3",
     "cheerio": "^1.2.0",
@@ -35,7 +35,6 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@electron/rebuild": "^4.2.1",
     "@tailwindcss/vite": "^4.3.4",
     "@tanstack/react-query": "^5.106.0",
     "@types/better-sqlite3": "^7.6.13",

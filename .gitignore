@@ -7,3 +7,7 @@ coverage/
 tests/.tmp/
 survey-report.json
 .env
+
+# Real job links can carry personal login tokens. Keep lists of them out of the repository.
+job.txt
+*.urls.txt

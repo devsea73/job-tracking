@@ -1,0 +1,199 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens. Dark mode follows prefers-color-scheme, which the main process controls
+ * through nativeTheme, so the System / Light / Dark setting needs no class switching.
+ */
+:root {
+  color-scheme: light dark;
+  --background: #f7f7f8;
+  --surface: #ffffff;
+  --surface-2: #f1f1f3;
+  --sidebar: #fbfbfc;
+  --border: #e3e3e8;
+  --border-strong: #cfcfd6;
+  --ink: #17181c;
+  --ink-2: #565862;
+  --ink-3: #82848f;
+  --accent: #3b5bdb;
+  --accent-hover: #3350c4;
+  --accent-ink: #ffffff;
+  --accent-soft: #eaeefc;
+  --accent-soft-ink: #2f49b3;
+  --danger: #c92a2a;
+  --danger-soft: #fdecec;
+  --danger-ink: #a51f1f;
+  --warning-soft: #fdf3dc;
+  --warning-ink: #855a00;
+  --success-soft: #e4f6ea;
+  --success-ink: #18703a;
+  --star: #e0a100;
+  --ring: #3b5bdb66;
+  --shadow: 0 1px 2px #0000000d, 0 8px 24px #0000000f;
+
+  --status-applied-bg: #e8edf6;
+  --status-applied-ink: #39507c;
+  --status-recruiter-bg: #eee9fb;
+  --status-recruiter-ink: #5a3fb0;
+  --status-technical-bg: #fdf0d7;
+  --status-technical-ink: #84590a;
+  --status-final-bg: #fde8da;
+  --status-final-ink: #a34a12;
+  --status-offer-bg: #dff5e6;
+  --status-offer-ink: #17703a;
+  --status-rejected-bg: #f4e6e6;
+  --status-rejected-ink: #9c3535;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0f1115;
+    --surface: #171a20;
+    --surface-2: #1f232b;
+    --sidebar: #13161b;
+    --border: #2a2e37;
+    --border-strong: #3a3f4a;
+    --ink: #eceef2;
+    --ink-2: #a4a8b3;
+    --ink-3: #7a7e8a;
+    --accent: #5c7cfa;
+    --accent-hover: #6e8bfb;
+    --accent-ink: #0d1020;
+    --accent-soft: #232c4d;
+    --accent-soft-ink: #aebffd;
+    --danger: #f06565;
+    --danger-soft: #3a1e20;
+    --danger-ink: #f7a3a3;
+    --warning-soft: #3a2e12;
+    --warning-ink: #eec766;
+    --success-soft: #16301f;
+    --success-ink: #7ad79c;
+    --star: #f2bd2c;
+    --ring: #5c7cfa66;
+    --shadow: 0 1px 2px #00000066, 0 8px 24px #00000059;
+
+    --status-applied-bg: #232b3b;
+    --status-applied-ink: #a9bbdc;
+    --status-recruiter-bg: #2c2545;
+    --status-recruiter-ink: #bfaef5;
+    --status-technical-bg: #3a2e12;
+    --status-technical-ink: #eec766;
+    --status-final-bg: #3b2616;
+    --status-final-ink: #f3b083;
+    --status-offer-bg: #16301f;
+    --status-offer-ink: #7ad79c;
+    --status-rejected-bg: #352021;
+    --status-rejected-ink: #e6a0a0;
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-sidebar: var(--sidebar);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-soft-ink: var(--accent-soft-ink);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-danger-ink: var(--danger-ink);
+  --color-warning-soft: var(--warning-soft);
+  --color-warning-ink: var(--warning-ink);
+  --color-success-soft: var(--success-soft);
+  --color-success-ink: var(--success-ink);
+  --color-star: var(--star);
+  --color-ring: var(--ring);
+  --shadow-panel: var(--shadow);
+  --font-sans: 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: 'Cascadia Mono', Consolas, 'Courier New', monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  overflow: hidden;
+}
+
+/* Text people read or may want to copy can be selected. */
+input,
+textarea,
+.selectable {
+  user-select: text;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-3);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Date inputs follow the theme and sit comfortably in a filter row. */
+input[type='datetime-local'],
+input[type='date'] {
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes spin-slow {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.spin {
+  animation: spin-slow 0.9s linear infinite;
+}
+
+@keyframes pulse-soft {
+  50% {
+    opacity: 0.45;
+  }
+}
+.skeleton {
+  animation: pulse-soft 1.6s ease-in-out infinite;
+  background: var(--surface-2);
+  border-radius: 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin,
+  .skeleton {
+    animation-duration: 3s;
+  }
+}

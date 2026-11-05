@@ -30,7 +30,11 @@ export const THRESHOLDS = {
   autoDescription: 0.85,
   possibleTitle: 0.6,
   possibleDescription: 0.5,
-  repostDescription: 0.9
+  repostDescription: 0.9,
+  /** How much of a shorter text must appear in the longer one for it to count as an excerpt of it. */
+  autoContainment: 0.85,
+  /** Below this, an "excerpt" could just be shared boilerplate. */
+  minExcerptLength: 1000
 } as const;
 
 /** Same provider with a different id: the provider itself says these are separate postings. */
@@ -104,6 +108,11 @@ export function compareJobs(incoming: ComparableJob, existing: ComparableJob): C
     if (titleScore >= THRESHOLDS.autoTitle && (identicalText || text.jaccard >= THRESHOLDS.autoDescription)) {
       return { decision: 'auto', score: Math.max(score, 0.95), reasons };
     }
+    // An aggregator's shortened copy: nearly every phrase of it comes from the fuller posting.
+    const shorter = Math.min(incoming.description.length, existing.description.length);
+    if (titleScore >= THRESHOLDS.autoTitle && text.containment >= THRESHOLDS.autoContainment && shorter >= THRESHOLDS.minExcerptLength) {
+      return { decision: 'auto', score: Math.max(score, 0.95), reasons };
+    }
   }
 
   // Different requisitions with different text are simply different jobs.
@@ -120,7 +129,9 @@ export function compareJobs(incoming: ComparableJob, existing: ComparableJob): C
   ) {
     return { decision: 'possible', score, reasons };
   }
-  if (relatedCompany && titleScore >= THRESHOLDS.autoTitle && text.jaccard >= THRESHOLDS.possibleDescription) {
+  // "Devoted Health" and "Devoted Health Services, Inc" with one title: worth a question,
+  // even when one site rewrote the description so that the text says nothing either way.
+  if (relatedCompany && titleScore >= THRESHOLDS.autoTitle) {
     return { decision: 'possible', score, reasons };
   }
   // Recruiting agencies repost the same text under their own name.

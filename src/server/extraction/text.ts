@@ -82,7 +82,7 @@ export function tidyText(text: string): string {
     .replace(/[​-‍﻿]/g, '')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n[ \t]+(?!- )(?=\S)/g, (match) => (/\n {2,}- /.test(match) ? match : '\n'))
-    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/(\S)[ \t]{2,}/g, '$1 ')
     .replace(/^\s*[•·▪◦‣]\s*/gm, '- ')
     .replace(/\n(?:- *\n)+/g, '\n')
     .replace(/\n{3,}/g, '\n\n')

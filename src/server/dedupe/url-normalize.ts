@@ -121,6 +121,12 @@ const HOST_RULES: HostRule[] = [
   { host: /\.oraclecloud\.com$/, keepParams: NO_PARAMS },
   { host: /\.paycomonline\.net$/, keepParams: NO_PARAMS },
   { host: /\.ultipro\.com$/, keepParams: ['opportunityId'] },
+  { host: /\.rec\.pro\.ukg\.net$/, keepParams: ['opportunityId'] },
+  { host: /\.ripplehire\.com$/, keepParams: NO_PARAMS, keepFragment: true },
+  { host: /\.myworkdaysite\.com$/, keepParams: NO_PARAMS, stripPathSuffix: /\/apply(\/.*)?$/ },
+  { host: /\.teamtailor\.com$/, keepParams: NO_PARAMS },
+  { host: /^careers\.kula\.ai$/, keepParams: NO_PARAMS },
+  { host: /^app\.careerpuck\.com$/, keepParams: NO_PARAMS },
   { host: /^recruitingbypaycor\.com$/, keepParams: ['clientId', 'id'] },
   { host: /^hirebridge\.com$/, keepParams: ['joblistid', 'cid'] },
   { host: /\.personio\.(com|de)$/, keepParams: NO_PARAMS },
@@ -178,9 +184,42 @@ export function parseUserUrl(input: string): URL {
   return url;
 }
 
+/**
+ * Query parameters that act as a person's credentials rather than describe a job: login
+ * codes from emailed links, one-click apply tokens, per-viewer tracking ids. People paste
+ * these links straight from their browser, and saved URLs are visible to everyone on the
+ * LAN, so they never reach the database, the logs or a fetch.
+ */
+const PERSONAL_PARAMS = new Set([
+  'code',
+  'eem',
+  'indeed-apply-token',
+  'rx_viewer',
+  'rx_p',
+  'access_token',
+  'id_token',
+  'auth',
+  'authtoken',
+  'auth_token',
+  'password',
+  'sessionid',
+  'jsessionid',
+  'userid',
+  'user_id'
+]);
+
+/** A copy of the link that is safe to store and to show to other users. */
+export function stripPersonalParams(input: string | URL): string {
+  const url = new URL(input);
+  for (const name of [...url.searchParams.keys()]) {
+    if (PERSONAL_PARAMS.has(name.toLowerCase())) url.searchParams.delete(name);
+  }
+  return url.toString();
+}
+
 function isTrackingParam(name: string): boolean {
   const lower = name.toLowerCase();
-  return TRACKING_EXACT.has(lower) || TRACKING_PREFIXES.some((prefix) => lower.startsWith(prefix));
+  return TRACKING_EXACT.has(lower) || PERSONAL_PARAMS.has(lower) || TRACKING_PREFIXES.some((prefix) => lower.startsWith(prefix));
 }
 
 /** Hash routes and fragments that name a job are identifiers; "#apply" or "#top" are not. */
