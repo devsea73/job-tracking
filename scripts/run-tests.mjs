@@ -1,0 +1,26 @@
+// Runs Node tooling under Electron's bundled Node, so native modules compiled
+// for the Electron ABI (better-sqlite3) load without a second rebuild.
+import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const require = createRequire(join(root, 'package.json'));
+const electronBinary = require('electron');
+const args = process.argv.slice(2);
+
+const entry = join(root, 'node_modules', 'vitest', 'vitest.mjs');
+let commandArgs;
+let env = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
+
+if (args[0] === '--survey') {
+  // Live extraction survey against real URLs. Opt-in only: never part of `npm test`.
+  env = { ...env, JOB_TRACKER_SURVEY: '1', SURVEY_ARGS: args.slice(1).join(' ') };
+  commandArgs = [entry, 'run', '--config', 'vitest.survey.config.ts'];
+} else {
+  commandArgs = [entry, ...args];
+}
+
+const child = spawn(electronBinary, commandArgs, { cwd: root, stdio: 'inherit', env });
+child.on('exit', (code) => process.exit(code ?? 1));
