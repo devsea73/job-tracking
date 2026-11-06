@@ -43,6 +43,20 @@ export interface TrendView {
   ranked?: boolean;
   /** Extra words after a name in the legend, by series key. */
   marks?: Map<string, string>;
+  /**
+   * The lines are chosen in the legend, eight at most at a time, each in a color of its own. The
+   * first ones drawn are the most active here (bids over the range), so everyone starts on the
+   * same chart. The series' own colors are then ignored.
+   */
+  choose?: Map<string, number>;
+}
+
+/** The lines drawn at first: the most active, eight at most, each colored by its place in the series' own order. */
+export function firstChoice(series: Series[], activity: Map<string, number>): Map<string, number> {
+  const order = new Map(series.map((item, index) => [item.key, index]));
+  const place = (key: string) => order.get(key) ?? 0;
+  const top = [...series].sort((a, b) => (activity.get(b.key) ?? 0) - (activity.get(a.key) ?? 0) || place(a.key) - place(b.key)).slice(0, SERIES_SLOTS);
+  return new Map(top.sort((a, b) => place(a.key) - place(b.key)).map((item, index) => [item.key, index]));
 }
 
 export function TrendCard({
@@ -74,10 +88,36 @@ export function TrendCard({
   const info = TREND_INFO[metric];
   // Left alone, a race and a single day show running totals: who is ahead, at every point. A choice lasts until the range changes.
   const cumulative = !info.rate && (cumulativeChoice?.key === filters.rangeKey ? cumulativeChoice.value : racing || data.group === 'hour');
-  const shown = useMemo(() => build(metric, cumulative), [build, metric, cumulative]);
+  const built = useMemo(() => build(metric, cumulative), [build, metric, cumulative]);
   const format = formatterFor(metric);
   const compared = data.previous.compared;
   const per = GROUP_LABELS[data.group].toLowerCase();
+
+  // Lines chosen in the legend keep their colors while others come and go. A choice holds while
+  // the same people or profiles are listed; until one is made, the most active are drawn.
+  const listed = built.series.map((item) => item.key).join(',');
+  const [choice, setChoice] = useState<{ listed: string; slots: Map<string, number> } | null>(null);
+  const slots = built.choose ? (choice?.listed === listed ? choice.slots : firstChoice(built.series, built.choose)) : null;
+  const colored = slots ? built.series.map((item) => ({ ...item, color: slots.has(item.key) ? seriesColor(slots.get(item.key) ?? 0) : OTHERS_COLOR })) : built.series;
+  const drawn = slots ? colored.filter((item) => slots.has(item.key)) : colored;
+  const legendChoice = slots
+    ? {
+        isOn: (key: string) => slots.has(key),
+        full: slots.size >= SERIES_SLOTS,
+        toggle: (key: string) => {
+          const next = new Map(slots);
+          if (next.has(key)) next.delete(key);
+          else if (next.size < SERIES_SLOTS) {
+            const taken = new Set(next.values());
+            let slot = 0;
+            while (taken.has(slot)) slot += 1;
+            next.set(key, slot);
+          }
+          setChoice({ listed, slots: next });
+        }
+      }
+    : undefined;
+  const shown = { ...built, series: drawn };
 
   const onTabKey = (event: KeyboardEvent<HTMLDivElement>) => {
     const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
@@ -152,7 +192,7 @@ export function TrendCard({
               highlighted={highlighted}
               description={`${who}: ${info.label.toLowerCase()} per ${per}${cumulative ? ', running total' : ''}, ${filters.label}`}
             />
-            <Legend series={shown.series} format={format} ranked={shown.ranked} marks={shown.marks} onHighlight={setHighlighted} />
+            <Legend series={slots ? colored : shown.series} format={format} ranked={shown.ranked} marks={shown.marks} onHighlight={setHighlighted} choice={legendChoice} />
           </>
         )}
         <p className="mt-1.5 text-[11.5px] text-ink-3" data-trend-about>
@@ -180,35 +220,22 @@ export function standing(raw: Array<number | null>, data: ActivityResponse, metr
 }
 
 /**
- * One line per entity, colored by who it is: the same colors and lines for everyone who looks.
- * Up to eight each get one; beyond that, the seven highest on this measure do and the rest are
- * added together (a rate cannot be added, so then they are left out).
+ * A line for every person or profile, in a fixed order (by id), with how many bids each sent over
+ * the range: the legend lists them all and draws the most active first, each in its own color.
  */
-export function entityLines<T>(
+export function entityChoices<T>(
   items: T[],
-  describe: (item: T) => { id: number; name: string; raw: Array<number | null> },
+  describe: (item: T) => { id: number; key: string; name: string; raw: Array<number | null>; bids: Array<number | null> },
   data: ActivityResponse,
   metric: TrendMetric,
   cumulative: boolean,
-  now: Date,
-  othersName: (count: number) => string
-): Series[] {
-  const entries = items.map((item) => ({ item, ...describe(item) })).sort((a, b) => a.id - b.id);
-  const score = (entry: (typeof entries)[number]) => standing(entry.raw, data, metric, now) ?? -1;
-  const shown = entries.length <= SERIES_SLOTS ? entries : [...entries].sort((a, b) => score(b) - score(a) || a.id - b.id).slice(0, SERIES_SLOTS - 1).sort((a, b) => a.id - b.id);
-  const rest = entries.filter((entry) => !shown.includes(entry));
-  const series: Series[] = shown.map((entry, index) => ({
-    key: String(entry.id),
-    name: entry.name,
-    color: seriesColor(index),
-    values: shapeTrend(entry.raw, data, metric, cumulative, now),
-    total: standing(entry.raw, data, metric, now)
-  }));
-  if (rest.length > 0 && !TREND_INFO[metric].rate) {
-    const summed = data.buckets.map((_, index) => rest.reduce((sum, entry) => sum + (entry.raw[index] ?? 0), 0));
-    series.push({ key: 'others', name: othersName(rest.length), color: OTHERS_COLOR, values: shapeTrend(summed, data, metric, cumulative, now), total: standing(summed, data, metric, now) });
-  }
-  return series;
+  now: Date
+): Pick<TrendView, 'series' | 'choose'> {
+  const entries = items.map(describe).sort((a, b) => a.id - b.id);
+  return {
+    series: entries.map((entry) => ({ key: entry.key, name: entry.name, color: OTHERS_COLOR, values: shapeTrend(entry.raw, data, metric, cumulative, now), total: standing(entry.raw, data, metric, now) })),
+    choose: new Map(entries.map((entry) => [entry.key, standing(entry.bids, data, 'bids', now) ?? 0]))
+  };
 }
 
 /** The period before as a dashed line under this one, point for point, named by its own days. */

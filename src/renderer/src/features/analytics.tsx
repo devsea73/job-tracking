@@ -368,16 +368,26 @@ export function LineMark({ color, dashed }: { color: string; dashed?: boolean })
   );
 }
 
+/** Which lines are drawn, when the legend chooses them: eight at most at a time. */
+export interface LegendChoice {
+  isOn: (key: string) => boolean;
+  toggle: (key: string) => void;
+  /** Eight lines are drawn: another has to go before a new one can come. */
+  full: boolean;
+}
+
 /**
  * Who each line is, with their number. Pointing at a name brings its line forward. Ranked puts the
- * highest first with its place, for a race; otherwise the series keep their own order.
+ * highest first with its place, for a race; otherwise the series keep their own order. With a
+ * choice, every name is listed and clicking one draws or removes its line.
  */
 export function Legend({
   series,
   format = count,
   ranked = false,
   marks,
-  onHighlight
+  onHighlight,
+  choice
 }: {
   series: Series[];
   format?: (value: number) => string;
@@ -385,32 +395,59 @@ export function Legend({
   /** Extra words after a name, by series key: "(you)". */
   marks?: Map<string, string>;
   onHighlight?: (key: string | null) => void;
+  choice?: LegendChoice;
 }) {
-  if (series.length < 2) return null;
+  if (series.length < 2 && !choice) return null;
   const shown = ranked ? [...series].sort((a, b) => (b.total ?? -1) - (a.total ?? -1) || a.name.localeCompare(b.name)) : series;
   return (
-    <ul className="mt-1.5 flex flex-wrap gap-x-1 gap-y-0.5 text-[12px] text-ink-2" aria-label="Legend" onMouseLeave={() => onHighlight?.(null)}>
-      {shown.map((item, index) => (
-        <li key={item.key}>
-          <button
-            type="button"
-            className="inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 hover:bg-surface-2 focus-visible:bg-surface-2"
-            onMouseEnter={() => onHighlight?.(item.key)}
-            onFocus={() => onHighlight?.(item.key)}
-            onBlur={() => onHighlight?.(null)}
-            data-legend={item.key}
-          >
-            {ranked ? <span className="w-3.5 text-right tabular-nums text-ink-3">{index + 1}</span> : null}
-            <LineMark color={item.color} dashed={item.dashed} />
-            <span className="text-ink">
-              {item.name}
-              {marks?.get(item.key) ? <span className="text-ink-3"> {marks.get(item.key)}</span> : null}
-            </span>
-            {item.total !== null ? <span className="font-semibold tabular-nums text-ink">{format(item.total)}</span> : null}
-          </button>
-        </li>
-      ))}
-    </ul>
+    <div className="mt-1.5">
+      <ul className="flex flex-wrap gap-x-1 gap-y-0.5 text-[12px] text-ink-2" aria-label="Legend" onMouseLeave={() => onHighlight?.(null)}>
+        {shown.map((item, index) => {
+          const on = choice ? choice.isOn(item.key) : true;
+          const blocked = !!choice && !on && choice.full;
+          return (
+            <li key={item.key}>
+              <button
+                type="button"
+                aria-pressed={choice ? on : undefined}
+                aria-disabled={blocked || undefined}
+                title={choice ? (on ? 'Hide this line' : blocked ? 'Eight lines at most: hide one to show this' : 'Show this line') : undefined}
+                className={cn('inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 hover:bg-surface-2 focus-visible:bg-surface-2', blocked && 'cursor-not-allowed')}
+                onClick={() => {
+                  if (!choice || blocked) return;
+                  if (on) onHighlight?.(null);
+                  choice.toggle(item.key);
+                }}
+                onMouseEnter={() => onHighlight?.(on ? item.key : null)}
+                onFocus={() => onHighlight?.(on ? item.key : null)}
+                onBlur={() => onHighlight?.(null)}
+                data-legend={item.key}
+                data-shown={on}
+              >
+                {ranked ? <span className="w-3.5 text-right tabular-nums text-ink-3">{index + 1}</span> : null}
+                {on ? (
+                  <LineMark color={item.color} dashed={item.dashed} />
+                ) : (
+                  <span className="inline-flex w-4 shrink-0 justify-center" aria-hidden>
+                    <span className="size-2.5 rounded-full border border-border-strong" />
+                  </span>
+                )}
+                <span className={on ? 'text-ink' : 'text-ink-3'}>
+                  {item.name}
+                  {marks?.get(item.key) ? <span className="text-ink-3"> {marks.get(item.key)}</span> : null}
+                </span>
+                {item.total !== null ? <span className={cn('font-semibold tabular-nums', on ? 'text-ink' : 'text-ink-3')}>{format(item.total)}</span> : null}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      {choice ? (
+        <p className="mt-0.5 px-1.5 text-[11.5px] text-ink-3" data-legend-hint>
+          Click a name to show or hide its line{series.length > SERIES_SLOTS ? `; up to ${SERIES_SLOTS} at a time, ${series.length} in all` : ''}.
+        </p>
+      ) : null}
+    </div>
   );
 }
 

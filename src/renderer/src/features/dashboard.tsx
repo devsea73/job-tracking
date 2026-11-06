@@ -10,7 +10,7 @@ import { errorMessage, useActivity, useDashboard } from '@/lib/api';
 import { formatDateTime, formatShortAgo } from '@/lib/utils';
 import type { Page } from '../App';
 import { bucketStart, count, Delta, FilterBar, fullDay, Funnel, monthYear, Panel, percent, ProfileTable, Refreshing, SERIES_SLOTS, seriesColor, spanLabel, Tile, Toggle, toLocal, useFilters } from './analytics';
-import { entityLines, previousLine, shapeTrend, TrendCard, type TrendView } from './trend-card';
+import { entityChoices, previousLine, shapeTrend, TrendCard, type TrendView } from './trend-card';
 
 /**
  * My own numbers, today first: how much I applied today, this week and this month; the measures
@@ -27,7 +27,7 @@ function useMyTrends(data: ActivityResponse | undefined, me: ActivityPerson | un
       if (!data || !me) return { series: [] };
       if (lines === 'profiles' && me.profiles.length > 1) {
         return {
-          series: entityLines(me.profiles, (profile) => ({ id: profile.id, name: profile.name, raw: profile.trends[metric] }), data, metric, cumulative, now, (rest) => `${rest} other profiles`),
+          ...entityChoices(me.profiles, (profile) => ({ id: profile.id, key: `p${profile.id}`, name: profile.name, raw: profile.trends[metric], bids: profile.trends.bids }), data, metric, cumulative, now),
           footer: { label: 'All profiles', values: shapeTrend(me.trends[metric], data, metric, cumulative, now) },
           ranked: true
         };

@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import { ArrowDown, CalendarDays, CodeXml, Filter, ImageOff, Percent, Phone, Send, Trophy, User, UserRound, UsersRound, type LucideIcon } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
-import type { ActivityPerson, ActivityResponse, CurrentUser, TeamMember, TrendMetric } from '@shared/api';
+import type { ActivityPerson, ActivityProfile, ActivityResponse, CurrentUser, TeamMember, TrendMetric } from '@shared/api';
 import type { PassRate, ProcessStats } from '@shared/pipeline';
 import { Avatar, userLabel, userName } from '@/components/job-bits';
 import { Button } from '@/components/ui/button';
@@ -10,9 +10,9 @@ import { ANY, Select } from '@/components/ui/select';
 import { useToast } from '@/components/ui/toast';
 import { call, errorMessage, useActivity, useTeam } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { count, Delta, FilterBar, fullDay, monthYear, OTHERS_COLOR, Panel, percent, ProfileTable, Refreshing, SERIES_SLOTS, seriesColor, share, spanLabel, Tile, toLocal, useFilters, type Filters } from './analytics';
+import { count, Delta, FilterBar, fullDay, monthYear, OTHERS_COLOR, Panel, percent, ProfileTable, Refreshing, seriesColor, share, spanLabel, Tile, Toggle, toLocal, useFilters, type Filters } from './analytics';
 import { TeamApplications } from './team-applications';
-import { entityLines, shapeTrend, TrendCard, type TrendView } from './trend-card';
+import { entityChoices, firstChoice, shapeTrend, TrendCard, type TrendView } from './trend-card';
 
 /**
  * Everyone side by side, today unless another range is chosen: the measures as lines, one per
@@ -215,19 +215,40 @@ function PipelineTable({ data }: { data: ActivityResponse }) {
   );
 }
 
+type TeamLines = 'people' | 'profiles';
+
+/** "Backend · Andy": the profile, and whose it is. A first profile named after its owner needs no repeating. */
+function profileLine(profile: ActivityProfile, owner: ActivityPerson): string {
+  const who = userName(owner.user);
+  return `${profile.name === who ? who : `${profile.name} · ${who}`}${profile.isArchived ? ' (archived)' : ''}`;
+}
+
 /**
- * Everyone's lines on one chart, the same chart for everyone who opens it: each person keeps one
- * color, by who they are, and nobody's line is drawn differently. Only the legend marks "(you)".
+ * Everyone's lines on one chart, one per person or one per profile, each in its own color: the same
+ * chart for everyone who opens it, until they pick other lines in the legend. Nobody's line is drawn
+ * differently; only the legend marks your own.
  */
-function useTeamTrends(data: ActivityResponse, now: Date) {
+function useTeamTrends(data: ActivityResponse, now: Date, lines: TeamLines) {
   const build = useCallback(
-    (metric: TrendMetric, cumulative: boolean): TrendView => ({
-      series: entityLines(data.people, (person) => ({ id: person.user.id, name: userName(person.user), raw: person.trends[metric] }), data, metric, cumulative, now, (rest) => `${rest} others`),
-      footer: { label: 'Team', values: shapeTrend(data.teamTrends[metric], data, metric, cumulative, now) },
-      ranked: true,
-      marks: new Map(data.people.filter((person) => person.isMe).map((person) => [String(person.user.id), '(you)']))
-    }),
-    [data, now]
+    (metric: TrendMetric, cumulative: boolean): TrendView => {
+      const footer = { label: 'Team', values: shapeTrend(data.teamTrends[metric], data, metric, cumulative, now) };
+      if (lines === 'profiles') {
+        const profiles = data.people.flatMap((person) => person.profiles.map((profile) => ({ person, profile })));
+        return {
+          ...entityChoices(profiles, ({ person, profile }) => ({ id: profile.id, key: `p${profile.id}`, name: profileLine(profile, person), raw: profile.trends[metric], bids: profile.trends.bids }), data, metric, cumulative, now),
+          footer,
+          ranked: true,
+          marks: new Map(profiles.filter(({ person }) => person.isMe).map(({ profile }) => [`p${profile.id}`, '(yours)']))
+        };
+      }
+      return {
+        ...entityChoices(data.people, (person) => ({ id: person.user.id, key: `u${person.user.id}`, name: userName(person.user), raw: person.trends[metric], bids: person.trends.bids }), data, metric, cumulative, now),
+        footer,
+        ranked: true,
+        marks: new Map(data.people.filter((person) => person.isMe).map((person) => [`u${person.user.id}`, '(you)']))
+      };
+    },
+    [data, now, lines]
   );
   const totals = useCallback((metric: TrendMetric) => data.teamTrendTotals[metric], [data]);
   return { build, totals };
@@ -235,10 +256,16 @@ function useTeamTrends(data: ActivityResponse, now: Date) {
 
 function TeamAnalytics({ filters, data }: { filters: Filters; data: ActivityResponse }) {
   const { rangeName, label, now } = filters;
-  const trends = useTeamTrends(data, now);
+  const [lines, setLines] = useState<TeamLines>('people');
+  const trends = useTeamTrends(data, now, lines);
+  const profileCount = data.people.reduce((sum, person) => sum + person.profiles.length, 0);
   const ranked = [...data.people].sort((a, b) => a.rank - b.rank);
-  // The same color as each person's line, by who they are.
-  const colors = new Map([...data.people].sort((a, b) => a.user.id - b.user.id).map((person, index) => [person.user.id, index < SERIES_SLOTS ? seriesColor(index) : OTHERS_COLOR]));
+  // Each person's dot has the color their line starts with in the person chart: chosen the same way, the most active eight.
+  const colors = useMemo(() => {
+    const people = entityChoices(data.people, (person) => ({ id: person.user.id, key: `u${person.user.id}`, name: userName(person.user), raw: person.trends.bids, bids: person.trends.bids }), data, 'bids', false, now);
+    const slots = firstChoice(people.series, people.choose ?? new Map<string, number>());
+    return new Map(data.people.map((person) => [person.user.id, slots.has(`u${person.user.id}`) ? seriesColor(slots.get(`u${person.user.id}`) ?? 0) : OTHERS_COLOR]));
+  }, [data, now]);
 
   const leadOf = (person: ActivityPerson): string => {
     if (person.inRange === 0) return '';
@@ -276,7 +303,25 @@ function TeamAnalytics({ filters, data }: { filters: Filters; data: ActivityResp
       </div>
 
       <div className="mt-3">
-        <TrendCard data={data} filters={filters} who="Everyone" totals={trends.totals} build={trends.build} racing />
+        <TrendCard
+          data={data}
+          filters={filters}
+          who={lines === 'profiles' ? 'Every profile' : 'Everyone'}
+          totals={trends.totals}
+          build={trends.build}
+          racing
+          controls={
+            <Toggle
+              label="Lines"
+              value={lines}
+              onChange={setLines}
+              options={[
+                { value: 'people', label: 'By person' },
+                { value: 'profiles', label: 'By profile', disabled: profileCount === 0 }
+              ]}
+            />
+          }
+        />
       </div>
 
       <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
