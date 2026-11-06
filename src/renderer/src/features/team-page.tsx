@@ -1,32 +1,167 @@
 import { useCallback, useMemo, useState } from 'react';
-import { ArrowDown, CalendarDays, CodeXml, Filter, ImageOff, Percent, Phone, Send, Trophy, User, UserRound, UsersRound, type LucideIcon } from 'lucide-react';
+import { Activity, ArrowDown, CalendarDays, CodeXml, Filter, ImageOff, Percent, Phone, Send, Trophy, User, UserRound, UsersRound, type LucideIcon } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
-import type { ActivityPerson, ActivityProfile, ActivityResponse, CurrentUser, TeamMember, TrendMetric } from '@shared/api';
+import { APPLICATION_STATUSES, type ApplicationStatus } from '@shared/constants';
+import type { ActivityPerson, ActivityProfile, ActivityResponse, CurrentUser, TeamBoardRow, TeamMember, TrendMetric } from '@shared/api';
 import type { PassRate, ProcessStats } from '@shared/pipeline';
 import { Avatar, userLabel, userName } from '@/components/job-bits';
 import { Button } from '@/components/ui/button';
 import { Card, EmptyState, Notice, Skeleton, Tooltip } from '@/components/ui/misc';
 import { ANY, Select } from '@/components/ui/select';
 import { useToast } from '@/components/ui/toast';
-import { call, errorMessage, useActivity, useTeam } from '@/lib/api';
+import { call, errorMessage, useActivity, useTeam, useTeamApplications } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { count, Delta, FilterBar, fullDay, monthYear, OTHERS_COLOR, Panel, percent, ProfileTable, Refreshing, seriesColor, share, spanLabel, Tile, Toggle, toLocal, useFilters, type Filters } from './analytics';
-import { TeamApplications } from './team-applications';
-import { entityChoices, firstChoice, shapeTrend, TrendCard, type TrendView } from './trend-card';
+import {
+  count,
+  Delta,
+  FilterBar,
+  fullDay,
+  Legend,
+  LineChart,
+  LineMark,
+  ME_COLOR,
+  mineColor,
+  monthYear,
+  niceScale,
+  othersColor,
+  Panel,
+  percent,
+  ProfileTable,
+  Refreshing,
+  seriesColor,
+  share,
+  spanLabel,
+  TableSwitch,
+  Tile,
+  useWidth,
+  Toggle,
+  toLocal,
+  useFilters,
+  type Filters,
+  type Series
+} from './analytics';
+import { entityChoices, firstChoice, shapeTrend, TREND_INFO, TrendCard, type TrendView } from './trend-card';
 
 /**
- * Everyone side by side, today unless another range is chosen: the measures as lines, one per
- * person, the same for everyone who looks; who applied most; who gets interviews; how far it got;
- * and which profiles work. Everyone's applications and the all-time process follow below.
+ * Everyone side by side, today unless another range is chosen, as pictures more than numbers: the
+ * measures as lines, one per person, yours in red and everyone else's in blue; a card for each
+ * person with their own measures as lines and where their applications are now; how far each
+ * person's applications got, as lines through the stages; who gets interviews; and which profiles
+ * work. The all-time process follows below.
  */
 
-// ---- Comparing people over the range ------------------------------------------------------
+// ---- Colors: you in red, everyone else in blue ---------------------------------------------
 
-function PersonCard({ person, color, rangeName, people, lead }: { person: ActivityPerson; color: string; rangeName: string; people: number; lead: string }) {
+/** Your own lines red (your profiles in reds), everyone else's a blue by the place their line takes. */
+function teamColors(mineKeys: string[]): Pick<TrendView, 'colorOf' | 'mine'> {
+  const mine = new Set(mineKeys);
+  const order = new Map(mineKeys.map((key, index) => [key, index]));
+  return { mine, colorOf: (key, slot) => (mine.has(key) ? mineColor(order.get(key) ?? 0) : othersColor(slot)) };
+}
+
+/** Each person's color, the one their line has in the chart of people: you red, the rest blue. */
+function usePersonColors(data: ActivityResponse, now: Date): Map<number, string> {
+  return useMemo(() => {
+    const me = data.people.find((person) => person.isMe);
+    const people = entityChoices(data.people, (person) => ({ id: person.user.id, key: `u${person.user.id}`, name: userName(person.user), raw: person.trends.bids, bids: person.trends.bids }), data, 'bids', false, now);
+    const mine = new Set(me ? [`u${me.user.id}`] : []);
+    const slots = firstChoice(people.series, people.choose ?? new Map<string, number>(), mine);
+    let spare = slots.size;
+    return new Map(
+      data.people.map((person) => {
+        const key = `u${person.user.id}`;
+        if (person.isMe) return [person.user.id, ME_COLOR];
+        return [person.user.id, othersColor(slots.get(key) ?? spare++)];
+      })
+    );
+  }, [data, now]);
+}
+
+// ---- Each person's activity, as a card -----------------------------------------------------
+
+/** The measures drawn in every person's card, each in the same color in every card. */
+const CARD_MEASURES: Array<{ metric: Exclude<TrendMetric, 'success'>; color: string }> = [
+  { metric: 'bids', color: seriesColor(0) },
+  { metric: 'interviews', color: seriesColor(1) },
+  { metric: 'technical', color: seriesColor(2) },
+  { metric: 'final', color: seriesColor(3) },
+  { metric: 'offers', color: seriesColor(6) }
+];
+
+const STATUS_COLORS: Record<ApplicationStatus, string> = {
+  Applied: 'var(--status-applied-ink)',
+  'Recruiter Screen': 'var(--status-recruiter-ink)',
+  'Technical Interview': 'var(--status-technical-ink)',
+  'Final Interview': 'var(--status-final-ink)',
+  Offer: 'var(--status-offer-ink)',
+  Rejected: 'var(--status-rejected-ink)'
+};
+const STATUS_SHORT: Record<ApplicationStatus, string> = {
+  Applied: 'Applied',
+  'Recruiter Screen': 'Screen',
+  'Technical Interview': 'Technical',
+  'Final Interview': 'Final',
+  Offer: 'Offer',
+  Rejected: 'Rejected'
+};
+
+/** Where one person's applications from the range are now, as one bar split by status. */
+function StatusBar({ row }: { row: TeamBoardRow | undefined }) {
+  if (!row || row.total === 0) return <div className="h-2.5 rounded-[3px] bg-surface-2" title="No applications in the range" />;
+  const parts = APPLICATION_STATUSES.filter((status) => row.statuses[status] > 0);
+  return (
+    <div>
+      <div className="flex h-2.5 gap-[2px] overflow-hidden rounded-[3px]" role="img" aria-label={`Where the ${row.total} applications are now: ${parts.map((status) => `${status} ${row.statuses[status]}`).join(', ')}`}>
+        {parts.map((status) => (
+          <div key={status} title={`${status}: ${row.statuses[status]}`} style={{ flexGrow: row.statuses[status], backgroundColor: STATUS_COLORS[status] }} />
+        ))}
+      </div>
+      <p className="mt-1 flex flex-wrap gap-x-2 text-[11px] text-ink-3">
+        {parts.map((status) => (
+          <span key={status} className="inline-flex items-center gap-1">
+            <span className="size-2 rounded-[2px]" style={{ backgroundColor: STATUS_COLORS[status] }} aria-hidden />
+            {STATUS_SHORT[status]} <span className="font-semibold tabular-nums text-ink-2">{row.statuses[status]}</span>
+          </span>
+        ))}
+      </p>
+    </div>
+  );
+}
+
+function PersonCard({
+  person,
+  color,
+  rangeName,
+  people,
+  lead,
+  data,
+  now,
+  board,
+  scaleTop
+}: {
+  person: ActivityPerson;
+  color: string;
+  rangeName: string;
+  people: number;
+  lead: string;
+  data: ActivityResponse;
+  now: Date;
+  board: TeamBoardRow | undefined;
+  /** The same axis for every card, so their heights compare. */
+  scaleTop: number;
+}) {
+  // Running totals over the range: how each measure built up, all of them in one small chart.
+  const lines: Series[] = CARD_MEASURES.map(({ metric, color: line }) => ({
+    key: metric,
+    name: TREND_INFO[metric].label,
+    color: line,
+    total: null,
+    values: shapeTrend(person.trends[metric], data, metric, true, now)
+  }));
   return (
     <li
       data-person-card={person.user.username}
-      className={cn('flex flex-col rounded-md border bg-surface px-3 py-2.5', person.isMe ? 'border-accent' : 'border-border')}
+      className={cn('flex flex-col rounded-md border bg-surface px-3 py-2.5', person.isMe ? 'border-[color:var(--me-line)]' : 'border-border')}
       title={person.profiles.length ? `By profile, ${rangeName.toLowerCase()}:\n${person.profiles.map((profile) => `${profile.name}: ${profile.inRange}`).join('\n')}` : undefined}
     >
       <div className="flex items-center gap-2">
@@ -62,6 +197,13 @@ function PersonCard({ person, color, rangeName, people, lead }: { person: Activi
           </div>
         ))}
       </dl>
+      <div className="mt-2" data-person-chart>
+        <LineChart buckets={data.buckets} group={data.group} series={lines} compact least={scaleTop} description={`${userName(person.user)}: bids, interviews, technical, final and offers, running totals, ${rangeName}`} footer={null} />
+      </div>
+      <div className="mt-2">
+        <p className="mb-1 text-[11px] text-ink-3">Where these applications are now</p>
+        <StatusBar row={board} />
+      </div>
       {/* Two different counts, each named for what it counts: applications that got one, and interviews by their date. */}
       <p className="mt-1.5 text-[11.5px] text-ink-2">
         <span title={`${person.interviews} of the ${person.inRange} applications made ${rangeName.toLowerCase()} got an interview: Recruiter Screen or later, or one booked`}>
@@ -77,7 +219,7 @@ function PersonCard({ person, color, rangeName, people, lead }: { person: Activi
 }
 
 /** Ranked bars on one scale, with the counts behind each rate and the team's rate as a mark. */
-function InterviewRanking({ data }: { data: ActivityResponse }) {
+function InterviewRanking({ data, colors }: { data: ActivityResponse; colors: Map<number, string> }) {
   const rows = [...data.people].sort((a, b) => (b.interviewRate ?? -1) - (a.interviewRate ?? -1) || b.inRange - a.inRange || a.rank - b.rank);
   const team = data.team.interviewRate;
   const top = Math.min(100, Math.max(10, Math.ceil(Math.max(team ?? 0, ...rows.map((person) => person.interviewRate ?? 0)) / 10) * 10));
@@ -103,7 +245,7 @@ function InterviewRanking({ data }: { data: ActivityResponse }) {
             </span>
             <div className="relative h-3" title={`${person.interviews} of ${person.inRange} applications got an interview`}>
               <div className="absolute inset-0 rounded-[3px] bg-surface-2" />
-              {person.interviewRate ? <div className="absolute inset-y-0 left-0 rounded-r-[4px] bg-accent" style={{ width: at(person.interviewRate) }} /> : null}
+              {person.interviewRate ? <div className="absolute inset-y-0 left-0 rounded-r-[4px]" style={{ width: at(person.interviewRate), backgroundColor: colors.get(person.user.id) ?? othersColor(0) }} /> : null}
               {team !== null ? <div className="absolute -inset-y-1 w-px bg-ink" style={{ left: at(team) }} aria-hidden /> : null}
             </div>
             <span className="text-right font-semibold tabular-nums text-ink">{percent(person.interviewRate)}</span>
@@ -221,6 +363,123 @@ function PipelineTable({ data }: { data: ActivityResponse }) {
   );
 }
 
+const STAGE_POINTS: Array<{ label: string; of: (person: Pick<ActivityPerson, 'inRange' | 'reached'>) => number }> = [
+  { label: 'Applied', of: (person) => person.inRange },
+  { label: 'Screen', of: (person) => person.reached.screen },
+  { label: 'Technical', of: (person) => person.reached.technical },
+  { label: 'Final', of: (person) => person.reached.final },
+  { label: 'Offer', of: (person) => person.reached.offer }
+];
+
+/**
+ * How far each person's applications got, as one line per person through the stages: as a share
+ * of what they applied, so people who apply more or less can be compared, or as counts. Yours is
+ * red. Pointing at a name or a stage reads the numbers.
+ */
+function StageLines({ data, colors }: { data: ActivityResponse; colors: Map<number, string> }) {
+  const [measure, setMeasure] = useState<'share' | 'count'>('share');
+  const [view, setView] = useState<'chart' | 'table'>('chart');
+  const [highlighted, setHighlighted] = useState<string | null>(null);
+  const [hover, setHover] = useState<number | null>(null);
+  const valueOf = (person: Pick<ActivityPerson, 'inRange' | 'reached'>, index: number) => {
+    const reached = STAGE_POINTS[index].of(person);
+    return measure === 'count' ? reached : (share(reached, person.inRange) ?? 0);
+  };
+  const format = measure === 'count' ? count : (value: number) => `${Math.round(value)}%`;
+  const series: Series[] = data.people
+    .filter((person) => person.inRange > 0)
+    .map((person) => ({
+      key: `u${person.user.id}`,
+      name: userName(person.user),
+      color: colors.get(person.user.id) ?? othersColor(0),
+      emphasis: person.isMe,
+      total: person.inRange,
+      values: STAGE_POINTS.map((_, index) => valueOf(person, index))
+    }));
+  const [box, width] = useWidth(320);
+  const height = 250;
+  const margin = { top: 12, right: 18, bottom: 26, left: 40 };
+  const { top, ticks } = niceScale(Math.max(measure === 'share' ? 100 : 1, ...series.flatMap((item) => item.values.map((value) => value ?? 0))), true);
+  const step = (width - margin.left - margin.right) / (STAGE_POINTS.length - 1);
+  const x = (index: number) => margin.left + step * index;
+  const y = (value: number) => margin.top + (height - margin.top - margin.bottom) * (1 - value / top);
+  const order = [...series].sort((a, b) => Number(a.key === highlighted) - Number(b.key === highlighted) || Number(!!a.emphasis) - Number(!!b.emphasis));
+  const marks = new Map(data.people.filter((person) => person.isMe).map((person) => [`u${person.user.id}`, '(you)']));
+
+  if (series.length === 0) return <p className="py-6 text-center text-[12.5px] text-ink-3">Nobody applied in the range.</p>;
+  return (
+    <div>
+      <div className="mb-1 flex flex-wrap items-center justify-end gap-2">
+        <Toggle
+          label="Measure"
+          value={measure}
+          onChange={setMeasure}
+          options={[
+            { value: 'share', label: 'Share of applied' },
+            { value: 'count', label: 'Count' }
+          ]}
+        />
+        <TableSwitch view={view} onChange={setView} />
+      </div>
+      {view === 'table' ? (
+        <PipelineTable data={data} />
+      ) : (
+        <>
+          <div ref={box} className="relative" onMouseLeave={() => setHover(null)}>
+            <svg width={width} height={height} role="img" aria-label={`How far each person's applications got, ${measure === 'share' ? 'as a share of what they applied' : 'as counts'}, by stage`}>
+              {ticks.map((tick) => (
+                <g key={tick}>
+                  <line x1={margin.left} x2={width - margin.right} y1={y(tick)} y2={y(tick)} stroke="var(--border)" />
+                  <text x={margin.left - 6} y={y(tick)} textAnchor="end" dominantBaseline="middle" fontSize={11} fill="var(--ink-3)">
+                    {format(tick)}
+                  </text>
+                </g>
+              ))}
+              {STAGE_POINTS.map((stage, index) => (
+                <g key={stage.label}>
+                  {hover === index ? <line x1={x(index)} x2={x(index)} y1={margin.top} y2={height - margin.bottom} stroke="var(--ink-3)" strokeDasharray="2 3" /> : null}
+                  <text x={x(index)} y={height - 8} textAnchor={index === 0 ? 'start' : index === STAGE_POINTS.length - 1 ? 'end' : 'middle'} fontSize={11} fill="var(--ink-3)">
+                    {stage.label}
+                  </text>
+                  {/* The whole column is the place to point at. */}
+                  <rect x={x(index) - step / 2} y={0} width={step} height={height} fill="transparent" onMouseEnter={() => setHover(index)} />
+                </g>
+              ))}
+              {order.map((item) => (
+                <g key={item.key} opacity={highlighted !== null && item.key !== highlighted ? 0.15 : 1} data-stage-line={item.key} pointerEvents="none">
+                  <path d={item.values.map((value, index) => `${index === 0 ? 'M' : 'L'}${x(index).toFixed(1)},${y(value ?? 0).toFixed(1)}`).join(' ')} fill="none" stroke={item.color} strokeWidth={item.emphasis || item.key === highlighted ? 3 : 2} strokeLinejoin="round" />
+                  {item.values.map((value, index) => (
+                    <circle key={index} cx={x(index)} cy={y(value ?? 0)} r={item.emphasis ? 3.5 : 2.5} fill={item.color} stroke="var(--surface)" strokeWidth={1.5} />
+                  ))}
+                </g>
+              ))}
+            </svg>
+            {hover !== null ? (
+              <div className="pointer-events-none absolute top-1 z-10 min-w-44 rounded-md border border-border bg-surface px-2.5 py-2 text-[12px] shadow-lg" style={{ left: Math.max(0, Math.min(x(hover) + 12, width - 220)) }} role="status">
+                <p className="mb-1 font-medium text-ink">{STAGE_POINTS[hover].label}</p>
+                {[...series]
+                  .sort((a, b) => (b.values[hover] ?? 0) - (a.values[hover] ?? 0))
+                  .map((item) => (
+                    <p key={item.key} className="flex items-center gap-1.5 text-ink-2">
+                      <LineMark color={item.color} />
+                      <span className="min-w-0 flex-1 truncate">
+                        {item.name}
+                        {marks.get(item.key) ? ` ${marks.get(item.key)}` : ''}
+                      </span>
+                      <span className="font-semibold tabular-nums text-ink">{format(item.values[hover] ?? 0)}</span>
+                    </p>
+                  ))}
+              </div>
+            ) : null}
+          </div>
+          <Legend series={series} format={(value) => `${count(value)} applied`} ranked marks={marks} onHighlight={setHighlighted} />
+        </>
+      )}
+      <p className="mt-1.5 text-[11.5px] text-ink-3">Of the applications made in the range, how many reached each stage or went further. A line that stays high goes further.</p>
+    </div>
+  );
+}
+
 type TeamLines = 'people' | 'profiles';
 
 /** "Backend · Andy": the profile, and whose it is. A first profile named after its owner needs no repeating. */
@@ -240,18 +499,22 @@ function useTeamTrends(data: ActivityResponse, now: Date, lines: TeamLines) {
       const footer = { label: 'Team', values: shapeTrend(data.teamTrends[metric], data, metric, cumulative, now) };
       if (lines === 'profiles') {
         const profiles = data.people.flatMap((person) => person.profiles.map((profile) => ({ person, profile })));
+        const mine = profiles.filter(({ person }) => person.isMe).map(({ profile }) => `p${profile.id}`);
         return {
           ...entityChoices(profiles, ({ person, profile }) => ({ id: profile.id, key: `p${profile.id}`, name: profileLine(profile, person), raw: profile.trends[metric], bids: profile.trends.bids }), data, metric, cumulative, now),
+          ...teamColors(mine),
           footer,
           ranked: true,
-          marks: new Map(profiles.filter(({ person }) => person.isMe).map(({ profile }) => [`p${profile.id}`, '(yours)']))
+          marks: new Map(mine.map((key) => [key, '(yours)']))
         };
       }
+      const mine = data.people.filter((person) => person.isMe).map((person) => `u${person.user.id}`);
       return {
         ...entityChoices(data.people, (person) => ({ id: person.user.id, key: `u${person.user.id}`, name: userName(person.user), raw: person.trends[metric], bids: person.trends.bids }), data, metric, cumulative, now),
+        ...teamColors(mine),
         footer,
         ranked: true,
-        marks: new Map(data.people.filter((person) => person.isMe).map((person) => [`u${person.user.id}`, '(you)']))
+        marks: new Map(mine.map((key) => [key, '(you)']))
       };
     },
     [data, now, lines]
@@ -266,12 +529,13 @@ function TeamAnalytics({ filters, data }: { filters: Filters; data: ActivityResp
   const trends = useTeamTrends(data, now, lines);
   const profileCount = data.people.reduce((sum, person) => sum + person.profiles.length, 0);
   const ranked = [...data.people].sort((a, b) => a.rank - b.rank);
-  // Each person's dot has the color their line starts with in the person chart: chosen the same way, the most active eight.
-  const colors = useMemo(() => {
-    const people = entityChoices(data.people, (person) => ({ id: person.user.id, key: `u${person.user.id}`, name: userName(person.user), raw: person.trends.bids, bids: person.trends.bids }), data, 'bids', false, now);
-    const slots = firstChoice(people.series, people.choose ?? new Map<string, number>());
-    return new Map(data.people.map((person) => [person.user.id, slots.has(`u${person.user.id}`) ? seriesColor(slots.get(`u${person.user.id}`) ?? 0) : OTHERS_COLOR]));
-  }, [data, now]);
+  // Each person keeps one color everywhere on the page: yours red, everyone else's the blue of their line.
+  const colors = usePersonColors(data, now);
+  // Where everyone's applications from the range are now, person by person. Only the counts are needed.
+  const statuses = useTeamApplications({ tz: filters.tz, from: filters.range.first, to: filters.range.last, limit: 1 });
+  const boardOf = new Map((statuses.data?.board ?? []).map((row) => [row.user.id, row]));
+  // The most anyone sent: bids are the highest line in every card, so this tops them all.
+  const scaleTop = Math.max(0, ...data.people.map((person) => person.inRange));
 
   const leadOf = (person: ActivityPerson): string => {
     if (person.inRange === 0) return '';
@@ -330,31 +594,56 @@ function TeamAnalytics({ filters, data }: { filters: Filters; data: ActivityResp
         />
       </div>
 
-      <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-        <Panel title={`Leaderboard · ${rangeName} · ${label}`} icon={Trophy}>
+      <div className="mt-3">
+        <Panel
+          title={`Everyone's activity · ${rangeName} · ${label}`}
+          icon={Activity}
+          aside={
+            <span className="flex flex-wrap items-center gap-x-2.5 pr-2 text-[11.5px] text-ink-3" aria-label="Lines in each card">
+              {CARD_MEASURES.map(({ metric, color }) => (
+                <span key={metric} className="inline-flex items-center gap-1">
+                  <LineMark color={color} />
+                  {TREND_INFO[metric].label}
+                </span>
+              ))}
+              <span>· running totals</span>
+            </span>
+          }
+        >
           <div className="p-2.5">
-            <ol className="grid grid-cols-[repeat(auto-fill,minmax(250px,1fr))] gap-2" aria-label="People by applications">
-              {data.people.map((person) => (
-                <PersonCard key={person.user.id} person={person} color={colors.get(person.user.id) ?? OTHERS_COLOR} rangeName={rangeName} people={data.people.length} lead={leadOf(person)} />
+            <ol className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-2" aria-label="Each person's activity">
+              {ranked.map((person) => (
+                <PersonCard
+                  key={person.user.id}
+                  person={person}
+                  color={colors.get(person.user.id) ?? othersColor(0)}
+                  rangeName={rangeName}
+                  people={data.people.length}
+                  lead={leadOf(person)}
+                  data={data}
+                  now={now}
+                  board={boardOf.get(person.user.id)}
+                  scaleTop={scaleTop}
+                />
               ))}
             </ol>
+          </div>
+        </Panel>
+      </div>
+
+      <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        <Panel title={`How far applications got · ${rangeName} · ${label}`} icon={Filter}>
+          <div className="px-3.5 py-2">
+            <StageLines data={data} colors={colors} />
           </div>
         </Panel>
 
         <Panel title={`Interview rate · ${rangeName} · ${label}`} icon={Percent}>
           <div className="px-3.5 py-2.5">
-            <InterviewRanking data={data} />
+            <InterviewRanking data={data} colors={colors} />
             <p className="mt-2 text-[11.5px] text-ink-3">
               Of the applications made {filters.preset === 'today' || filters.preset === 'yesterday' ? 'that day' : 'in the range'}, the share that reached Recruiter Screen or later, or has an interview booked. Recent applications may still get one.
             </p>
-          </div>
-        </Panel>
-      </div>
-
-      <div className="mt-3">
-        <Panel title={`How far applications got · ${rangeName} · ${label}`} icon={Filter}>
-          <div className="px-3.5 py-2">
-            <PipelineTable data={data} />
           </div>
         </Panel>
       </div>
@@ -490,7 +779,7 @@ function MemberCard({ member, isAdmin }: { member: TeamMember; isAdmin: boolean 
 
 // ---- The page ------------------------------------------------------------------------------
 
-export function TeamPage({ user, onOpenJob }: { user: CurrentUser; onOpenJob: (jobId: number) => void }) {
+export function TeamPage({ user }: { user: CurrentUser; onOpenJob?: (jobId: number) => void }) {
   const filters = useFilters('jobTracker.teamRange');
   const { range, group } = filters;
   const activity = useActivity({ tz: filters.tz, today: filters.today, from: range.first, to: range.last, group, scope: 'team' });
@@ -518,10 +807,6 @@ export function TeamPage({ user, onOpenJob }: { user: CurrentUser; onOpenJob: (j
           <Skeleton className="h-64" />
         </div>
       ) : null}
-
-      <div className="mt-3">
-        <TeamApplications filters={filters} onOpenJob={onOpenJob} />
-      </div>
 
       <h2 className="mb-2 mt-5 text-[14px] font-semibold">Process by person · all time</h2>
       {team.isError ? (

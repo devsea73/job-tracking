@@ -266,6 +266,10 @@ export const share = (part: number, whole: number) => (whole > 0 ? Math.round((p
 export const SERIES_SLOTS = 8;
 export const OTHERS_COLOR = 'var(--ink-3)';
 export const seriesColor = (index: number) => `var(--series-${index + 1})`;
+/** On the Team page whoever looks is red and everyone else blue: your own line stands out among the rest. */
+export const ME_COLOR = 'var(--me-line)';
+export const mineColor = (index: number) => (index % 3 === 0 ? ME_COLOR : `var(--mine-${(index % 3) + 1})`);
+export const othersColor = (index: number) => `var(--others-${(index % SERIES_SLOTS) + 1})`;
 
 export interface Series {
   key: string;
@@ -273,6 +277,8 @@ export interface Series {
   color: string;
   /** Drawn dashed and without points: the period before, for comparison. */
   dashed?: boolean;
+  /** Drawn on top and a little thicker: the viewer's own line. */
+  emphasis?: boolean;
   /** Shown next to the name in the legend and table; null for none. */
   total: number | null;
   /** Null for a period that has not begun yet: no applications yet is not zero applications. */
@@ -478,12 +484,12 @@ export function niceScale(max: number, integer: boolean): { top: number; ticks: 
   return { top: count * step, ticks: Array.from({ length: count + 1 }, (_, index) => Number((index * step).toFixed(6))) };
 }
 
-function useWidth(): [React.RefObject<HTMLDivElement | null>, number] {
+export function useWidth(least = 280): [React.RefObject<HTMLDivElement | null>, number] {
   const box = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(640);
   useEffect(() => {
     if (!box.current) return;
-    const observer = new ResizeObserver(([entry]) => setWidth(Math.max(280, entry.contentRect.width)));
+    const observer = new ResizeObserver(([entry]) => setWidth(Math.max(least, entry.contentRect.width)));
     observer.observe(box.current);
     return () => observer.disconnect();
   }, []);
@@ -503,9 +509,14 @@ interface ChartProps {
   footer?: ChartFooter;
   /** The series pointed at in the legend, drawn on top while the others fade. */
   highlighted?: string | null;
+  /** Small, for a card: shorter, with no names at the lines' ends and only the top of the axis. */
+  compact?: boolean;
+  /** The least the axis reaches: charts side by side share one scale, so their heights compare. */
+  least?: number;
 }
 
-const CHART_HEIGHT = 260;
+const FULL_HEIGHT = 260;
+const COMPACT_HEIGHT = 130;
 
 /** The readout's last line: the footer given, or the series added up, or nothing. */
 function footerAt(series: Series[], footer: ChartFooter | undefined, index: number): { label: string; value: number | null } | null {
@@ -520,15 +531,20 @@ function footerAt(series: Series[], footer: ChartFooter | undefined, index: numb
  * zero, a crosshair with every value at the point under it, and, for four lines or fewer, names
  * at the lines' ends. The arrow keys read it point by point.
  */
-export function LineChart({ buckets, group, series, description, format = count, integer = true, footer, highlighted = null }: ChartProps) {
-  const [box, width] = useWidth();
+export function LineChart({ buckets, group, series, description, format = count, integer = true, footer, highlighted = null, compact = false, least = 0 }: ChartProps) {
+  const [box, width] = useWidth(compact ? 160 : 280);
   const [hover, setHover] = useState<number | null>(null);
+  const CHART_HEIGHT = compact ? COMPACT_HEIGHT : FULL_HEIGHT;
   const values = series.flatMap((item) => item.values.filter((value): value is number => value !== null));
-  const { top, ticks } = niceScale(Math.max(0, ...values), integer);
+  const scale = niceScale(Math.max(0, least, ...values), integer);
+  const top = scale.top;
+  const ticks = compact ? [0, top] : scale.ticks;
   const solid = series.filter((item) => !item.dashed);
-  const labelled = solid.length > 0 && solid.length <= 4;
+  const labelled = !compact && solid.length > 0 && solid.length <= 4;
   // Room for the longest tick on the left and the line names on the right.
-  const margin = { top: 12, right: labelled ? 104 : 16, bottom: 26, left: Math.max(30, 10 + Math.max(...ticks.map((tick) => format(tick).length)) * 6.6) };
+  const margin = compact
+    ? { top: 8, right: 8, bottom: 20, left: Math.max(22, 8 + Math.max(...ticks.map((tick) => format(tick).length)) * 6) }
+    : { top: 12, right: labelled ? 104 : 16, bottom: 26, left: Math.max(30, 10 + Math.max(...ticks.map((tick) => format(tick).length)) * 6.6) };
   const plotWidth = width - margin.left - margin.right;
   const plotHeight = CHART_HEIGHT - margin.top - margin.bottom;
   const total = buckets.length;
@@ -561,7 +577,7 @@ export function LineChart({ buckets, group, series, description, format = count,
   const endYs = ends.map((end) => y(end.item.values[end.index] ?? 0)).sort((a, b) => a - b);
   const endsFit = labelled && endYs.every((value, index) => index === 0 || value - endYs[index - 1] >= 13);
   // The period before goes underneath, and the line pointed at on top.
-  const order = [...series].sort((a, b) => Number(!a.dashed) - Number(!b.dashed) || Number(a.key === highlighted) - Number(b.key === highlighted));
+  const order = [...series].sort((a, b) => Number(!a.dashed) - Number(!b.dashed) || Number(a.key === highlighted) - Number(b.key === highlighted) || Number(!!a.emphasis) - Number(!!b.emphasis));
   const faded = (item: Series) => highlighted !== null && item.key !== highlighted;
   const readout = hover !== null && buckets[hover] ? footerAt(series, footer, hover) : null;
 
@@ -601,8 +617,8 @@ export function LineChart({ buckets, group, series, description, format = count,
         {hover !== null ? <line x1={x(hover)} x2={x(hover)} y1={margin.top} y2={margin.top + plotHeight} stroke="var(--ink-3)" strokeWidth={1} strokeDasharray="2 3" /> : null}
         {order.map((item) => (
           <g key={item.key} opacity={faded(item) ? 0.18 : 1} data-series={item.key}>
-            <path d={path(item.values)} fill="none" stroke={item.color} strokeWidth={item.key === highlighted ? 2.5 : 2} strokeDasharray={item.dashed ? '5 4' : undefined} strokeLinejoin="round" strokeLinecap="round" />
-            {!item.dashed && buckets.length <= 16
+            <path d={path(item.values)} fill="none" stroke={item.color} strokeWidth={item.key === highlighted ? 2.75 : item.emphasis ? 2.75 : compact ? 1.75 : 2} strokeDasharray={item.dashed ? '5 4' : undefined} strokeLinejoin="round" strokeLinecap="round" />
+            {!item.dashed && !compact && buckets.length <= 16
               ? item.values.map((value, index) => (value === null ? null : <circle key={index} cx={x(index)} cy={y(value)} r={3} fill={item.color} stroke="var(--surface)" strokeWidth={1.5} />))
               : null}
             {hover !== null && item.values[hover] !== null ? <circle cx={x(hover)} cy={y(item.values[hover] ?? 0)} r={4.5} fill={item.color} stroke="var(--surface)" strokeWidth={2} /> : null}
@@ -617,7 +633,7 @@ export function LineChart({ buckets, group, series, description, format = count,
           : null}
       </svg>
       {hover !== null && buckets[hover] ? (
-        <div className="pointer-events-none absolute top-1 z-10 min-w-44 rounded-md border border-border bg-surface px-2.5 py-2 text-[12px] shadow-lg" style={{ left: Math.min(Math.max(0, x(hover) + 12), width - 220) }} role="status">
+        <div className="pointer-events-none absolute top-1 z-10 min-w-44 rounded-md border border-border bg-surface px-2.5 py-2 text-[12px] shadow-lg" style={{ left: Math.max(0, Math.min(x(hover) + 12, width - 220)) }} role="status">
           <p className="mb-1 font-medium text-ink">{bucketLabel(buckets[hover], group)}</p>
           {[...series]
             .sort((a, b) => (b.values[hover] ?? -1) - (a.values[hover] ?? -1))

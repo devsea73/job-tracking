@@ -49,13 +49,21 @@ export interface TrendView {
    * same chart. The series' own colors are then ignored.
    */
   choose?: Map<string, number>;
+  /** The color of a line drawn in the given place; left out, the standard palette's. */
+  colorOf?: (key: string, slot: number) => string;
+  /** The viewer's own lines: always drawn at first, on top of the rest. */
+  mine?: Set<string>;
 }
 
-/** The lines drawn at first: the most active, eight at most, each colored by its place in the series' own order. */
-export function firstChoice(series: Series[], activity: Map<string, number>): Map<string, number> {
+/**
+ * The lines drawn at first: the viewer's own, then the most active, eight at most, each in a place
+ * of the series' own order.
+ */
+export function firstChoice(series: Series[], activity: Map<string, number>, mine?: Set<string>): Map<string, number> {
   const order = new Map(series.map((item, index) => [item.key, index]));
   const place = (key: string) => order.get(key) ?? 0;
-  const top = [...series].sort((a, b) => (activity.get(b.key) ?? 0) - (activity.get(a.key) ?? 0) || place(a.key) - place(b.key)).slice(0, SERIES_SLOTS);
+  const own = (key: string) => Number(mine?.has(key) ?? false);
+  const top = [...series].sort((a, b) => own(b.key) - own(a.key) || (activity.get(b.key) ?? 0) - (activity.get(a.key) ?? 0) || place(a.key) - place(b.key)).slice(0, SERIES_SLOTS);
   return new Map(top.sort((a, b) => place(a.key) - place(b.key)).map((item, index) => [item.key, index]));
 }
 
@@ -97,8 +105,11 @@ export function TrendCard({
   // the same people or profiles are listed; until one is made, the most active are drawn.
   const listed = built.series.map((item) => item.key).join(',');
   const [choice, setChoice] = useState<{ listed: string; slots: Map<string, number> } | null>(null);
-  const slots = built.choose ? (choice?.listed === listed ? choice.slots : firstChoice(built.series, built.choose)) : null;
-  const colored = slots ? built.series.map((item) => ({ ...item, color: slots.has(item.key) ? seriesColor(slots.get(item.key) ?? 0) : OTHERS_COLOR })) : built.series;
+  const slots = built.choose ? (choice?.listed === listed ? choice.slots : firstChoice(built.series, built.choose, built.mine)) : null;
+  const colorOf = built.colorOf ?? ((_key: string, slot: number) => seriesColor(slot));
+  const colored = slots
+    ? built.series.map((item) => ({ ...item, emphasis: built.mine?.has(item.key), color: slots.has(item.key) ? colorOf(item.key, slots.get(item.key) ?? 0) : OTHERS_COLOR }))
+    : built.series;
   const drawn = slots ? colored.filter((item) => slots.has(item.key)) : colored;
   const legendChoice = slots
     ? {

@@ -52,6 +52,18 @@
   --series-6: #008300;
   --series-7: #6250d6;
   --series-8: #e34948;
+  /* The Team page: whoever looks is red, everyone else a blue, so your own line stands out. */
+  --me-line: #d62828;
+  --mine-2: #a61b1b;
+  --mine-3: #e8590c;
+  --others-1: #1d4ed8;
+  --others-2: #0284c7;
+  --others-3: #4f46e5;
+  --others-4: #1e3a8a;
+  --others-5: #3b82f6;
+  --others-6: #0e7490;
+  --others-7: #6d6af0;
+  --others-8: #075985;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -64,6 +76,17 @@
     --series-6: #008300;
     --series-7: #9085e9;
     --series-8: #e66767;
+    --me-line: #f26b6b;
+    --mine-2: #ff9b9b;
+    --mine-3: #ff922b;
+    --others-1: #4f8ff7;
+    --others-2: #38bdf8;
+    --others-3: #8b8cf6;
+    --others-4: #93c5fd;
+    --others-5: #2f6fe0;
+    --others-6: #22b8cf;
+    --others-7: #b4b8ff;
+    --others-8: #5aa9e6;
     --background: #0f1115;
     --surface: #171a20;
     --surface-2: #1f232b;
