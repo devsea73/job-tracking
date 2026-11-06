@@ -8,6 +8,7 @@ import {
   PROFILE_NAME_MAX,
   USERNAME_PATTERN
 } from '../shared/constants';
+import { ACTIVITY_GROUPS, daysBetween, groupFits, isCalendarDate, MAX_RANGE_DAYS } from '../shared/calendar';
 import { badRequest } from './errors';
 
 /** Validates request data, reporting the first problem in words a person can act on. */
@@ -154,11 +155,12 @@ export const jobListQuery = z.object({
   offset: z.coerce.number().int().min(0).optional()
 });
 
-const moment = z.string().datetime({ offset: true, message: 'Expected a date and time.' });
+const calendarDate = z.string().refine(isCalendarDate, { message: 'Use a date like 2026-11-05.' });
 export const activityQuery = z
-  .object({ from: moment, to: moment, day: moment, week: moment, month: moment })
-  .refine((query) => Date.parse(query.to) > Date.parse(query.from), 'The range ends before it starts.')
-  .refine((query) => Date.parse(query.to) - Date.parse(query.from) <= 400 * 86_400_000, 'Choose a range of at most 400 days.');
+  .object({ tz: timezone, today: calendarDate, from: calendarDate, to: calendarDate, group: z.enum(ACTIVITY_GROUPS).optional() })
+  .refine((query) => query.to >= query.from, 'The range ends before it starts.')
+  .refine((query) => daysBetween(query.from, query.to) < MAX_RANGE_DAYS, `Choose a range of at most ${MAX_RANGE_DAYS} days.`)
+  .refine((query) => !query.group || groupFits(query.group, query.from, query.to), 'Hours can only be shown for a single day.');
 
 export const briefQuery = z.object({ application: z.coerce.number().int().positive().optional() });
 

@@ -127,7 +127,8 @@ export function useJob(id: number | null): UseQueryResult<JobDetail> {
 export function useActivity(query: ActivityQuery): UseQueryResult<ActivityResponse> {
   return useQuery({
     queryKey: ['activity', query],
-    queryFn: () => call<ActivityResponse>('GET', `/api/activity?${new URLSearchParams(Object.entries(query).map(([key, value]) => [key, String(value)])).toString()}`),
+    queryFn: () =>
+      call<ActivityResponse>('GET', `/api/activity?${new URLSearchParams(Object.entries(query).filter((entry): entry is [string, string] => typeof entry[1] === 'string')).toString()}`),
     placeholderData: keepPreviousData
   });
 }

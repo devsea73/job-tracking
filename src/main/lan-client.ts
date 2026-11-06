@@ -98,6 +98,29 @@ export function readServerCertificate(host: string, port: number, timeoutMs = 6_
   });
 }
 
+/**
+ * Idle connections are closed here well before the host closes them (after 72 seconds). Otherwise
+ * a request can go out on a connection at the very moment the host is closing it, and fail as
+ * "connection lost" although the host is fine.
+ */
+const IDLE_CONNECTION_MS = 30_000;
+
+/** A reset this side of any answer, on a connection reused from earlier: the host never saw the request. */
+class StaleConnectionError extends Error {
+  constructor(readonly reset: NodeJS.ErrnoException) {
+    super(reset.message);
+  }
+}
+
+/**
+ * Requests that do no harm if the host did get the first try after all. Applying is one: a
+ * second try finds the application and answers "already applied" instead of saving another.
+ */
+function safeToRepeat(method: string, path: string): boolean {
+  if (method === 'GET' || method === 'PATCH' || method === 'DELETE') return true;
+  return method === 'POST' && (path === '/api/applications' || path === '/api/applications/check' || /^\/api\/jobs\/\d+\/(apply|highlight)$/.test(path));
+}
+
 export class PinnedClient {
   private readonly agent: Agent;
 
@@ -113,6 +136,11 @@ export class PinnedClient {
         return undefined;
       }
     });
+    // Runs after the agent's own handler has put the connection aside for reuse. A request that
+    // takes the connection sets its own time limit, so this only ever ends an idle one.
+    this.agent.on('free', (socket: { setTimeout(ms: number): unknown; destroyed?: boolean }) => {
+      if (!socket.destroyed) socket.setTimeout(IDLE_CONNECTION_MS);
+    });
   }
 
   private options(method: string, path: string, headers: Record<string, string>): RequestOptions {
@@ -120,8 +148,24 @@ export class PinnedClient {
   }
 
   async call<T = unknown>(method: string, path: string, body: unknown, token: string | null, timeoutMs = 20_000): Promise<ApiCallResult<T>> {
+    try {
+      return await this.send<T>(method, path, body, token, timeoutMs);
+    } catch (error) {
+      if (!(error instanceof StaleConnectionError)) throw error;
+      if (!safeToRepeat(method, path)) throw classifyNetworkError(error.reset, this.target);
+      // Sent again once, on a new connection.
+      try {
+        return await this.send<T>(method, path, body, token, timeoutMs, true);
+      } catch (retryError) {
+        throw retryError instanceof StaleConnectionError ? classifyNetworkError(retryError.reset, this.target) : retryError;
+      }
+    }
+  }
+
+  private send<T>(method: string, path: string, body: unknown, token: string | null, timeoutMs: number, retried = false): Promise<ApiCallResult<T>> {
     const payload = body === undefined ? undefined : JSON.stringify(body);
     return new Promise((resolve, reject) => {
+      let answered = false;
       const req = request(
         this.options(method, path, {
           accept: 'application/json',
@@ -129,6 +173,7 @@ export class PinnedClient {
           ...(token ? { authorization: `Bearer ${token}` } : {})
         }),
         (res) => {
+          answered = true;
           const chunks: Buffer[] = [];
           res.on('data', (chunk: Buffer) => chunks.push(chunk));
           res.on('error', (error) => reject(classifyNetworkError(error, this.target)));
@@ -150,7 +195,10 @@ export class PinnedClient {
         }
       );
       req.setTimeout(timeoutMs, () => req.destroy(Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' })));
-      req.on('error', (error) => reject(classifyNetworkError(error, this.target)));
+      req.on('error', (error: NodeJS.ErrnoException) => {
+        const stale = !answered && !retried && req.reusedSocket && (error.code === 'ECONNRESET' || error.code === 'EPIPE');
+        reject(stale ? new StaleConnectionError(error) : classifyNetworkError(error, this.target));
+      });
       req.end(payload);
     });
   }
@@ -197,6 +245,8 @@ export class PinnedClient {
         res.on('error', (error) => resolve({ status: 200, error }));
       });
       req.on('error', (error) => resolve({ status: null, error: classifyNetworkError(error, this.target) }));
+      // The stream may reuse an idle connection: the idle time limit must not apply to it.
+      req.setTimeout(0);
       req.end();
       close = () => req.destroy();
     });

@@ -1,7 +1,8 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { Banknote, CalendarDays, CalendarPlus, Clock, Copy, Info, FileText, History, Link2, MapPin, Pencil, StickyNote, Trash2, User, UserPlus, Users, X, type LucideIcon } from 'lucide-react';
+import { Banknote, CalendarCheck, CalendarDays, CalendarPlus, Clock, Copy, Info, FileText, History, Link2, MapPin, Pencil, StickyNote, Trash2, User, UserPlus, Users, X, type LucideIcon } from 'lucide-react';
 import type { ApplicationDetail, CurrentUser, Interview, JobDetail } from '@shared/api';
+import type { ApplicationStatus } from '@shared/constants';
 import { isUnreadableNote } from '@shared/unreadable';
 import { applicationLabel, Avatar, canDeleteJob, HighlightButton, ProcessSteps, StatusBadge, StatusSelect, userName } from '@/components/job-bits';
 import { formatSalary, JobTags } from '@/components/job-tags';
@@ -193,18 +194,42 @@ function InterviewList({ application }: { application: ApplicationDetail }) {
   );
 }
 
+interface TimelineEntry {
+  key: string;
+  oldStatus: ApplicationStatus | null;
+  newStatus: ApplicationStatus;
+  at: string;
+  applied: boolean;
+}
+
+/**
+ * The application's own story: it starts when it was applied, then every status change. The start
+ * is the applied date, not when a status record was written, which a merge of two copies of a job
+ * or an imported list can make different.
+ */
+function timelineOf(application: ApplicationDetail): TimelineEntry[] {
+  const changes = application.history.filter((entry) => entry.oldStatus !== null);
+  return [
+    { key: 'applied', oldStatus: null, newStatus: 'Applied', at: application.appliedAt, applied: true },
+    ...changes.map((entry) => ({ key: String(entry.id), oldStatus: entry.oldStatus, newStatus: entry.newStatus, at: entry.changedAt, applied: false }))
+  ];
+}
+
 /** One profile's whole process on this job. Everyone can read it; only the owner can change it. */
 function ApplicationCard({ application }: { application: ApplicationDetail }) {
   const [withdrawing, setWithdrawing] = useState(false);
   const withdraw = useDeleteApplication();
   const toast = useToast();
+  const timeline = timelineOf(application);
   return (
     <article className="rounded-lg border border-border p-3">
       <header className="mb-2 flex items-center gap-2.5">
         <Avatar subject={application.profile} label={applicationLabel(application)} size="md" ring={false} />
         <div className="min-w-0 flex-1">
           <p className="truncate font-semibold leading-tight">{application.profile.name}</p>
-          <p className="truncate text-[12px] text-ink-3">{application.isMine ? formatDate(application.appliedAt) : `${userName(application.owner)} · ${formatDate(application.appliedAt)}`}</p>
+          <p className="truncate text-[12px] text-ink-3" data-applied-at>
+            {application.isMine ? '' : `${userName(application.owner)} · `}Applied {formatDateTime(application.appliedAt)}
+          </p>
         </div>
         <ProcessSteps status={application.status} furthest={application.furthestStage} />
         {application.isMine ? <StatusSelect applicationId={application.id} status={application.status} /> : <StatusBadge status={application.status} />}
@@ -225,27 +250,26 @@ function ApplicationCard({ application }: { application: ApplicationDetail }) {
         </p>
       ) : null}
       <InterviewList application={application} />
-      {application.history.length > 0 ? (
-        <details className="mt-2">
-          <summary className="inline-flex cursor-default items-center gap-1.5 text-[12.5px] tabular-nums text-ink-3" aria-label="History" title="History">
-            <History className="size-3.5" aria-hidden /> {application.history.length}
-          </summary>
-          <ol className="mt-1.5 space-y-1">
-            {application.history.map((entry) => (
-              <li key={entry.id} className="flex items-center gap-1.5 text-[12.5px] text-ink-2">
-                {entry.oldStatus ? (
-                  <>
-                    <StatusBadge status={entry.oldStatus} className="size-5" />
-                    <span aria-label="changed to">→</span>
-                  </>
-                ) : null}
-                <StatusBadge status={entry.newStatus} className="size-5" />
-                <span className="ml-auto whitespace-nowrap tabular-nums text-ink-3">{formatDateTime(entry.changedAt)}</span>
-              </li>
-            ))}
-          </ol>
-        </details>
-      ) : null}
+      <details className="mt-2">
+        <summary className="inline-flex cursor-default items-center gap-1.5 text-[12.5px] tabular-nums text-ink-3" aria-label="History" title="History">
+          <History className="size-3.5" aria-hidden /> {timeline.length}
+        </summary>
+        <ol className="mt-1.5 space-y-1" data-timeline>
+          {timeline.map((entry) => (
+            <li key={entry.key} className="flex items-center gap-1.5 text-[12.5px] text-ink-2">
+              {entry.oldStatus ? (
+                <>
+                  <StatusBadge status={entry.oldStatus} className="size-5" />
+                  <span aria-label="changed to">→</span>
+                </>
+              ) : null}
+              <StatusBadge status={entry.newStatus} className="size-5" />
+              {entry.applied ? <span>Applied</span> : null}
+              <span className="ml-auto whitespace-nowrap tabular-nums text-ink-3">{formatDateTime(entry.at)}</span>
+            </li>
+          ))}
+        </ol>
+      </details>
       <ConfirmDialog
         open={withdrawing}
         onOpenChange={setWithdrawing}
@@ -373,6 +397,8 @@ export function JobDetailSheet({ jobId, user, onClose }: { jobId: number | null;
   const copyLink = useCopyLink();
   const primaryUrl = job?.urls.find((url) => url.kind === 'original')?.originalUrl ?? job?.urls[0]?.originalUrl;
   const salary = job ? formatSalary(job.facts) : null;
+  // With several of my profiles on this job, the first time I applied.
+  const myAppliedAt = job?.applications.filter((application) => application.isMine).map((application) => application.appliedAt).sort()[0];
 
   return (
     <Sheet
@@ -405,9 +431,16 @@ export function JobDetailSheet({ jobId, user, onClose }: { jobId: number | null;
                     <CalendarDays className="size-3.5" aria-hidden /> {formatDate(job.facts.postedAt)}
                   </span>
                 ) : null}
-                <span className="inline-flex items-center gap-1" title={`Added ${formatRelative(job.createdAt)}`}>
-                  <Clock className="size-3.5" aria-hidden /> {formatDate(job.createdAt)}
-                </span>
+                {myAppliedAt ? (
+                  // My job: when I applied, never when the job was added or last changed.
+                  <span className="inline-flex items-center gap-1" title={`Applied ${formatDateTime(myAppliedAt)}`} aria-label={`Applied ${formatDate(myAppliedAt)}`} data-my-applied>
+                    <CalendarCheck className="size-3.5" aria-hidden /> Applied {formatDate(myAppliedAt)}
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1" title={`Added ${formatRelative(job.createdAt)}`}>
+                    <Clock className="size-3.5" aria-hidden /> {formatDate(job.createdAt)}
+                  </span>
+                )}
               </div>
             </>
           ) : (

@@ -1,4 +1,5 @@
 import type { ApplicationStatus, InterviewStage, JobScope, JobSort, UserRole } from './constants';
+import type { ActivityGroup } from './calendar';
 import type { PipelineStage, ProcessStats } from './pipeline';
 
 export interface ApiErrorBody {
@@ -379,44 +380,68 @@ export interface TeamMember {
   profiles: TeamProfile[];
 }
 
-/** Where the viewer's day, week, month and chosen range begin, as instants, and their time zone's offset. */
+/**
+ * Asked in the viewer's own calendar: their time zone, the day it is for them, and the range's
+ * first and last days (both included). The host works out where each of those days begins.
+ */
 export interface ActivityQuery {
+  tz: string;
+  today: string;
   from: string;
   to: string;
-  day: string;
-  week: string;
-  month: string;
+  /** Left out: hours for one day, days up to two months, weeks up to half a year, months beyond. */
+  group?: ActivityGroup;
 }
 
-export interface ActivityPerson {
-  user: UserRef;
-  isMe: boolean;
-  isActive: boolean;
+/** Days, both included, written 2026-11-05. */
+export interface DaySpan {
+  first: string;
+  last: string;
+}
+
+export interface ActivityBucket extends DaySpan {
+  /** 2026-11-05T14 for an hour, 2026-11-05 for a day, the Monday for a week, 2026-11 for a month. Its days are cut to the range. */
+  key: string;
+}
+
+export interface ActivityCounts {
   today: number;
+  yesterday: number;
   week: number;
   month: number;
   inRange: number;
-  allTime: number;
-  /** Applications in the range that got an interview so far: Recruiter Screen or later, or one scheduled. */
+  /** Applications made in the range that got an interview so far: Recruiter Screen or later, or one scheduled. */
   interviews: number;
-  /** Percent, one decimal. Null when nothing was applied in the range. */
+  /** Percent, one decimal. Null when nothing was applied in the range: no rate, rather than 0%. */
   interviewRate: number | null;
-  /**
-   * Applications in the range per UTC hour ("2026-11-05T14"), only hours with any. The viewer's
-   * computer places them in its own hours and days, which also handles daylight saving time.
-   */
-  hours: Array<[string, number]>;
+}
+
+export interface ActivityPerson extends ActivityCounts {
+  user: UserRef;
+  isMe: boolean;
+  isActive: boolean;
+  allTime: number;
+  allTimeInterviews: number;
+  allTimeInterviewRate: number | null;
+  /** Applications in each of the response's buckets. */
+  series: number[];
+  /** Applications in the range under each of this person's profiles, most first. */
   profiles: Array<{ name: string; count: number }>;
-  /** By applications in the range, then today's; 1 is the leader. */
-  rank?: number;
-  behindLeader?: number;
+  /** By applications in the range, then today's, then name; 1 is the leader. */
+  rank: number;
+  behindLeader: number;
 }
 
 export interface ActivityResponse {
-  from: string;
-  to: string;
+  tz: string;
+  group: ActivityGroup;
+  /** The days each number covers, in the viewer's calendar. */
+  periods: { today: DaySpan; yesterday: DaySpan; week: DaySpan; month: DaySpan; range: DaySpan };
+  buckets: ActivityBucket[];
   /** The viewer first, then everyone else by rank. */
   people: ActivityPerson[];
+  /** Everyone listed, added together. */
+  team: ActivityCounts;
 }
 
 export interface DashboardResponse {

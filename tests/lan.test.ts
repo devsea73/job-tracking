@@ -1,5 +1,6 @@
 import { X509Certificate } from 'node:crypto';
 import { rmSync } from 'node:fs';
+import { createServer as createHttpsServer } from 'node:https';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { describe, expect, it } from 'vitest';
@@ -154,3 +155,76 @@ describe('client and host over real TLS', () => {
 });
 
 const streams: Array<{ close: () => void }> = [];
+
+/**
+ * A host that closes every connection the moment a second request arrives on it: what happens
+ * when a request goes out on an idle connection just as the host closes it.
+ */
+async function startClosingHost() {
+  const tls = await loadOrCreateTls(tempDir());
+  const seen = new WeakMap<object, number>();
+  const received: string[] = [];
+  const host = createHttpsServer({ key: tls.key, cert: tls.cert }, (request, response) => {
+    const count = (seen.get(request.socket) ?? 0) + 1;
+    seen.set(request.socket, count);
+    received.push(`${request.method} ${request.url}`);
+    if (count > 1) {
+      request.socket.destroy();
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ ok: true }));
+  });
+  await new Promise<void>((resolve) => host.listen(0, '127.0.0.1', resolve));
+  const port = (host.address() as AddressInfo).port;
+  const client = new PinnedClient({ host: '127.0.0.1', port, fingerprint: tls.fingerprint, certPem: tls.cert });
+  const close = async () => {
+    client.destroy();
+    host.closeAllConnections();
+    await new Promise((resolve) => host.close(resolve));
+  };
+  return { client, received, close };
+}
+
+/** Lets the finished request's connection go back to the pool of idle ones. */
+const idleMoment = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+describe('a connection the host closes as a request goes out', () => {
+  it('is retried once on a new connection, so applying does not fail as "connection lost"', async () => {
+    const { client, received, close } = await startClosingHost();
+    try {
+      expect((await client.call('GET', '/api/jobs', undefined, null)).ok).toBe(true);
+      await idleMoment();
+      expect((await client.call('POST', '/api/applications', { url: 'https://company.com/jobs/1' }, null)).ok).toBe(true);
+      expect(received).toEqual(['GET /api/jobs', 'POST /api/applications', 'POST /api/applications']);
+    } finally {
+      await close();
+    }
+  });
+
+  it('is not retried when sending again could save something twice', async () => {
+    const { client, received, close } = await startClosingHost();
+    try {
+      await client.call('GET', '/api/jobs', undefined, null);
+      await idleMoment();
+      await expect(client.call('POST', '/api/applications/1/interviews', { stage: 'Recruiter Screen' }, null)).rejects.toThrow(/was lost/);
+      expect(received).toEqual(['GET /api/jobs', 'POST /api/applications/1/interviews']);
+    } finally {
+      await close();
+    }
+  });
+
+  it('closes idle connections before the host does', async () => {
+    const { client, close } = await startClosingHost();
+    try {
+      await client.call('GET', '/api/jobs', undefined, null);
+      await idleMoment();
+      const agent = (client as unknown as { agent: { freeSockets: Record<string, Array<{ timeout: number }>> } }).agent;
+      const idle = Object.values(agent.freeSockets).flat();
+      expect(idle).toHaveLength(1);
+      expect(idle[0].timeout).toBe(30_000);
+    } finally {
+      await close();
+    }
+  });
+});
