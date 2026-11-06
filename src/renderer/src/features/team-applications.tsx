@@ -273,6 +273,11 @@ export function TeamApplications({ filters, onOpenJob }: { filters: Filters; onO
   const data = result.data;
   const total = data?.total ?? 0;
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  // Applications removed meanwhile can leave this page past the end: step back to the last there is.
+  const answered = !!data && !result.isPlaceholderData;
+  useEffect(() => {
+    if (answered && page > pages - 1) setPaging({ key: filterKey, page: pages - 1 });
+  }, [answered, page, pages, filterKey]);
   const first = total === 0 ? 0 : page * PAGE_SIZE + 1;
   const last = Math.min(total, (page + 1) * PAGE_SIZE);
   const people = data?.board ?? [];

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { ActivityPerson, ActivityQuery, ActivityResponse, CreateApplicationResponse } from '../src/shared/api';
 import { addDays, autoGroup, isCalendarDate, weekStart } from '../src/shared/calendar';
+import { ReadCache } from '../src/server/read-cache';
+import { getActivity } from '../src/server/services/activity';
 import { createTestServer, createUsers, jobPage, type ApiClient } from './helpers';
 
 type Created = Extract<CreateApplicationResponse, { outcome: 'created' }>;
@@ -245,6 +247,51 @@ describe('applying activity', () => {
     expect(mia.series[1]).toBe(2);
     expect(mia.series[23]).toBe(1);
     expect(mia.yesterday).toBe(3);
+  });
+
+  it('refuses days the counting cannot work with, instead of failing on them', async () => {
+    const { users, query } = await setUp();
+    // The day after 9999-12-31 has no four-digit year.
+    expect((await query(users.andy, { from: '9999-12-01', to: '9999-12-31' })).status).toBe(400);
+    expect((await query(users.andy, { ...THIS_WEEK, today: '9999-12-31' })).status).toBe(400);
+    expect((await query(users.andy, { from: '0999-01-01', to: '0999-01-31' })).status).toBe(400);
+    expect((await users.andy.get('/api/team/applications?tz=UTC&from=9999-12-01&to=9999-12-31')).status).toBe(400);
+    expect((await query(users.andy, { from: '9998-12-01', to: '9998-12-31', today: '9998-12-31' })).status).toBe(200);
+  });
+
+  it('works the numbers out once for everyone who looks, and again after a change', async () => {
+    const { server, users, apply } = await setUp();
+    const sqlite = server.ctx.handle.sqlite;
+    const idOf = async (client: ApiClient) => ((await client.get('/api/auth/me')).json as { id: number }).id;
+    const [andy, john, mia] = [await idOf(users.andy), await idOf(users.john), await idOf(users.mia)];
+    const shared = new ReadCache();
+    const query: ActivityQuery = { tz: 'UTC', today: '2026-11-05', ...THIS_WEEK };
+    const asAndy = getActivity(sqlite, andy, query, shared);
+    const asMia = getActivity(sqlite, mia, query, shared);
+    // The same answers as when each is worked out alone, each with its own viewer first.
+    expect(asAndy).toEqual(getActivity(sqlite, andy, query));
+    expect(asMia).toEqual(getActivity(sqlite, mia, query));
+    expect(asMia.people.map((person) => [person.user.username, person.isMe])).toEqual([
+      ['mia', true],
+      ['john', false],
+      ['andy', false]
+    ]);
+    // John's numbers were counted once, for both of them, and for his own dashboard.
+    const johnAsSeen = asAndy.people.find((person) => person.user.id === john);
+    expect(asMia.people.find((person) => person.user.id === john)).toBe(johnAsSeen);
+    const own = getActivity(sqlite, john, { ...query, scope: 'me' }, shared);
+    expect(own).toEqual(getActivity(sqlite, john, { ...query, scope: 'me' }));
+    expect(own.people[0].trends).toBe(johnAsSeen?.trends);
+    expect(own.people[0]).toMatchObject({ isMe: true, rank: 1, behindLeader: 0 });
+    // With nobody's counted yet, his own applications alone give the same.
+    expect(getActivity(sqlite, john, { ...query, scope: 'me' }, new ReadCache())).toEqual(own);
+    expect(getActivity(sqlite, andy, { ...query, scope: 'me' }, new ReadCache())).toEqual(getActivity(sqlite, andy, { ...query, scope: 'me' }, shared));
+
+    // Kept until something changes.
+    await apply(users.mia, '2026-11-05T12:00:00.000Z');
+    expect(byName(getActivity(sqlite, andy, query, shared)).mia.today).toBe(0);
+    shared.invalidate();
+    expect(byName(getActivity(sqlite, andy, query, shared)).mia.today).toBe(1);
   });
 
   it('refuses a range that is backwards or too long, hours over several days, an unknown time zone, and needs a signed-in person', async () => {

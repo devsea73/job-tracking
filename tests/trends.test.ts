@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ActivityPerson, ActivityResponse, CreateApplicationResponse } from '../src/shared/api';
-import { comparedRanges, previousRange, reachTimes } from '../src/server/services/trends';
+import { mergeJobs } from '../src/server/services/job-merge';
+import { comparedRanges, previousBuckets, previousRange, reachTimes } from '../src/server/services/trends';
 import { createTestServer, createUsers, jobPage, type ApiClient } from './helpers';
 
 type Created = Extract<CreateApplicationResponse, { outcome: 'created' }>;
@@ -38,6 +39,127 @@ describe('when an application reached each stage', () => {
       { status: 'Applied', at: 3 }
     ];
     expect(reachTimes(merged, 3, null)).toEqual([2, 2, 2, null]);
+  });
+
+  it('reads two merged applications as two runs of statuses, so each stage keeps the first day it was reached', () => {
+    // Technical on day 2; the copy merged in was applied to on day 50 and got a screen on day 60.
+    const merged = [
+      { status: 'Applied', at: 1, old: null },
+      { status: 'Technical Interview', at: 2, old: 'Applied' },
+      { status: 'Applied', at: 50, old: null },
+      { status: 'Recruiter Screen', at: 60, old: 'Applied' }
+    ];
+    expect(reachTimes(merged, 2, null)).toEqual([2, 2, null, null]);
+    // Mixed together by when each was set: a status carries on the run it moved from.
+    const mixed = [
+      { status: 'Applied', at: 1, old: null },
+      { status: 'Applied', at: 2, old: null },
+      { status: 'Recruiter Screen', at: 3, old: 'Applied' },
+      { status: 'Technical Interview', at: 4, old: 'Applied' }
+    ];
+    expect(reachTimes(mixed, 2, null)).toEqual([3, 4, null, null]);
+    // Within one run, a move back is still a correction.
+    const corrected = [
+      { status: 'Applied', at: 1, old: null },
+      { status: 'Technical Interview', at: 2, old: 'Applied' },
+      { status: 'Applied', at: 3, old: 'Technical Interview' },
+      { status: 'Technical Interview', at: 8, old: 'Applied' }
+    ];
+    expect(reachTimes(corrected, 2, null)).toEqual([8, 8, null, null]);
+  });
+});
+
+describe('two copies of a job merged into one', () => {
+  it('keep the days the application’s stages were reached', async () => {
+    const server = await createTestServer();
+    const { users } = await createUsers(server.app, 'john');
+    const sqlite = server.ctx.handle.sqlite;
+    const add = async (n: number, appliedAt: string) => {
+      server.http.serve(`https://careers.example.com/jobs/${n}`, jobPage({ title: `Engineer ${n}`, company: `Company ${n}` }));
+      const added = (await users.john.addJob(`https://careers.example.com/jobs/${n}`)) as Created;
+      sqlite.prepare('UPDATE applications SET applied_at = ? WHERE id = ?').run(appliedAt, added.applicationId);
+      sqlite.prepare('UPDATE application_status_history SET changed_at = ? WHERE application_id = ?').run(appliedAt, added.applicationId);
+      return added;
+    };
+    const move = async (id: number, status: string, at: string) => {
+      expect((await users.john.patch(`/api/applications/${id}`, { status })).status).toBe(200);
+      sqlite.prepare('UPDATE application_status_history SET changed_at = ? WHERE id = (SELECT MAX(id) FROM application_status_history WHERE application_id = ?)').run(at, id);
+    };
+    const read = async () => {
+      server.ctx.readCache.invalidate();
+      const response = await users.john.get('/api/activity?tz=UTC&today=2026-11-05&from=2026-11-02&to=2026-11-08');
+      return byName(response.json as ActivityResponse).john;
+    };
+    // Technical Interview on Tuesday last week with one copy; the other, added this week, got a screen on Wednesday.
+    const first = await add(1, '2026-10-26T10:00:00.000Z');
+    await move(first.applicationId, 'Technical Interview', '2026-10-27T10:00:00.000Z');
+    const second = await add(2, '2026-11-03T10:00:00.000Z');
+    await move(second.applicationId, 'Recruiter Screen', '2026-11-04T10:00:00.000Z');
+    expect((await read()).trends.interviews).toEqual([0, 0, 1, 0, 0, 0, 0]);
+
+    sqlite.transaction(() => mergeJobs(sqlite, first.jobId, second.jobId))();
+    // One application now, which got its interview, and Technical, last Tuesday: nothing new this week.
+    const after = await read();
+    expect(after.trends.interviews).toEqual([0, 0, 0, 0, 0, 0, 0]);
+    expect(after.trends.technical).toEqual([0, 0, 0, 0, 0, 0, 0]);
+    expect(after.previousTrends.interviews).toEqual([0, 1, 0, 0, 0, 0, 0]);
+    expect(after.previousTrends.technical).toEqual([0, 1, 0, 0, 0, 0, 0]);
+  });
+});
+
+describe('the period before, bucket for bucket', () => {
+  it('moves weeks back to the same place, so the first week is set against the same days', () => {
+    // The last 30 days from Wednesday 7 October: the period before starts on a Monday, 7 September.
+    const range = { first: '2026-10-07', last: '2026-11-05' };
+    expect(previousBuckets('week', range, previousRange(range)).map((bucket) => [bucket.first, bucket.last])).toEqual([
+      ['2026-09-07', '2026-09-11'],
+      ['2026-09-12', '2026-09-18'],
+      ['2026-09-19', '2026-09-25'],
+      ['2026-09-26', '2026-10-02'],
+      ['2026-10-03', '2026-10-06']
+    ]);
+    // November against October: the same days of each month, the last week running to the 31st.
+    const november = { first: '2026-11-01', last: '2026-11-30' };
+    expect(previousBuckets('week', november, previousRange(november)).map((bucket) => [bucket.first, bucket.last])).toEqual([
+      ['2026-10-01', '2026-10-01'],
+      ['2026-10-02', '2026-10-08'],
+      ['2026-10-09', '2026-10-15'],
+      ['2026-10-16', '2026-10-22'],
+      ['2026-10-23', '2026-10-29'],
+      ['2026-10-30', '2026-10-31']
+    ]);
+    // March against the shorter February: the week that would start after it ends is left out.
+    const march = { first: '2026-03-01', last: '2026-03-31' };
+    expect(previousBuckets('week', march, previousRange(march)).map((bucket) => [bucket.first, bucket.last])).toEqual([
+      ['2026-02-01', '2026-02-01'],
+      ['2026-02-02', '2026-02-08'],
+      ['2026-02-09', '2026-02-15'],
+      ['2026-02-16', '2026-02-22'],
+      ['2026-02-23', '2026-02-28']
+    ]);
+  });
+
+  it('keeps the period’s own hours, days and calendar months, which line up already', () => {
+    const year = { first: '2026-01-01', last: '2026-12-31' };
+    expect(previousBuckets('month', year, previousRange(year)).map((bucket) => bucket.key)).toEqual(Array.from({ length: 12 }, (_, month) => `2025-${String(month + 1).padStart(2, '0')}`));
+    const month = { first: '2026-11-01', last: '2026-11-30' };
+    expect(previousBuckets('day', month, previousRange(month))).toHaveLength(31);
+    // As many days before, months are moved back too.
+    const days = { first: '2026-08-06', last: '2026-11-05' };
+    expect(previousBuckets('month', days, previousRange(days)).map((bucket) => [bucket.first, bucket.last])).toEqual([
+      ['2026-05-06', '2026-05-31'],
+      ['2026-06-01', '2026-06-30'],
+      ['2026-07-01', '2026-07-31'],
+      ['2026-08-01', '2026-08-05']
+    ]);
+  });
+
+  it('counts the period before in the moved buckets', async () => {
+    const { users, read } = await setUp();
+    const weeks = await read(users.andy, { from: '2026-11-01', to: '2026-11-30', group: 'week' });
+    expect(weeks.previous.buckets.map((bucket) => bucket.first)).toEqual(['2026-10-01', '2026-10-02', '2026-10-09', '2026-10-16', '2026-10-23', '2026-10-30']);
+    // Andy applied on 20 and 28 October, and got a screen on the 27th.
+    expect(byName(weeks).andy.previousTrends).toMatchObject({ bids: [0, 0, 0, 1, 1, 0], interviews: [0, 0, 0, 0, 1, 0] });
   });
 });
 

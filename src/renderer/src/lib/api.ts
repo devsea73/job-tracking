@@ -147,6 +147,7 @@ export function useInterviews(filter: InterviewQuery): UseQueryResult<InterviewL
   if (filter.person) params.set('person', String(filter.person));
   if (filter.profileId) params.set('profileId', String(filter.profileId));
   if (filter.limit) params.set('limit', String(filter.limit));
+  if (filter.order) params.set('order', filter.order);
   const text = params.toString();
   return useQuery({
     queryKey: ['interviews', filter],

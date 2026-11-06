@@ -76,14 +76,28 @@ function rangeFor(choice: RangeChoice, today: string): DaySpan {
   }
 }
 
-/** The current minute: "today" turns over at midnight without a reload. */
+/** The current minute: "today" turns over at midnight without a reload, and again on coming back to the window. */
 function useNow(): Date {
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
-    const timer = setInterval(() => setNow(new Date()), 60_000);
-    return () => clearInterval(timer);
+    const tick = () => setNow(new Date());
+    const timer = setInterval(tick, 60_000);
+    window.addEventListener('focus', tick);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', tick);
+    };
   }, []);
   return now;
+}
+
+/** The day it is in a time zone, written 2026-11-05. */
+function dayIn(tz: string, moment: Date): string {
+  try {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(moment);
+  } catch {
+    return localCalendarDate(moment);
+  }
 }
 
 export interface Filters {
@@ -108,8 +122,10 @@ export interface Filters {
 /** The page's range and grouping, remembered under its own name. Today, unless something else was chosen. */
 export function useFilters(storageKey: string): Filters {
   const now = useNow();
-  const today = localCalendarDate(now);
-  const tz = useMemo(() => localTimeZone(), []);
+  // Read on every tick: the computer's time zone can change while the app is open, and the host
+  // counts days in the zone it is told, so today has to be the day it is in that same zone.
+  const tz = localTimeZone();
+  const today = dayIn(tz, now);
   const [choice, setChoice] = useState<RangeChoice>(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(storageKey) ?? 'null') as RangeChoice | null;

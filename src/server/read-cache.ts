@@ -10,18 +10,49 @@ export class ReadCache {
   private generation = 0;
   private size = 0;
   private readonly entries = new Map<string, { generation: number; at: number; json: string }>();
+  private readonly values = new Map<string, { generation: number; at: number; value: unknown }>();
 
   constructor(
     /** Interview dates turn from upcoming to past with no write, so nothing lives longer than this. */
     private readonly maxAgeMs = 15_000,
-    private readonly maxBytes = 64 * 1024 * 1024
+    private readonly maxBytes = 64 * 1024 * 1024,
+    /** Values are the work behind many answers, not answers: a few are plenty. */
+    private readonly maxValues = 24
   ) {}
 
   /** Call on every write. */
   invalidate(): void {
     this.generation += 1;
     this.entries.clear();
+    this.values.clear();
     this.size = 0;
+  }
+
+  /**
+   * Something worked out from the data that several answers are built from, such as everyone's
+   * numbers for a range, which each person's answer then marks as theirs. Kept, like the answers,
+   * until anything changes.
+   */
+  value<T>(key: string, compute: () => T, now = Date.now()): T {
+    const hit = this.peek<T>(key, now);
+    if (hit !== undefined) return hit;
+    const value = compute();
+    this.values.delete(key);
+    this.values.set(key, { generation: this.generation, at: now, value });
+    for (const oldest of this.values.keys()) {
+      if (this.values.size <= this.maxValues) break;
+      this.values.delete(oldest);
+    }
+    return value;
+  }
+
+  /** A value already worked out and still current, without working it out if it is not. */
+  peek<T>(key: string, now = Date.now()): T | undefined {
+    const hit = this.values.get(key);
+    if (!hit || hit.generation !== this.generation || now - hit.at >= this.maxAgeMs) return undefined;
+    this.values.delete(key);
+    this.values.set(key, hit);
+    return hit.value as T;
   }
 
   /** The cached response as JSON text, computing and storing it if needed. */
