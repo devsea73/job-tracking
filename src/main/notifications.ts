@@ -52,7 +52,6 @@ export class NotificationCenter {
     const result = await this.options.api<JobBrief>('GET', `/api/jobs/${event.jobId}/brief${query}`);
     if (epoch !== this.epoch || !result.ok || !result.data) return;
     const brief = result.data;
-    if (brief.viewerIsAdmin) return;
     // I applied, here or in the main window: nothing about this job is news to me any more.
     if (brief.addedByMe || brief.alreadyApplied) return this.forget(brief.jobId);
     // Only jobs none of my profiles has applied to, found by someone else, each offered once: when

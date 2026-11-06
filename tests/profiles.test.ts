@@ -493,9 +493,9 @@ describe('pass rates', () => {
     await users.tyler.post(`/api/applications/${offered.applicationId}/interviews`, { stage: 'Final Interview', scheduledAt: '2030-12-01T14:00:00Z', timezone: 'UTC' });
 
     // John is not admin and has nothing of his own, but sees the whole team. The administrator
-    // looks after accounts and the database, and is not part of it.
+    // applies with their own profiles too, and is part of it.
     const team = (await users.john.get('/api/team')).json;
-    expect(team.map((member: any) => member.user.username)).toEqual(['john', 'tyler']);
+    expect(team.map((member: any) => member.user.username)).toEqual(['admin', 'john', 'tyler']);
     const john = team.find((member: any) => member.user.username === 'john');
     expect(john.stats).toMatchObject({ applications: 0, interviews: 0, technical: 0, offers: 0 });
     expect(john.stats.success.percent).toBeNull();

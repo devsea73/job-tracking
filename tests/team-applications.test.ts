@@ -60,7 +60,8 @@ describe('everyone’s applications on the Team page', () => {
     expect(all.board.map((row) => [row.user.username, row.isMe, row.total])).toEqual([
       ['mia', true, 0],
       ['andy', false, 3],
-      ['john', false, 3]
+      ['john', false, 3],
+      ['admin', false, 0]
     ]);
     const john = all.board.find((row) => row.user.username === 'john');
     expect(john?.statuses).toEqual({ Applied: 1, 'Recruiter Screen': 0, 'Technical Interview': 0, 'Final Interview': 1, Offer: 0, Rejected: 1 });
@@ -68,10 +69,14 @@ describe('everyone’s applications on the Team page', () => {
     expect(john).toMatchObject({ interviews: 2, interviewRate: 66.7 });
     expect(all.board.find((row) => row.user.username === 'mia')?.interviewRate).toBeNull();
 
-    // The administrator can look, and is not part of it.
+    // The administrator applies too, and is on the board like anyone, marked as themselves.
     const asAdmin = await list(admin);
-    expect(asAdmin.board.map((row) => row.user.username).sort()).toEqual(['andy', 'john', 'mia']);
-    expect(asAdmin.board.some((row) => row.isMe)).toBe(false);
+    expect(asAdmin.board.map((row) => [row.user.username, row.isMe])).toEqual([
+      ['admin', true],
+      ['andy', false],
+      ['john', false],
+      ['mia', false]
+    ]);
   });
 
   it('narrows to a person, a status or a search, while the board stays the same', async () => {
@@ -102,6 +107,7 @@ describe('everyone’s applications on the Team page', () => {
     expect(today.board.map((row) => [row.user.username, row.total])).toEqual([
       ['andy', 2],
       ['john', 1],
+      ['admin', 0],
       ['mia', 0]
     ]);
     const activity = (await users.andy.get('/api/activity?tz=UTC&today=2026-11-05&from=2026-11-05&to=2026-11-05')).json as ActivityResponse;
@@ -125,6 +131,7 @@ describe('everyone’s applications on the Team page', () => {
     expect(asAndy.board.map((row) => [row.user.username, row.isMe])).toEqual([
       ['andy', true],
       ['john', false],
+      ['admin', false],
       ['mia', false]
     ]);
     // A page past the end has nothing on it, and the full count to step back with.

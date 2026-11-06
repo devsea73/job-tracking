@@ -613,7 +613,7 @@ export interface JobBrief {
   url: string | null;
   /** That link's id, sent back when applying from the notice so the new application keeps it too. */
   urlId: number | null;
-  /** Administrators look after accounts and data; they are not offered jobs. */
+  /** The viewer administers the host. They are offered jobs like anyone: they apply too. */
   viewerIsAdmin: boolean;
   /** Who applied, and under which of their profiles. */
   owner: string | null;

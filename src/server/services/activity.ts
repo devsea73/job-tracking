@@ -79,7 +79,7 @@ interface Model {
   base: Pick<ActivityResponse, 'tz' | 'group' | 'periods' | 'buckets' | 'previous'>;
   /** Everyone, administrators too: each person's own dashboard is theirs. Nobody is "me" here yet. */
   everyone: Map<number, ActivityPerson>;
-  /** The team: every member, switched off or not, but no administrators. Ranked. */
+  /** The team: every member, switched off or not, administrators too. Ranked. */
   ranked: ActivityPerson[];
   team: ActivityCounts;
   teamTrends: TrendSeries;
@@ -131,8 +131,9 @@ function buildModel(sqlite: Database.Database, query: ActivityQuery, group: Acti
   const profileRows = (prepared(sqlite, `SELECT id, user_id, name, is_archived FROM profiles ORDER BY id`).all() as Array<{ id: number; user_id: number; name: string; is_archived: number }>).filter(
     (profile) => only === undefined || profile.user_id === only
   );
-  // Administrators look after accounts and the database and are not part of the team. One person alone has no team to add up.
-  const members = new Set(only === undefined ? people.filter((person) => person.role !== 'admin').map((person) => person.id) : []);
+  // Everyone is on the team, administrators too: they apply with profiles of their own like anyone,
+  // and only look after accounts besides. One person alone has no team to add up.
+  const members = new Set(only === undefined ? people.map((person) => person.id) : []);
 
   // Every measure over the range and the period before it, for the trend charts.
   const previous = previousRange(periods.range);

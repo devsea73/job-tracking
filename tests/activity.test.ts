@@ -166,20 +166,23 @@ describe('applying activity', () => {
   it('puts me first, then everyone else by applications in the range', async () => {
     const { users, read } = await setUp();
     const response = await read(users.mia, TODAY);
-    expect(response.people.map((person) => person.user.username)).toEqual(['mia', 'john', 'andy']);
+    // The administrator applied to nothing today either: tied with Mia, and ahead by name.
+    expect(response.people.map((person) => person.user.username)).toEqual(['mia', 'john', 'andy', 'admin']);
     expect(response.people.map((person) => [person.rank, person.behindLeader])).toEqual([
-      [3, 3],
+      [4, 3],
       [1, 0],
-      [2, 1]
+      [2, 1],
+      [3, 3]
     ]);
   });
 
-  it('lists every member, switched off or idle, and never the administrator', async () => {
+  it('lists every member, switched off or idle, the administrator too', async () => {
     const { admin, users, read } = await setUp();
     const zoe = (await admin.post('/api/admin/users', { username: 'zoe', password: 'zoe-password' })).json as { id: number };
     await admin.patch(`/api/admin/users/${zoe?.id}`, { isActive: false });
     const team = await read(users.andy, THIS_WEEK);
-    expect(team.people.map((person) => person.user.username).sort()).toEqual(['andy', 'john', 'mia', 'zoe']);
+    // The administrator applies with their own profiles like anyone, and is on the team.
+    expect(team.people.map((person) => person.user.username).sort()).toEqual(['admin', 'andy', 'john', 'mia', 'zoe']);
     expect(byName(team).zoe).toMatchObject({ isActive: false, inRange: 0 });
     // The administrator's own dashboard still has its own numbers.
     const own = (await admin.get('/api/activity?tz=UTC&today=2026-11-05&from=2026-11-02&to=2026-11-08&scope=me')).json as ActivityResponse;
@@ -274,7 +277,8 @@ describe('applying activity', () => {
     expect(asMia.people.map((person) => [person.user.username, person.isMe])).toEqual([
       ['mia', true],
       ['john', false],
-      ['andy', false]
+      ['andy', false],
+      ['admin', false]
     ]);
     // John's numbers were counted once, for both of them, and for his own dashboard.
     const johnAsSeen = asAndy.people.find((person) => person.user.id === john);

@@ -83,9 +83,9 @@ describe('the link a new-job notification copies', () => {
     expect(job.applications[0].link?.url).toBe('https://careers.example.com/jobs/20');
   });
 
-  it('is not offered to the administrator, who looks after accounts rather than applying', async () => {
+  it('is offered to the administrator like anyone, since they apply too', async () => {
     const { admin, users, jobId, johns } = await twoLinks();
-    expect((await brief(admin, jobId, johns.outcome === 'created' ? johns.applicationId : undefined)).viewerIsAdmin).toBe(true);
+    expect(await brief(admin, jobId, johns.outcome === 'created' ? johns.applicationId : undefined)).toMatchObject({ viewerIsAdmin: true, addedByMe: false, alreadyApplied: false });
     expect((await brief(users.zoe, jobId)).viewerIsAdmin).toBe(false);
   });
 });

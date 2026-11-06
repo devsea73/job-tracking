@@ -483,7 +483,7 @@ function teamBoard(sqlite: Database.Database, span: { from: string; to: string }
   const params = { from: span?.from ?? null, to: span?.to ?? null };
   const people = prepared(
     sqlite,
-    `SELECT u.id, u.username, u.display_name, u.is_active, ua.updated_at AS avatar FROM users u LEFT JOIN user_avatars ua ON ua.user_id = u.id WHERE u.role <> 'admin'`
+    `SELECT u.id, u.username, u.display_name, u.is_active, ua.updated_at AS avatar FROM users u LEFT JOIN user_avatars ua ON ua.user_id = u.id`
   ).all() as Array<{ id: number; username: string; display_name: string | null; is_active: number; avatar: string | null }>;
   const counted = prepared(sqlite, `SELECT a.user_id, a.status, COUNT(*) AS total, SUM(a.furthest_rank >= 1) AS interviews FROM applications a WHERE ${inRange} GROUP BY a.user_id, a.status`).all(params) as Array<{
     user_id: number;
@@ -525,8 +525,7 @@ function teamBoard(sqlite: Database.Database, span: { from: string; to: string }
  * and then keeping fifty took most of a second with tens of thousands.
  */
 function teamApplicationPage(sqlite: Database.Database, query: TeamApplicationsQuery, span: { from: string; to: string } | null): { total: number; rows: TeamApplicationRow[] } {
-  // Administrators are not members. Asked once, so the list can run down the applications in order.
-  const where = [`a.user_id NOT IN (SELECT id FROM users WHERE role = 'admin')`];
+  const where = ['1'];
   const params: Record<string, unknown> = {};
   if (span) {
     where.push('a.applied_at >= @from AND a.applied_at < @to');
@@ -570,7 +569,7 @@ function teamApplicationPage(sqlite: Database.Database, query: TeamApplicationsQ
  * Everyone's applications, one row per profile's application, with where each one is now, and a
  * board of every member's applications by current status. The board counts the range only, so it
  * stays put while the list below it is narrowed to a person, a status or a search.
- * Administrators are not members, so neither appears. Everyone sees the same board and pages, so
+ * Administrators are members like anyone. Everyone sees the same board and pages, so
  * with `shared` they are worked out once, and only "me" and "mine" are marked for each viewer.
  */
 export function listTeamApplications(
@@ -601,8 +600,8 @@ export function listTeamApplications(
 
 /**
  * Every member's numbers, in total and for each of their profiles. Anyone with no
- * applications still appears, so that the page shows the whole team. Administrators look
- * after accounts and the database; they are not part of the team.
+ * applications still appears, so that the page shows the whole team, administrators included:
+ * they apply with their own profiles like anyone.
  */
 export function getTeam(db: Db): TeamMember[] {
   const sqlite = db.$client;
@@ -610,7 +609,6 @@ export function getTeam(db: Db): TeamMember[] {
     .prepare(
       `SELECT u.id, u.username, u.display_name, u.is_active, ua.updated_at AS avatar
        FROM users u LEFT JOIN user_avatars ua ON ua.user_id = u.id
-       WHERE u.role <> 'admin'
        ORDER BY u.username COLLATE NOCASE ASC`
     )
     .all() as Array<{ id: number; username: string; display_name: string | null; is_active: number; avatar: string | null }>;
