@@ -68,6 +68,18 @@ describe('what a new-job notification shows', () => {
     expect(((await users.john.get(`/api/jobs/${added.jobId}/brief`)).json as JobBrief).alreadyApplied).toBe(true);
   });
 
+  it('says only of the first application that its person found the job, so teammates joining later do not offer it again', async () => {
+    const server = await createTestServer();
+    const { users } = await createUsers(server.app, 'tyler', 'john', 'zoe');
+    server.http.serve('https://careers.example.com/jobs/4', jobPage({ title: 'Site Reliability Engineer', company: 'Hooli' }));
+    const found = await users.tyler.addJob('https://careers.example.com/jobs/4');
+    if (found.outcome !== 'created') throw new Error(found.outcome);
+    const joined = await users.john.post(`/api/jobs/${found.jobId}/apply`, { profileId: await users.john.defaultProfileId() });
+    const forZoe = (application: number) => users.zoe.get(`/api/jobs/${found.jobId}/brief?application=${application}`).then((response) => response.json as JobBrief);
+    expect(await forZoe(found.applicationId)).toMatchObject({ owner: 'tyler', foundIt: true, alreadyApplied: false });
+    expect(await forZoe(joined.json.applicationId)).toMatchObject({ owner: 'john', foundIt: false, alreadyApplied: false });
+  });
+
   it('needs a signed-in person', async () => {
     const server = await createTestServer();
     expect((await server.app.inject({ method: 'GET', url: '/api/jobs/1/brief' })).statusCode).toBe(401);

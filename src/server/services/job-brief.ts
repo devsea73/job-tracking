@@ -119,6 +119,8 @@ function linkToOffer(job: JobDetail, source: ApplicationDetail | null): Applicat
 export function getJobBrief(ctx: AppContext, viewer: { id: number; role: UserRole }, jobId: number, applicationId?: number): JobBrief {
   const job = getJobDetail(ctx, viewer.id, jobId);
   const source = job.applications.find((application) => application.id === applicationId) ?? job.applications[job.applications.length - 1] ?? null;
+  // Whoever applied first found the job; everyone after them only joined it.
+  const first = [...job.applications].sort((a, b) => a.appliedAt.localeCompare(b.appliedAt) || a.id - b.id)[0];
   const description = isUnreadableNote(job.description) ? '' : job.description;
   const link = linkToOffer(job, source);
   return {
@@ -132,6 +134,7 @@ export function getJobBrief(ctx: AppContext, viewer: { id: number; role: UserRol
     owner: source ? (source.owner.displayName ?? source.owner.username) : null,
     profile: source?.profile.name ?? null,
     addedByMe: source?.isMine ?? false,
+    foundIt: !!source && source.id === first?.id,
     alreadyApplied: job.applications.some((application) => application.isMine),
     facts: job.facts,
     stack: deriveStack(job.title, description),

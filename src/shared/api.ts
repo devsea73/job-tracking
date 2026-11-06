@@ -619,6 +619,11 @@ export interface JobBrief {
   owner: string | null;
   profile: string | null;
   addedByMe: boolean;
+  /**
+   * That application is the job's first: the person found the job. A teammate applying to a job
+   * already in the list is not news, and would otherwise offer it again under their name.
+   */
+  foundIt: boolean;
   /** One of the viewer's own profiles has applied already. */
   alreadyApplied: boolean;
   facts: JobFacts;

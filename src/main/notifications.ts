@@ -55,8 +55,10 @@ export class NotificationCenter {
     if (brief.viewerIsAdmin) return;
     // I applied, here or in the main window: nothing about this job is news to me any more.
     if (brief.addedByMe || brief.alreadyApplied) return this.forget(brief.jobId);
-    // Only jobs none of my profiles has applied to, found by someone else, each offered once.
-    if (this.isKnown(brief.jobId)) return;
+    // Only jobs none of my profiles has applied to, found by someone else, each offered once: when
+    // it was found. Teammates applying to it later do not bring it back under their names.
+    // (A host from before `foundIt` leaves it out: then every application counts, as it used to.)
+    if (brief.foundIt === false || this.isKnown(brief.jobId)) return;
     this.queue.push(brief);
     if (!this.current) this.showNext();
   }
