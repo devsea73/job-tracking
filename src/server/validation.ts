@@ -157,7 +157,7 @@ export const jobListQuery = z.object({
 
 const calendarDate = z.string().refine(isCalendarDate, { message: 'Use a date like 2026-11-05.' });
 export const activityQuery = z
-  .object({ tz: timezone, today: calendarDate, from: calendarDate, to: calendarDate, group: z.enum(ACTIVITY_GROUPS).optional() })
+  .object({ tz: timezone, today: calendarDate, from: calendarDate, to: calendarDate, group: z.enum(ACTIVITY_GROUPS).optional(), scope: z.enum(['me', 'team']).optional() })
   .refine((query) => query.to >= query.from, 'The range ends before it starts.')
   .refine((query) => daysBetween(query.from, query.to) < MAX_RANGE_DAYS, `Choose a range of at most ${MAX_RANGE_DAYS} days.`)
   .refine((query) => !query.group || groupFits(query.group, query.from, query.to), 'Hours can only be shown for a single day.');

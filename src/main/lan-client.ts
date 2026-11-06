@@ -1,6 +1,8 @@
 import { Agent, request, type RequestOptions } from 'node:https';
 import { connect, type PeerCertificate } from 'node:tls';
 import { X509Certificate } from 'node:crypto';
+import { createWriteStream, renameSync, rmSync } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
 import type { ServerEvent, ServerInfo } from '../shared/api';
 import type { ApiCallResult } from '../shared/bridge';
 import { DEFAULT_PORT } from '../shared/constants';
@@ -200,6 +202,50 @@ export class PinnedClient {
         reject(stale ? new StaleConnectionError(error) : classifyNetworkError(error, this.target));
       });
       req.end(payload);
+    });
+  }
+
+  /**
+   * Saves a file the host sends straight to disk, under a temporary name until the last byte has
+   * arrived, so an interrupted download never leaves a file that looks complete.
+   */
+  download(path: string, token: string | null, destination: string, timeoutMs = 10 * 60_000): Promise<{ bytes: number }> {
+    return new Promise((resolve, reject) => {
+      const req = request(this.options('GET', path, { accept: 'application/octet-stream', ...(token ? { authorization: `Bearer ${token}` } : {}) }), (res) => {
+        if (res.statusCode !== 200) {
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk: Buffer) => chunks.push(chunk));
+          res.on('end', () => {
+            let message = `The host answered with an unexpected response (HTTP ${res.statusCode}).`;
+            try {
+              message = (JSON.parse(Buffer.concat(chunks).toString('utf8')) as { error?: { message?: string } }).error?.message ?? message;
+            } catch {
+              // The status says enough.
+            }
+            reject(new Error(message));
+          });
+          return;
+        }
+        const expected = Number(res.headers['content-length']);
+        const partial = `${destination}.part`;
+        let bytes = 0;
+        res.on('data', (chunk: Buffer) => {
+          bytes += chunk.length;
+        });
+        pipeline(res, createWriteStream(partial, { flags: 'w' }))
+          .then(() => {
+            if (Number.isFinite(expected) && bytes !== expected) throw new Error('The download was cut short. Nothing was kept.');
+            renameSync(partial, destination);
+            resolve({ bytes });
+          })
+          .catch((error: NodeJS.ErrnoException) => {
+            rmSync(partial, { force: true });
+            reject(error.code ? classifyNetworkError(error, this.target) : error);
+          });
+      });
+      req.setTimeout(timeoutMs, () => req.destroy(Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' })));
+      req.on('error', (error) => reject(classifyNetworkError(error, this.target)));
+      req.end();
     });
   }
 

@@ -8,13 +8,13 @@ type Created = Extract<CreateApplicationResponse, { outcome: 'created' }>;
 /** A week of applying, at known moments, for three people. Today is Thursday 2026-11-05, in UTC. */
 async function setUp() {
   const server = await createTestServer();
-  const { users } = await createUsers(server.app, 'andy', 'john', 'mia');
+  const { admin, users } = await createUsers(server.app, 'andy', 'john', 'mia');
   const sqlite = server.ctx.handle.sqlite;
   let n = 0;
-  const apply = async (client: ApiClient, appliedAt: string) => {
+  const apply = async (client: ApiClient, appliedAt: string, profileId?: number) => {
     n += 1;
     server.http.serve(`https://careers.example.com/jobs/${n}`, jobPage({ title: `Engineer ${n}`, company: `Company ${n}` }));
-    const added = (await client.addJob(`https://careers.example.com/jobs/${n}`)) as Created;
+    const added = (await client.addJob(`https://careers.example.com/jobs/${n}`, profileId ? { profileId } : {})) as Created;
     sqlite.prepare('UPDATE applications SET applied_at = ? WHERE id = ?').run(appliedAt, added.applicationId);
     return added;
   };
@@ -43,7 +43,7 @@ async function setUp() {
     expect(response.status).toBe(200);
     return response.json as ActivityResponse;
   };
-  return { server, users, apply, query, read };
+  return { server, admin, users, apply, query, read };
 }
 
 const THIS_WEEK = { from: '2026-11-02', to: '2026-11-08' };
@@ -101,20 +101,89 @@ describe('applying activity', () => {
 
   it('adds the team together from the people listed', async () => {
     const { users, read } = await setUp();
-    expect((await read(users.andy, THIS_WEEK)).team).toEqual({ today: 5, yesterday: 1, week: 7, month: 7, inRange: 7, interviews: 2, interviewRate: 28.6 });
+    expect((await read(users.andy, THIS_WEEK)).team).toEqual({
+      today: 5,
+      yesterday: 1,
+      week: 7,
+      month: 7,
+      inRange: 7,
+      interviews: 2,
+      interviewRate: 28.6,
+      reached: { screen: 1, technical: 0, final: 0, offer: 0, rejected: 0 },
+      scheduled: 0,
+      scheduledToday: 0
+    });
+  });
+
+  it('follows the range’s applications through the stages, at their furthest stage', async () => {
+    const { users, read } = await setUp();
+    const andy = byName(await read(users.andy, THIS_WEEK)).andy;
+    const applied = (await users.andy.get('/api/jobs?scope=mine&sort=applied')).json as { items: Array<{ applications: Array<{ id: number; isMine: boolean; appliedAt: string }> }> };
+    const monday = applied.items.flatMap((job) => job.applications).find((application) => application.isMine && application.appliedAt.startsWith('2026-11-02'));
+    // Straight to Technical Interview, then turned down: it still reached the screen and the technical.
+    await users.andy.patch(`/api/applications/${monday?.id}`, { status: 'Technical Interview' });
+    await users.andy.patch(`/api/applications/${monday?.id}`, { status: 'Rejected' });
+    const after = byName(await read(users.andy, THIS_WEEK)).andy;
+    expect(andy.reached).toEqual({ screen: 1, technical: 0, final: 0, offer: 0, rejected: 0 });
+    expect(after.reached).toEqual({ screen: 2, technical: 1, final: 0, offer: 0, rejected: 1 });
+  });
+
+  it('counts interviews by the day they take place, per bucket', async () => {
+    const { users, read } = await setUp();
+    // John's screen is booked for Tuesday 10 November, 15:00 UTC.
+    const nextWeek = await read(users.andy, { from: '2026-11-09', to: '2026-11-15' });
+    const john = byName(nextWeek).john;
+    expect(john).toMatchObject({ scheduled: 1, scheduledToday: 0, inRange: 0 });
+    expect(john.interviewSeries).toEqual([0, 1, 0, 0, 0, 0, 0]);
+    expect(nextWeek.team.scheduled).toBe(1);
+    // Asked on the day itself, it is today's interview.
+    expect(byName(await read(users.andy, { from: '2026-11-10', to: '2026-11-10', today: '2026-11-10' })).john).toMatchObject({ scheduled: 1, scheduledToday: 1 });
+  });
+
+  it('splits each person by profile, and their numbers add up to the person’s', async () => {
+    const { users, apply, read } = await setUp();
+    const created = (await users.andy.post('/api/profiles', { name: 'Backend' })).json as { id: number };
+    await apply(users.andy, '2026-11-05T11:00:00.000Z', created.id);
+    await apply(users.andy, '2026-11-03T11:00:00.000Z', created.id);
+    const andy = byName(await read(users.andy, THIS_WEEK)).andy;
+    expect(andy.profiles.map((profile) => [profile.name, profile.inRange, profile.today, profile.allTime])).toEqual([
+      [andy.profiles[0].name, 3, 2, 4],
+      ['Backend', 2, 1, 2]
+    ]);
+    expect(andy.profiles[1].series).toEqual([0, 1, 0, 1, 0, 0, 0]);
+    expect(andy.profiles.reduce((total, profile) => total + profile.inRange, 0)).toBe(andy.inRange);
+    andy.series.forEach((value, index) => expect(andy.profiles.reduce((total, profile) => total + profile.series[index], 0)).toBe(value));
+  });
+
+  it('gives only my own numbers when asked for me alone', async () => {
+    const { users, read } = await setUp();
+    const mine = await read(users.john, { ...THIS_WEEK, scope: 'me' });
+    expect(mine.people.map((person) => person.user.username)).toEqual(['john']);
+    expect(mine.team).toMatchObject({ today: 3, inRange: 4, interviews: 1 });
   });
 
   it('puts me first, then everyone else by applications in the range', async () => {
     const { users, read } = await setUp();
     const response = await read(users.mia, TODAY);
-    expect(response.people.map((person) => person.user.username)).toEqual(['mia', 'john', 'andy', 'admin']);
-    // Mia and admin both applied to nothing today: the tie goes by name.
+    expect(response.people.map((person) => person.user.username)).toEqual(['mia', 'john', 'andy']);
     expect(response.people.map((person) => [person.rank, person.behindLeader])).toEqual([
-      [4, 3],
+      [3, 3],
       [1, 0],
-      [2, 1],
-      [3, 3]
+      [2, 1]
     ]);
+  });
+
+  it('lists every member, switched off or idle, and never the administrator', async () => {
+    const { admin, users, read } = await setUp();
+    const zoe = (await admin.post('/api/admin/users', { username: 'zoe', password: 'zoe-password' })).json as { id: number };
+    await admin.patch(`/api/admin/users/${zoe?.id}`, { isActive: false });
+    const team = await read(users.andy, THIS_WEEK);
+    expect(team.people.map((person) => person.user.username).sort()).toEqual(['andy', 'john', 'mia', 'zoe']);
+    expect(byName(team).zoe).toMatchObject({ isActive: false, inRange: 0 });
+    // The administrator's own dashboard still has its own numbers.
+    const own = (await admin.get('/api/activity?tz=UTC&today=2026-11-05&from=2026-11-02&to=2026-11-08&scope=me')).json as ActivityResponse;
+    expect(own.people.map((person) => person.user.username)).toEqual(['admin']);
+    expect(own.people[0].isMe).toBe(true);
   });
 
   it('gives one day by the hour, and a longer range by the day', async () => {

@@ -29,7 +29,11 @@ const bridge: JobTrackerBridge = {
   copyLink: (url) => ipcRenderer.invoke(IPC.copyLink, url),
   exportBackup: (name) => ipcRenderer.invoke(IPC.exportBackup, name),
   importBackup: () => ipcRenderer.invoke(IPC.importBackup),
-  openDataFolder: () => ipcRenderer.invoke(IPC.openDataFolder)
+  openDataFolder: () => ipcRenderer.invoke(IPC.openDataFolder),
+  chooseBackupFolder: () => ipcRenderer.invoke(IPC.chooseBackupFolder),
+  setAutoBackup: (enabled) => ipcRenderer.invoke(IPC.setAutoBackup, enabled),
+  saveBackupNow: () => ipcRenderer.invoke(IPC.saveBackupNow),
+  openBackupFolder: () => ipcRenderer.invoke(IPC.openBackupFolder)
 };
 
 contextBridge.exposeInMainWorld('jobTracker', bridge);

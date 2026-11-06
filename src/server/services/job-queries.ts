@@ -435,14 +435,15 @@ export function getDashboard(db: Db, userId: number): DashboardResponse {
     rejectedApplications: counts.rejected,
     upcomingInterviews: upcoming.total,
     nextInterviews: listInterviews(db, userId, { from: now }, 5),
-    recentApplications: listJobs(db, userId, { scope: 'mine', sort: 'recent', limit: 6 }).items,
+    recentApplications: listJobs(db, userId, { scope: 'mine', sort: 'applied', limit: 6 }).items,
     highlightedJobs: listJobs(db, userId, { highlighted: true, sort: 'recent', limit: 6 }).items
   };
 }
 
 /**
- * Every person's numbers, in total and for each of their profiles. Anyone with no
- * applications still appears, so that the page shows the whole team.
+ * Every member's numbers, in total and for each of their profiles. Anyone with no
+ * applications still appears, so that the page shows the whole team. Administrators look
+ * after accounts and the database; they are not part of the team.
  */
 export function getTeam(db: Db): TeamMember[] {
   const sqlite = db.$client;
@@ -450,6 +451,7 @@ export function getTeam(db: Db): TeamMember[] {
     .prepare(
       `SELECT u.id, u.username, u.display_name, u.is_active, ua.updated_at AS avatar
        FROM users u LEFT JOIN user_avatars ua ON ua.user_id = u.id
+       WHERE u.role <> 'admin'
        ORDER BY u.username COLLATE NOCASE ASC`
     )
     .all() as Array<{ id: number; username: string; display_name: string | null; is_active: number; avatar: string | null }>;

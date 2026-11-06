@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { Bell, Copy, Database, Download, FolderOpen, Moon, RotateCcw, Save, Send, Sun, SunMoon, Timer, Trash2, Upload } from 'lucide-react';
+import { Bell, CalendarClock, Copy, Database, Download, FolderOpen, Moon, RotateCcw, Save, Send, Sun, SunMoon, Timer, Trash2, Upload } from 'lucide-react';
 import type { BackupInfo, CurrentUser } from '@shared/api';
 import { NOTIFICATION_HIDE_CHOICES, type BridgeState, type ThemeChoice } from '@shared/bridge';
 import { HelpTip } from '@/components/symbols';
@@ -314,6 +314,111 @@ function BackupsCard({ state }: { state: BridgeState }) {
   );
 }
 
+/**
+ * Administrators, on this computer: a full copy of the shared database saved to a chosen folder
+ * every week. Works on the host and on any other computer an administrator signs in from.
+ */
+function AutoBackupCard({ state }: { state: BridgeState }) {
+  const toast = useToast();
+  const [saving, setSaving] = useState(false);
+  const backup = state.autoBackup;
+  const due = backup.nextDueAt !== null && Date.parse(backup.nextDueAt) <= Date.now();
+
+  const saveNow = async () => {
+    setSaving(true);
+    try {
+      const result = await bridge.saveBackupNow();
+      if (result.ok) toast.show(`Saved ${result.data?.lastFile} in ${result.data?.folder}`);
+      else toast.show(result.error?.message ?? 'The copy could not be saved.', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <SettingsCard
+      title="Weekly backup to a folder"
+      description="A full copy of the shared database, saved to a folder on this computer once a week while Job Tracker runs here, also from the tray. A week missed while this computer was off is made up at the next start. Every week's file is kept."
+    >
+      <div className="space-y-3" data-auto-backup>
+        <div className="flex items-center gap-2">
+          <FolderOpen className="size-4 shrink-0 text-ink-3" aria-hidden />
+          <p className={`min-w-0 flex-1 truncate ${backup.folder ? 'font-mono text-[12px]' : 'text-ink-3'}`} title={backup.folder ?? undefined} data-backup-folder>
+            {backup.folder ?? 'No folder chosen'}
+          </p>
+          <Button size="sm" onClick={() => void bridge.chooseBackupFolder()}>
+            {backup.folder ? 'Change folder' : 'Choose folder'}
+          </Button>
+          {backup.folder ? (
+            <Tooltip content="Open the folder">
+              <Button size="icon-sm" variant="ghost" aria-label="Open the folder" onClick={() => void bridge.openBackupFolder()}>
+                <FolderOpen />
+              </Button>
+            </Tooltip>
+          ) : null}
+        </div>
+
+        <label className="flex items-center gap-3">
+          <CalendarClock className="size-4 text-ink-3" aria-hidden />
+          <span className="flex-1">Save a copy every week</span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={backup.enabled}
+            aria-label="Save a copy every week"
+            disabled={!backup.folder}
+            title={backup.folder ? undefined : 'Choose a folder first'}
+            onClick={() => void bridge.setAutoBackup(!backup.enabled)}
+            className={`relative h-5 w-9 rounded-full transition-colors disabled:opacity-40 ${backup.enabled ? 'bg-accent' : 'bg-border-strong'}`}
+          >
+            <span className={`absolute top-0.5 size-4 rounded-full bg-white transition-all ${backup.enabled ? 'left-[18px]' : 'left-0.5'}`} />
+          </button>
+        </label>
+
+        <dl className="grid grid-cols-[96px_1fr] gap-x-3 gap-y-1 text-[12.5px]">
+          <dt className="text-ink-3">Last copy</dt>
+          <dd className="min-w-0 truncate" data-backup-last>
+            {backup.lastSavedAt ? (
+              <>
+                {formatDateTime(backup.lastSavedAt)}
+                <span className="text-ink-3">
+                  {' '}
+                  · {backup.lastFile}
+                  {backup.lastBytes !== null ? ` · ${formatBytes(backup.lastBytes)}` : ''}
+                </span>
+              </>
+            ) : (
+              <span className="text-ink-3">None yet</span>
+            )}
+          </dd>
+          <dt className="text-ink-3">Next copy</dt>
+          <dd data-backup-next>
+            {backup.running ? (
+              <span className="text-ink-2">Saving now…</span>
+            ) : !backup.enabled || !backup.nextDueAt ? (
+              <span className="text-ink-3">Off</span>
+            ) : due ? (
+              <span className="text-ink-2">Due now: saved as soon as the host can be reached</span>
+            ) : (
+              formatDateTime(backup.nextDueAt)
+            )}
+          </dd>
+        </dl>
+
+        {backup.lastError ? (
+          <Notice kind="error" title="The last copy failed">
+            {backup.lastError} {backup.enabled ? 'It is tried again within the hour.' : ''}
+          </Notice>
+        ) : null}
+
+        <Button disabled={!backup.folder} loading={saving || backup.running} onClick={() => void saveNow()}>
+          <Download /> Save a copy now
+        </Button>
+      </div>
+    </SettingsCard>
+  );
+}
+
 export function SettingsPage({ state, user }: { state: BridgeState; user: CurrentUser }) {
   const [changingServer, setChangingServer] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
@@ -375,6 +480,7 @@ export function SettingsPage({ state, user }: { state: BridgeState; user: Curren
             </div>
           </SettingsCard>
 
+          {user.role === 'admin' ? <AutoBackupCard state={state} /> : null}
           {user.role === 'admin' ? <BackupsCard state={state} /> : null}
         </div>
       </div>

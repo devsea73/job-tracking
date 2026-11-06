@@ -2,7 +2,8 @@ import { copyFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, session, shell, Tray, type IpcMainInvokeEvent } from 'electron';
 import type { ServerEvent } from '../shared/api';
-import { IPC, NOTIFICATION_HIDE_CHOICES, type ApiCallResult, type BridgeState, type ConnectionStatus, type NoticeAction, type NotificationSettings, type ProbeResult, type ThemeChoice } from '../shared/bridge';
+import { IPC, NOTIFICATION_HIDE_CHOICES, type ApiCallResult, type AutoBackupState, type BridgeState, type ConnectionStatus, type NoticeAction, type NotificationSettings, type ProbeResult, type ThemeChoice } from '../shared/bridge';
+import { AutoBackup } from './auto-backup';
 import { Connection } from './connection';
 import { HostServer, type HostReady } from './host-server';
 import { probeServer } from './lan-client';
@@ -31,7 +32,8 @@ function currentState(): BridgeState {
     host: hostInfo ? { port: hostInfo.port, addresses: hostInfo.addresses, fingerprint: hostInfo.fingerprint, dataDir: hostInfo.dataDir } : null,
     signedIn: connection.signedIn,
     theme: settings.theme,
-    notifications: settings.notifications
+    notifications: settings.notifications,
+    autoBackup: autoBackup.state()
   };
 }
 
@@ -44,6 +46,7 @@ const connection = new Connection({
     status = next;
     statusMessage = message;
     broadcastState();
+    if (next === 'connected') scheduleBackupCheck();
   },
   onEvent(event: ServerEvent) {
     window?.webContents.send(IPC.serverEvent, event);
@@ -69,6 +72,33 @@ const notifications = new NotificationCenter({
     }
   }
 });
+
+const autoBackup = new AutoBackup({
+  get: () => settings.autoBackup,
+  save: (next) => {
+    settings = { ...settings, autoBackup: next };
+    saveSettings(settings);
+    broadcastState();
+  },
+  role: async () => {
+    if (!connection.signedIn) return null;
+    const me = await connection.api('GET', '/api/auth/me', undefined, () => undefined);
+    return me.ok ? (me.data as { role: 'admin' | 'user' }).role : null;
+  },
+  download: (destination) => connection.download('/api/admin/database/download', destination),
+  changed: () => broadcastState()
+});
+
+let backupCheck: NodeJS.Timeout | null = null;
+
+/** Looks shortly after the host is reached or someone signs in: a missed week is made up then. */
+function scheduleBackupCheck(): void {
+  if (backupCheck) clearTimeout(backupCheck);
+  backupCheck = setTimeout(() => {
+    backupCheck = null;
+    void autoBackup.saveIfDue();
+  }, 10_000);
+}
 
 function setNotifications(changes: Partial<NotificationSettings>): NotificationSettings {
   const next = { ...settings.notifications };
@@ -323,6 +353,7 @@ function registerIpc(): void {
     const result = await connection.api(String(method), String(path), body, (token) => {
       storeToken(token);
       broadcastState();
+      if (token) scheduleBackupCheck();
     });
     return result;
   });
@@ -380,6 +411,43 @@ function registerIpc(): void {
   handle(IPC.openDataFolder, async () => {
     if (hostInfo) await shell.openPath(hostInfo.dataDir);
   });
+
+  handle(IPC.chooseBackupFolder, async () => {
+    if (!window) return autoBackup.state();
+    const chosen = await dialog.showOpenDialog(window, {
+      title: 'Choose the folder for weekly database copies',
+      defaultPath: settings.autoBackup.folder ?? app.getPath('documents'),
+      properties: ['openDirectory', 'createDirectory', 'promptToCreate']
+    });
+    const folder = chosen.filePaths[0];
+    if (!chosen.canceled && folder) {
+      settings = { ...settings, autoBackup: { ...settings.autoBackup, folder, lastError: null } };
+      saveSettings(settings);
+      broadcastState();
+      void autoBackup.saveIfDue();
+    }
+    return autoBackup.state();
+  });
+
+  handle(IPC.setAutoBackup, (enabled: boolean) => {
+    const on = enabled === true && !!settings.autoBackup.folder;
+    settings = { ...settings, autoBackup: { ...settings.autoBackup, enabled: on, lastError: on ? settings.autoBackup.lastError : null } };
+    saveSettings(settings);
+    broadcastState();
+    // Switched on with no copy yet, or the last one over a week old: one is saved straight away.
+    if (on) void autoBackup.saveIfDue();
+    return autoBackup.state();
+  });
+
+  handle(IPC.saveBackupNow, async (): Promise<ApiCallResult<AutoBackupState>> => {
+    const outcome = await autoBackup.saveNow();
+    if (outcome.saved) return { ok: true, status: 200, data: autoBackup.state() };
+    return { ok: false, status: 0, error: { code: outcome.reason, message: outcome.message ?? 'The copy could not be saved.' }, data: autoBackup.state() };
+  });
+
+  handle(IPC.openBackupFolder, async () => {
+    if (settings.autoBackup.folder) await shell.openPath(settings.autoBackup.folder);
+  });
 }
 
 function lockDownSession(): void {
@@ -402,6 +470,8 @@ function startUp(): void {
   } else if (settings.mode === 'client' && settings.server) {
     connection.connect(settings.server, loadStoredToken());
   }
+  // The weekly copy is looked at regularly while the app runs, including from the tray.
+  setInterval(() => void autoBackup.saveIfDue(), 15 * 60_000);
 }
 
 if (!app.requestSingleInstanceLock()) {

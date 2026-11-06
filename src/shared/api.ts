@@ -391,7 +391,11 @@ export interface ActivityQuery {
   to: string;
   /** Left out: hours for one day, days up to two months, weeks up to half a year, months beyond. */
   group?: ActivityGroup;
+  /** "me" for the viewer alone (the dashboard), "team" for everyone (the Team page). Left out: team. */
+  scope?: ActivityScope;
 }
+
+export type ActivityScope = 'me' | 'team';
 
 /** Days, both included, written 2026-11-05. */
 export interface DaySpan {
@@ -404,6 +408,16 @@ export interface ActivityBucket extends DaySpan {
   key: string;
 }
 
+/** How far the applications made in the range have got so far, each counted at its furthest stage and every stage before it. */
+export interface ActivityReached {
+  screen: number;
+  technical: number;
+  final: number;
+  offer: number;
+  /** Turned down, at whatever stage. */
+  rejected: number;
+}
+
 export interface ActivityCounts {
   today: number;
   yesterday: number;
@@ -414,6 +428,26 @@ export interface ActivityCounts {
   interviews: number;
   /** Percent, one decimal. Null when nothing was applied in the range: no rate, rather than 0%. */
   interviewRate: number | null;
+  reached: ActivityReached;
+  /** Interviews whose date falls in the range, whenever their application was made. */
+  scheduled: number;
+  /** Interviews whose date is today. */
+  scheduledToday: number;
+}
+
+export interface ActivityProfile {
+  id: number;
+  name: string;
+  isArchived: boolean;
+  today: number;
+  inRange: number;
+  interviews: number;
+  interviewRate: number | null;
+  allTime: number;
+  allTimeInterviews: number;
+  allTimeInterviewRate: number | null;
+  /** Applications in each of the response's buckets. */
+  series: number[];
 }
 
 export interface ActivityPerson extends ActivityCounts {
@@ -425,9 +459,11 @@ export interface ActivityPerson extends ActivityCounts {
   allTimeInterviewRate: number | null;
   /** Applications in each of the response's buckets. */
   series: number[];
-  /** Applications in the range under each of this person's profiles, most first. */
-  profiles: Array<{ name: string; count: number }>;
-  /** By applications in the range, then today's, then name; 1 is the leader. */
+  /** Interviews dated in each of the response's buckets. */
+  interviewSeries: number[];
+  /** The person's profiles in use or with history: most applications in the range first. */
+  profiles: ActivityProfile[];
+  /** By applications in the range, then today's, this week's, this month's, then name; 1 is the leader. */
   rank: number;
   behindLeader: number;
 }

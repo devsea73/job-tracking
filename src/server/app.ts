@@ -1,3 +1,4 @@
+import { createReadStream, rmSync } from 'node:fs';
 import Fastify, { LogController, type FastifyInstance, type FastifyReply, type FastifyRequest, type FastifyServerOptions } from 'fastify';
 import { eq } from 'drizzle-orm';
 import type { ApiErrorBody, CreateApplicationRequest, ServerEvent, ServerInfo } from '../shared/api';
@@ -345,6 +346,20 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
   });
 
   // ---- Backups (administrator) -------------------------------------------------------
+  // The whole database as one file, for an administrator's own copy on their computer.
+  app.get('/api/admin/database/download', admin, async (_request, reply) => {
+    const snapshot = await backupsService.createSnapshot(ctx);
+    const file = createReadStream(snapshot.path);
+    // Removed once read to the end or abandoned, whichever comes first.
+    file.once('close', () => rmSync(snapshot.path, { force: true }));
+    reply.raw.once('close', () => file.destroy());
+    return reply
+      .header('content-type', 'application/vnd.sqlite3')
+      .header('content-length', String(snapshot.sizeBytes))
+      .header('content-disposition', `attachment; filename="${snapshot.name}"`)
+      .send(file);
+  });
+
   app.get('/api/admin/backups', admin, async () => backupsService.listBackups(ctx));
 
   app.post('/api/admin/backups', admin, async (_request, reply) => reply.code(201).send(await backupsService.createBackup(ctx)));

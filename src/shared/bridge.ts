@@ -27,6 +27,24 @@ export interface NoticeActionResult {
 }
 export type ThemeChoice = 'system' | 'light' | 'dark';
 
+/** Set on each computer, by an administrator: a full copy of the database saved to a folder here every week. */
+export interface AutoBackupSettings {
+  enabled: boolean;
+  folder: string | null;
+  lastSavedAt: string | null;
+  lastFile: string | null;
+  lastBytes: number | null;
+  /** Why the last attempt failed. Cleared by the next one that works. */
+  lastError: string | null;
+  lastAttemptAt: string | null;
+}
+
+export interface AutoBackupState extends AutoBackupSettings {
+  /** When the next copy is due. Null when switched off or no folder is chosen. */
+  nextDueAt: string | null;
+  running: boolean;
+}
+
 export type ConnectionStatus =
   /** No mode chosen yet, or client mode without a paired server. */
   | 'unconfigured'
@@ -52,6 +70,7 @@ export interface BridgeState {
   signedIn: boolean;
   theme: ThemeChoice;
   notifications: NotificationSettings;
+  autoBackup: AutoBackupState;
 }
 
 export interface ApiCallResult<T = unknown> {
@@ -104,6 +123,14 @@ export interface JobTrackerBridge {
   /** Host only. Copies a chosen file in among the backups and returns its name. */
   importBackup(): Promise<ApiCallResult<{ name: string }>>;
   openDataFolder(): Promise<void>;
+
+  /** Administrators. Asks for the folder weekly copies of the database go to, on this computer. */
+  chooseBackupFolder(): Promise<AutoBackupState>;
+  /** Administrators. Turns the weekly copy on or off. Turned on, a copy is saved at once if one is due. */
+  setAutoBackup(enabled: boolean): Promise<AutoBackupState>;
+  /** Administrators. Saves a copy to the chosen folder now, whenever the last one was. */
+  saveBackupNow(): Promise<ApiCallResult<AutoBackupState>>;
+  openBackupFolder(): Promise<void>;
 }
 
 export const IPC = {
@@ -126,5 +153,9 @@ export const IPC = {
   copyLink: 'clipboard:copy-link',
   exportBackup: 'backup:export',
   importBackup: 'backup:import',
-  openDataFolder: 'host:open-data-folder'
+  openDataFolder: 'host:open-data-folder',
+  chooseBackupFolder: 'auto-backup:choose-folder',
+  setAutoBackup: 'auto-backup:set',
+  saveBackupNow: 'auto-backup:save-now',
+  openBackupFolder: 'auto-backup:open-folder'
 } as const;

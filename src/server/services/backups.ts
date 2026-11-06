@@ -33,7 +33,33 @@ export async function createBackup(ctx: AppContext, prefix = 'backup'): Promise<
   return { name, sizeBytes: stats.size, createdAt: stats.mtime.toISOString() };
 }
 
-const REQUIRED_TABLES = ['users', 'jobs', 'job_urls', 'applications', 'interviews', 'application_status_history', 'sessions'];
+const SNAPSHOT_PREFIX = 'download-';
+
+/**
+ * A consistent copy of the whole database for an administrator to download, kept apart from the
+ * backups list. The caller removes it once sent; copies left by an interrupted download are
+ * cleared the next time one is made.
+ */
+export async function createSnapshot(ctx: AppContext): Promise<{ path: string; name: string; sizeBytes: number }> {
+  const directory = join(ctx.paths.dataDir, 'downloads');
+  mkdirSync(directory, { recursive: true });
+  const hourAgo = Date.now() - 3_600_000;
+  for (const leftover of readdirSync(directory)) {
+    const path = join(directory, leftover);
+    if (leftover.startsWith(SNAPSHOT_PREFIX) && statSync(path).mtimeMs < hourAgo) rmSync(path, { force: true });
+  }
+  const name = `job-tracker-${stamp()}.sqlite`;
+  const path = join(directory, `${SNAPSHOT_PREFIX}${Math.random().toString(36).slice(2)}-${name}`);
+  await ctx.handle.sqlite.backup(path);
+  // One self-contained file: opened anywhere, it needs no journal files beside it.
+  const copy = new Database(path);
+  copy.pragma('journal_mode = DELETE');
+  copy.close();
+  ctx.logger.info({ name }, 'Made a database copy for download');
+  return { path, name, sizeBytes: statSync(path).size };
+}
+
+const REQUIRED_TABLES =['users', 'jobs', 'job_urls', 'applications', 'interviews', 'application_status_history', 'sessions'];
 
 /** Refuses to replace live data with anything that is not a healthy database from this app. */
 export function assertRestorable(path: string): void {

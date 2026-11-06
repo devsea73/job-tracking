@@ -165,6 +165,13 @@ export class Connection {
     }
   }
 
+  /** Saves a file from the host, as the signed-in person. */
+  async download(path: string, destination: string): Promise<{ bytes: number }> {
+    if (!this.client || !this.token) throw new Error('Sign in first.');
+    if (!path.startsWith('/api/')) throw new Error('Invalid request.');
+    return this.client.download(path, this.token, destination);
+  }
+
   /** A failed call means the stream is probably dead too; look again without flashing "connecting". */
   private retryNowQuietly(): void {
     if (this.retryTimer) return;

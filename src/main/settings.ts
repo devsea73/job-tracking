@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { app, safeStorage } from 'electron';
-import type { AppMode, NotificationSettings, ThemeChoice } from '../shared/bridge';
+import type { AppMode, AutoBackupSettings, NotificationSettings, ThemeChoice } from '../shared/bridge';
 import { DEFAULT_PORT } from '../shared/constants';
+import { DEFAULT_AUTO_BACKUP } from './auto-backup';
 
 export interface PairedServer {
   host: string;
@@ -18,11 +19,12 @@ export interface Settings {
   theme: ThemeChoice;
   trayHintShown: boolean;
   notifications: NotificationSettings;
+  autoBackup: AutoBackupSettings;
 }
 
 export const DEFAULT_NOTIFICATIONS: NotificationSettings = { enabled: true, hideSeconds: 10, applyProfileId: null };
 
-const DEFAULTS: Settings = { mode: null, hostPort: DEFAULT_PORT, server: null, theme: 'system', trayHintShown: false, notifications: DEFAULT_NOTIFICATIONS };
+const DEFAULTS: Settings = { mode: null, hostPort: DEFAULT_PORT, server: null, theme: 'system', trayHintShown: false, notifications: DEFAULT_NOTIFICATIONS, autoBackup: DEFAULT_AUTO_BACKUP };
 
 function settingsPath(): string {
   return join(app.getPath('userData'), 'settings.json');
@@ -31,7 +33,7 @@ function settingsPath(): string {
 export function loadSettings(): Settings {
   try {
     const saved = JSON.parse(readFileSync(settingsPath(), 'utf8')) as Partial<Settings>;
-    return { ...DEFAULTS, ...saved, notifications: { ...DEFAULT_NOTIFICATIONS, ...saved.notifications } };
+    return { ...DEFAULTS, ...saved, notifications: { ...DEFAULT_NOTIFICATIONS, ...saved.notifications }, autoBackup: { ...DEFAULT_AUTO_BACKUP, ...saved.autoBackup } };
   } catch {
     return { ...DEFAULTS };
   }
