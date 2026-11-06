@@ -125,6 +125,16 @@ describe('the weekly copy to a folder', () => {
     expect(settings().lastError).toMatch(/cannot be reached/);
   });
 
+  it('keeps a finished copy even when its settings cannot be written', async () => {
+    const { backup, folder } = scheduler({
+      save: () => {
+        throw Object.assign(new Error('EPERM: operation not permitted, rename settings.json.tmp'), { code: 'EPERM' });
+      }
+    });
+    expect(await backup.saveIfDue()).toEqual({ saved: true, file: join(folder, 'job-tracker-backup-2026-11-05-2130.sqlite') });
+    expect(readdirSync(folder)).toEqual(['job-tracker-backup-2026-11-05-2130.sqlite']);
+  });
+
   it('keeps nothing when the download fails or is not a database', async () => {
     const failing = scheduler({
       download: async (destination) => {

@@ -92,10 +92,19 @@ export class AutoBackup {
     return this.running;
   }
 
+  /** Remembers how it went. Settings that cannot be written never undo a copy that was saved. */
+  private record(next: AutoBackupSettings): void {
+    try {
+      this.deps.save(next);
+    } catch {
+      // Kept in memory only; the next attempt writes it again.
+    }
+  }
+
   private async run(asked: boolean): Promise<BackupOutcome> {
     const settings = this.deps.get();
     const fail = (message: string): BackupOutcome => {
-      this.deps.save({ ...this.deps.get(), lastError: message, lastAttemptAt: this.now().toISOString() });
+      this.record({ ...this.deps.get(), lastError: message, lastAttemptAt: this.now().toISOString() });
       return { saved: false, reason: 'failed', message };
     };
     if (!settings.folder) return fail('Choose a folder first.');
@@ -115,17 +124,26 @@ export class AutoBackup {
     let name = `job-tracker-backup-${fileStamp(at)}.sqlite`;
     for (let copy = 2; existsSync(join(settings.folder, name)); copy += 1) name = `job-tracker-backup-${fileStamp(at)}-${copy}.sqlite`;
     const destination = join(settings.folder, name);
-    try {
-      const { bytes } = await this.deps.download(destination);
-      if (!isSqliteFile(destination)) {
+    const discard = () => {
+      try {
         rmSync(destination, { force: true });
+      } catch {
+        // Held open by something else: an unfinished copy is reported as a failure all the same.
+      }
+    };
+    let bytes: number;
+    try {
+      ({ bytes } = await this.deps.download(destination));
+      if (!isSqliteFile(destination)) {
+        discard();
         return fail('The host sent something that is not a database. Nothing was kept.');
       }
-      this.deps.save({ ...this.deps.get(), lastSavedAt: at.toISOString(), lastFile: name, lastBytes: bytes, lastError: null, lastAttemptAt: at.toISOString() });
-      return { saved: true, file: destination };
     } catch (error) {
-      rmSync(destination, { force: true });
+      discard();
       return fail(error instanceof Error ? error.message : 'The copy could not be saved.');
     }
+    // The copy is complete and checked: nothing from here on removes it.
+    this.record({ ...this.deps.get(), lastSavedAt: at.toISOString(), lastFile: name, lastBytes: bytes, lastError: null, lastAttemptAt: at.toISOString() });
+    return { saved: true, file: destination };
   }
 }

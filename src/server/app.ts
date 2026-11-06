@@ -255,7 +255,7 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
   app.post('/api/jobs/:id/apply', async (request) => {
     const { id } = v.parse(v.idParam, request.params);
     const body = v.parse(v.applyToJobBody, request.body ?? {});
-    return applyToExistingJob(ctx, requireSession(request).user.id, id, body.profileId, body.memo ?? '', body.urlId ?? null);
+    return applyToExistingJob(ctx, requireSession(request).user.id, id, body.profileId, body.memo ?? '', body.urlId ?? null, { unlessApplied: body.unlessApplied });
   });
 
   // Job details are shared by everyone, so corrections go through the administrator.
@@ -292,7 +292,7 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
 
   app.post('/api/duplicates/merge', async (request) => {
     const { jobIdA, jobIdB } = v.parse(v.duplicatePairBody, request.body);
-    return duplicatesService.mergeDuplicatePair(ctx, jobIdA, jobIdB);
+    return await duplicatesService.mergeDuplicatePair(ctx, jobIdA, jobIdB);
   });
 
   app.post('/api/duplicates/dismiss', async (request) => {
@@ -374,7 +374,7 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
 
   app.get('/api/admin/backups', admin, async () => backupsService.listBackups(ctx));
 
-  app.post('/api/admin/backups', admin, async (_request, reply) => reply.code(201).send(await backupsService.createBackup(ctx)));
+  app.post('/api/admin/backups', admin, async (_request, reply) => reply.code(201).send(await backupsService.createBackup(ctx, 'backup')));
 
   app.post('/api/admin/backups/:name/restore', admin, async (request) => {
     const { name } = v.parse(v.backupNameParam, request.params);
@@ -396,7 +396,12 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
     stream.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
     stream.write(': connected\n\n');
 
-    const send = (event: ServerEvent) => stream.write(`data: ${JSON.stringify(event)}\n\n`);
+    // Checked before every event too: a session revoked (signed out elsewhere, account disabled)
+    // gets nothing more, instead of until the next heartbeat.
+    const send = (event: ServerEvent) => {
+      if (resolveSession(ctx.db, token)) stream.write(`data: ${JSON.stringify(event)}\n\n`);
+      else stream.end();
+    };
     const unsubscribe = ctx.events.subscribe(send);
     // Doubles as the check that ends the stream once a session is revoked.
     const heartbeat = setInterval(() => {

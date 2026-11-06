@@ -64,8 +64,43 @@ describe('checking a pasted link before saving it', () => {
     expect(checked.status).toBe('possible');
     if (checked.status !== 'possible') return;
     expect(checked.candidates[0]).toMatchObject({ company: 'Devoted Health Services, Inc' });
-    const saved = await users.andy.addJob('https://other.example.org/jobs/4', { draftId: checked.draftId, resolution: { action: 'new' } });
+    const saved = await users.andy.addJob('https://other.example.org/jobs/4', { draftId: checked.draftId, resolution: { action: 'new', seen: [checked.candidates[0].jobId] } });
     expect(saved).toMatchObject({ outcome: 'created', jobWasNew: true });
+  });
+
+  it('asks again when a likelier duplicate turned up after the check, instead of calling it different unseen', async () => {
+    const { server, users, check } = await setUp();
+    server.http.serve('https://careers.example.com/jobs/6', jobPage({ title: 'Senior Data Engineer', company: 'Devoted Health Services, Inc' }));
+    server.http.serve('https://other.example.org/jobs/6', jobPage({ title: 'Senior Data Engineer', company: 'Devoted Health', description: `${LONG_DESCRIPTION.split('\n\n').reverse().join('\n\n')} Apply today.` }));
+    // The check finds nothing: the other copy is saved only afterwards, by someone else.
+    const checked = await check(users.andy, 'https://other.example.org/jobs/6');
+    expect(checked.status).toBe('fresh');
+    const theirs = (await users.john.addJob('https://careers.example.com/jobs/6')) as Created;
+
+    const saved = await users.andy.addJob('https://other.example.org/jobs/6', { draftId: checked.draftId ?? undefined });
+    expect(saved).toMatchObject({ outcome: 'possible_duplicate', candidates: [{ jobId: theirs.jobId }] });
+    if (saved.outcome !== 'possible_duplicate') return;
+    // "New" for a different candidate than the one now on top is asked about again.
+    expect(await users.andy.addJob('https://other.example.org/jobs/6', { draftId: saved.draftId, resolution: { action: 'new', seen: [theirs.jobId + 1000] } })).toMatchObject({ outcome: 'possible_duplicate' });
+    // Answered for the one shown: a new job, and that pair is remembered as different.
+    const created = await users.andy.addJob('https://other.example.org/jobs/6', { draftId: saved.draftId, resolution: { action: 'new', seen: [theirs.jobId] } });
+    expect(created).toMatchObject({ outcome: 'created', jobWasNew: true });
+    if (created.outcome !== 'created') return;
+    const pair = server.ctx.db.$client.prepare('SELECT status FROM duplicate_candidates WHERE job_id_low = ? AND job_id_high = ?').get(Math.min(theirs.jobId, created.jobId), Math.max(theirs.jobId, created.jobId));
+    expect(pair).toEqual({ status: 'distinct' });
+  });
+
+  it('leaves matches nobody was shown for review, when told to save as new without a list', async () => {
+    const { server, users, check } = await setUp();
+    server.http.serve('https://careers.example.com/jobs/7', jobPage({ title: 'Senior Data Engineer', company: 'Devoted Health Services, Inc' }));
+    server.http.serve('https://other.example.org/jobs/7', jobPage({ title: 'Senior Data Engineer', company: 'Devoted Health', description: `${LONG_DESCRIPTION.split('\n\n').reverse().join('\n\n')} Apply today.` }));
+    const first = (await users.john.addJob('https://careers.example.com/jobs/7')) as Created;
+    const checked = await check(users.andy, 'https://other.example.org/jobs/7');
+    const saved = await users.andy.addJob('https://other.example.org/jobs/7', { draftId: checked.draftId ?? undefined, resolution: { action: 'new' } });
+    expect(saved).toMatchObject({ outcome: 'created', jobWasNew: true });
+    if (saved.outcome !== 'created') return;
+    const pair = server.ctx.db.$client.prepare('SELECT status FROM duplicate_candidates WHERE job_id_low = ? AND job_id_high = ?').get(first.jobId, saved.jobId);
+    expect(pair).toEqual({ status: 'pending' });
   });
 
   it('saves a possible duplicate under the matching job when told it is the same', async () => {

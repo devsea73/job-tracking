@@ -76,7 +76,7 @@ export const createApplicationBody = z.object({
   resolution: z
     .discriminatedUnion('action', [
       z.object({ action: z.literal('merge'), jobId: z.number().int().positive() }),
-      z.object({ action: z.literal('new') })
+      z.object({ action: z.literal('new'), seen: z.array(z.number().int().positive()).max(50).optional() })
     ])
     .optional(),
   manual: manualJobFields.optional(),
@@ -85,7 +85,13 @@ export const createApplicationBody = z.object({
 
 export const checkLinkBody = z.object({ url: z.string().trim().min(1, 'Job URL is required.').max(4_000, 'That link is too long.') });
 
-export const applyToJobBody = z.object({ profileId, memo: memo.optional(), urlId: z.number().int().positive().optional() });
+export const applyToJobBody = z.object({
+  profileId,
+  memo: memo.optional(),
+  urlId: z.number().int().positive().optional(),
+  /** From a notification: only if none of this person's profiles has applied yet. */
+  unlessApplied: z.boolean().optional()
+});
 
 const profileName = z.string().trim().min(1, 'Give the profile a name.').max(PROFILE_NAME_MAX, `Use at most ${PROFILE_NAME_MAX} characters.`);
 

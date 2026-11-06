@@ -33,6 +33,12 @@ export class NotificationCenter {
   private applyingId: number | null = null;
   private nextId = 1;
   private height = 180;
+  /**
+   * Moves on whenever the cards are cleared: on signing out or in as someone else, or another
+   * database. Work that started before (reading a job, applying) finds it changed and stops, so it
+   * never shows a card to, or applies for, the next person.
+   */
+  private epoch = 0;
 
   constructor(private readonly options: Options) {}
 
@@ -41,9 +47,10 @@ export class NotificationCenter {
     if (event.type === 'database_restored') return this.clear();
     if (event.type !== 'application_added' || !event.jobId) return;
     if (!this.options.settings().enabled || !this.options.signedIn()) return;
+    const epoch = this.epoch;
     const query = event.applicationId ? `?application=${event.applicationId}` : '';
     const result = await this.options.api<JobBrief>('GET', `/api/jobs/${event.jobId}/brief${query}`);
-    if (!result.ok || !result.data) return;
+    if (epoch !== this.epoch || !result.ok || !result.data) return;
     const brief = result.data;
     if (brief.viewerIsAdmin) return;
     // I applied, here or in the main window: nothing about this job is news to me any more.
@@ -185,22 +192,29 @@ export class NotificationCenter {
     return { ok: true };
   }
 
-  /** Copies the link, then applies with the chosen profile, or the one used last, keeping that link on the application. */
+  /**
+   * Copies the link, then applies with the chosen profile, or the one used last, keeping that link
+   * on the application. Only if none of the person's profiles applied meanwhile, from the main window say.
+   */
   private async apply(brief: JobBrief): Promise<NoticeActionResult> {
+    const epoch = this.epoch;
     const copied = !!brief.url && (await this.options.copy(brief.url));
     const profiles = await this.options.api<MyProfilesResponse>('GET', '/api/profiles');
+    if (epoch !== this.epoch) return { ok: false, message: 'You signed out, so nothing was applied.' };
     if (!profiles.ok || !profiles.data) return { ok: false, message: profiles.error?.message ?? 'Could not read your profiles.' };
     const active = profiles.data.profiles.filter((profile) => !profile.isArchived);
     const wanted = this.options.settings().applyProfileId;
     const profile = active.find((item) => item.id === wanted) ?? active.find((item) => item.id === profiles.data?.lastUsedProfileId) ?? active[0];
     if (!profile) return { ok: false, message: 'You have no active profile to apply with.' };
-    const result = await this.options.api<CreateApplicationResponse>('POST', `/api/jobs/${brief.jobId}/apply`, { profileId: profile.id, ...(brief.urlId ? { urlId: brief.urlId } : {}) });
+    const result = await this.options.api<CreateApplicationResponse>('POST', `/api/jobs/${brief.jobId}/apply`, { profileId: profile.id, unlessApplied: true, ...(brief.urlId ? { urlId: brief.urlId } : {}) });
     if (!result.ok || !result.data) return { ok: false, message: result.error?.message ?? 'Could not apply.' };
-    return { ok: true, profileName: profile.name, already: result.data.outcome === 'already_applied', copied };
+    const data = result.data;
+    return { ok: true, profileName: data.outcome === 'already_applied' ? data.profileName : profile.name, already: data.outcome === 'already_applied', copied };
   }
 
   /** Notifications turned off, signed out, another database: whatever is showing or waiting goes away. */
   clear(): void {
+    this.epoch += 1;
     this.queue.length = 0;
     this.current = null;
     this.applyingId = null;

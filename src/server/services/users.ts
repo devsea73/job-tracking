@@ -6,6 +6,7 @@ import type { AppContext } from '../context';
 import { nowIso, type Db } from '../db/client';
 import { applications, profiles, userAvatars, users } from '../db/schema';
 import { ApiError, conflict, forbidden, notFound } from '../errors';
+import { isLoopbackAddress } from '../network';
 
 export const INITIAL_ADMIN_USERNAME = 'admin';
 export const INITIAL_ADMIN_PASSWORD = 'admin';
@@ -70,13 +71,21 @@ export async function login(ctx: AppContext, address: string, username: string, 
   if (retryAfter !== null) {
     throw new ApiError(429, 'too_many_attempts', `Too many failed sign-ins. Try again in ${Math.ceil(retryAfter / 60)} minute(s).`, { retryAfter });
   }
+  // Counted as a failure before the password is checked, which takes a while: otherwise many
+  // guesses sent at once would all be let through before the first of them had failed.
+  ctx.limiter.recordFailure(address, username);
   const user = findByUsername(ctx.db, username);
   decoyHash ??= ctx.hasher.hash('decoy-password-for-timing');
   const valid = await ctx.hasher.verify(user?.passwordHash ?? (await decoyHash), password);
   if (!user || !valid || !user.isActive) {
-    ctx.limiter.recordFailure(address, username);
     ctx.logger.warn({ address }, 'Failed sign-in');
     throw new ApiError(401, 'invalid_credentials', 'Incorrect username or password, or the account is disabled.');
+  }
+  // Until its owner picks a password, the first administrator account opens with one everybody
+  // knows. Only the host computer itself may use it, so nobody else on the network can claim it.
+  if (user.role === 'admin' && user.mustChangePassword && password === INITIAL_ADMIN_PASSWORD && !isLoopbackAddress(address)) {
+    ctx.limiter.recordSuccess(address, username);
+    throw new ApiError(403, 'setup_on_host', 'Finish setting up on the host computer first: sign in there as admin and choose a new password.');
   }
   ctx.limiter.recordSuccess(address, username);
   const session = createSession(ctx.db, user.id);

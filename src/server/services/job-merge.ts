@@ -2,7 +2,7 @@ import type Database from 'better-sqlite3';
 import { isUnreadableNote } from '../../shared/unreadable';
 import type { AppContext } from '../context';
 import { nowIso, prepared } from '../db/client';
-import { AGGREGATOR_PROVIDERS, type AtsIdentity } from '../dedupe/ats';
+import { AGGREGATOR_PROVIDERS, identifiersConflict, type AtsIdentity } from '../dedupe/ats';
 import { normalizeCompany, titleSimilarity } from '../dedupe/text-normalize';
 import { combineFacts } from '../dedupe/job-facts';
 import { buildEvidence, type UrlEvidence, type UrlKind } from '../dedupe/matcher';
@@ -32,11 +32,9 @@ interface JobRow {
  * several times, so its ids say nothing either way.
  */
 function haveConflictingIds(sqlite: Database.Database, a: number, b: number): boolean {
-  return !!prepared(
-    sqlite,
-    `SELECT 1 FROM job_identifiers x JOIN job_identifiers y ON x.provider = y.provider AND x.external_id != y.external_id
-     WHERE x.job_id = ? AND y.job_id = ? AND x.is_discovered = 0 AND y.is_discovered = 0 AND x.provider NOT IN (${AGGREGATORS_SQL}) LIMIT 1`
-  ).get(a, b);
+  const ids = prepared(sqlite, `SELECT provider, external_id AS externalId FROM job_identifiers WHERE job_id = ? AND is_discovered = 0 AND provider NOT IN (${AGGREGATORS_SQL})`);
+  const others = ids.all(b) as Array<{ provider: string; externalId: string }>;
+  return (ids.all(a) as Array<{ provider: string; externalId: string }>).some((left) => others.some((right) => identifiersConflict(left, right)));
 }
 
 function getJob(sqlite: Database.Database, id: number): JobRow | undefined {
@@ -150,6 +148,10 @@ export function mergeJobs(sqlite: Database.Database, keepId: number, otherId: nu
     nowIso(),
     keepId
   );
+  // Tidying up is not news: the job keeps its place among recent activity, the later of the two.
+  // (Changing updated_at above moved it to now, through a trigger.)
+  const lastActivity = [keep.last_activity_at, other.last_activity_at].filter((value): value is string => !!value).sort().at(-1) ?? null;
+  if (lastActivity) prepared(sqlite, 'UPDATE jobs SET last_activity_at = ? WHERE id = ?').run(lastActivity, keepId);
   // Someone said the merged-away job differs from a third one, which now holds for the job it joined.
   prepared(
     sqlite,

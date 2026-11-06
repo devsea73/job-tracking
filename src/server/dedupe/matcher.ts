@@ -2,7 +2,7 @@ import { and, eq } from 'drizzle-orm';
 import { prepared, type Db } from '../db/client';
 import { FACTS_COLUMNS, FEATURE_COLUMNS, loadTextFeatures, toJobFacts, toTextFeatures, type FactsRow, type FeatureRow } from '../services/job-facts-store';
 import { jobIdentifiers, jobs, jobUrls } from '../db/schema';
-import { AGGREGATOR_PROVIDERS, identifyAts, isAggregator, referencedIdentities, sourcePlatform, type AtsIdentity } from './ats';
+import { AGGREGATOR_PROVIDERS, identifiersConflict, identifyAts, isAggregator, referencedIdentities, sourcePlatform, type AtsIdentity } from './ats';
 import { compareJobs, featuresFor, THRESHOLDS, type ComparableJob, type ContentComparison } from './scoring';
 import { textSketchOf } from './text-features';
 import { normalizeCompany, normalizeTitle, titleSimilarity } from './text-normalize';
@@ -38,10 +38,14 @@ export function buildEvidence(raw: string | URL, kind: UrlKind): UrlEvidence | n
   }
 }
 
-/** A site's home or careers landing page says nothing about which job this is. */
+/**
+ * A site's home or careers landing page says nothing about which job this is. A query or a
+ * fragment the normalized link kept ("/careers#backend-engineer", "/jobs?id=42") does.
+ */
 export function isSpecificPage(evidence: UrlEvidence): boolean {
   if (evidence.identity) return true;
-  const { pathname } = new URL(evidence.normalized);
+  const { pathname, search, hash } = new URL(evidence.normalized);
+  if (search || hash) return true;
   const segments = pathname.split('/').filter(Boolean);
   if (segments.length === 0) return false;
   return !(segments.length === 1 && /^(careers?|jobs?|job-board|openings|positions|join-us|work-with-us)$/i.test(segments[0]));
@@ -64,7 +68,8 @@ export function findExactMatch(db: Db, evidence: UrlEvidence[], incomingTitle?: 
   const indirect = evidence.filter((item) => item.kind !== 'original' && isSpecificPage(item));
 
   for (const item of direct) {
-    const byUrl = db.select({ jobId: jobUrls.jobId }).from(jobUrls).where(eq(jobUrls.normalizedUrl, item.normalized)).get();
+    // A careers home page is shared by every job on it: the same link is not the same job.
+    const byUrl = isSpecificPage(item) ? db.select({ jobId: jobUrls.jobId }).from(jobUrls).where(eq(jobUrls.normalizedUrl, item.normalized)).get() : undefined;
     if (byUrl) return { jobId: byUrl.jobId, matchedBy: 'url' };
     const byIdentity = findByIdentity(db, item.identity);
     if (byIdentity !== null) return { jobId: byIdentity, matchedBy: 'identifier' };
@@ -103,7 +108,7 @@ function contradictsJob(db: Db, jobId: number, identity: AtsIdentity | null): bo
     .from(jobIdentifiers)
     .where(and(eq(jobIdentifiers.jobId, jobId), eq(jobIdentifiers.provider, identity.provider), eq(jobIdentifiers.isDiscovered, false)))
     .all();
-  return others.some((other) => other.externalId !== identity.externalId);
+  return others.some((other) => identifiersConflict({ provider: identity.provider, externalId: other.externalId }, identity));
 }
 
 function findByIdentity(db: Db, identity: AtsIdentity | null): number | null {

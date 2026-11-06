@@ -143,7 +143,7 @@ describe('duplicate jobs', () => {
     expect(jobCount(ctx)).toBe(1); // nothing saved yet
 
     // The person says these are different openings.
-    const asNew = await users.john.addJob('https://stripe-careers.com/jobs/b', { draftId: second.draftId, resolution: { action: 'new' } });
+    const asNew = await users.john.addJob('https://stripe-careers.com/jobs/b', { draftId: second.draftId, resolution: { action: 'new', seen: [second.candidates[0].jobId] } });
     expect(asNew).toMatchObject({ outcome: 'created', jobWasNew: true });
     expect(jobCount(ctx)).toBe(2);
     // The draft saved a second fetch of the page.

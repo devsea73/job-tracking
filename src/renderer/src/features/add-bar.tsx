@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent } from 'react';
 import { AlertTriangle, Check, CheckCircle2, CircleSlash, Copy, Link2, Loader2, StickyNote, User } from 'lucide-react';
-import type { CheckLinkResponse, CreateApplicationRequest, CreateApplicationResponse } from '@shared/api';
+import type { CheckLinkResponse, CreateApplicationRequest, CreateApplicationResponse, DuplicateCandidate } from '@shared/api';
+import { unreadableNote } from '@shared/unreadable';
 import { JobTags } from '@/components/job-tags';
 import { Input } from '@/components/ui/field';
 import { Select } from '@/components/ui/select';
@@ -47,6 +48,8 @@ export function AddBar() {
   const [sameAs, setSameAs] = useState<number | null>(null);
   const [manual, setManual] = useState({ title: '', company: '' });
   const [saving, setSaving] = useState(false);
+  /** A likely duplicate found only when saving (someone saved it meanwhile): shown, for the person to decide. */
+  const [asked, setAsked] = useState<{ url: string; draftId: string; candidates: DuplicateCandidate[] } | null>(null);
   const pending = useRef<{ url: string; promise: Promise<CheckLinkResponse | null> } | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const urlInput = useRef<HTMLInputElement | null>(null);
@@ -86,6 +89,7 @@ export function AddBar() {
     if (pending.current?.url === text) return pending.current.promise;
     setCheck({ url: text, state: 'checking' });
     setSameAs(null);
+    setAsked(null);
     const promise = call<CheckLinkResponse>('POST', '/api/applications/check', { url: text })
       .then((result) => {
         setCheck((current) => (current?.url === text ? { url: text, state: 'done', result } : current));
@@ -127,12 +131,16 @@ export function AddBar() {
     setMemo('');
     setCheck(null);
     setSameAs(null);
+    setAsked(null);
     setManual({ title: '', company: '' });
     pending.current = null;
     focusAddBar({ force: true });
   };
 
   const result = check?.state === 'done' && check.url === url.trim() ? check.result : null;
+  const askedNow = asked?.url === url.trim() ? asked : null;
+  // The likely duplicates on show: found by the check, or, newer, by saving.
+  const offered = askedNow?.candidates ?? (result?.status === 'possible' ? result.candidates : null);
   const alreadyMine = result?.status === 'known' && chosen ? result.job.myProfileIds.includes(chosen.id) : false;
   const needsDetails = result?.status === 'unreadable' && (!manual.title.trim() || !manual.company.trim());
   const canSave = !!url.trim() && !!chosen && !saving && !alreadyMine && !needsDetails;
@@ -144,16 +152,26 @@ export function AddBar() {
     try {
       // Saving uses the check already made, waiting for it if it is still reading the page.
       const checked = await runCheck(link);
-      const base: CreateApplicationRequest = { url: link, profileId: chosen.id, memo, draftId: checked?.draftId ?? undefined };
-      if (checked?.status === 'possible') base.resolution = sameAs ? { action: 'merge', jobId: sameAs } : { action: 'new' };
+      const shown = asked?.url === link ? asked : null;
+      const candidates = shown?.candidates ?? (checked?.status === 'possible' ? checked.candidates : null);
+      const base: CreateApplicationRequest = { url: link, profileId: chosen.id, memo, draftId: shown?.draftId ?? checked?.draftId ?? undefined };
+      // Not "Same job": a new job, as far as the one on show goes. The others shown as "+N more"
+      // were not looked at, so they wait on the Duplicates page instead of being called different.
+      if (candidates?.length) base.resolution = sameAs ? { action: 'merge', jobId: sameAs } : { action: 'new', seen: [candidates[0].jobId] };
       if (checked?.status === 'unreadable') base.manual = { title: manual.title.trim(), company: manual.company.trim(), description: checked.description, location: checked.job.location };
       let response: CreateApplicationResponse = await create.mutateAsync(base);
-      // Something changed since the check: still no questions, it is saved as checked.
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        if (response.outcome === 'possible_duplicate') response = await create.mutateAsync({ ...base, draftId: response.draftId, resolution: { action: 'new' } });
-        else if (response.outcome === 'needs_manual' && response.extracted.title && response.extracted.company) {
-          response = await create.mutateAsync({ ...base, draftId: response.draftId, manual: { title: response.extracted.title, company: response.extracted.company, description: response.extracted.description || response.message, location: response.extracted.location } });
-        } else break;
+      // The page could not be read this time, although the check could: saved with what is known.
+      if (response.outcome === 'needs_manual' && response.extracted.title && response.extracted.company) {
+        const description = !response.missing.includes('description') && response.extracted.description ? response.extracted.description : unreadableNote(response.reason, response.message);
+        response = await create.mutateAsync({ ...base, draftId: response.draftId, manual: { title: response.extracted.title, company: response.extracted.company, description, location: response.extracted.location } });
+      }
+      if (response.outcome === 'possible_duplicate') {
+        // Something that looks like this job turned up since the check, probably saved by someone
+        // just now. Nothing is decided for the person: it is shown, and saving again means "new".
+        setAsked({ url: link, draftId: response.draftId, candidates: response.candidates });
+        setSameAs(null);
+        toast.show('This looks like a job just added to the list. Mark it "Same job", or save again to add it as a new job.');
+        return;
       }
       if (response.outcome === 'created') {
         const title = checked?.status === 'unreadable' ? manual.title.trim() : checked?.job.title;
@@ -194,6 +212,9 @@ export function AddBar() {
         <span className="truncate">Could not check this link: {check.message}</span>
       </Line>
     );
+  } else if (askedNow) {
+    // Found when saving, so newer than what the check said: only the reading problem, if any, still applies.
+    alert = null;
   } else if (result?.status === 'fresh') {
     alert = (
       <Line tone="good" icon={CheckCircle2}>
@@ -222,15 +243,17 @@ export function AddBar() {
         <JobTags facts={job.facts} className="shrink-0" />
       </Line>
     );
-  } else if (result?.status === 'possible') {
-    const best = result.candidates[0];
-    alert = (
+  }
+  // Shown with whatever else is still true, like a page that could not be read.
+  const best = offered?.[0] ?? null;
+  const duplicateLine =
+    best && offered ? (
       <Line tone="warn" icon={AlertTriangle}>
         <span className="shrink-0 font-medium text-warning-ink">Maybe a duplicate</span>
         <span className="truncate text-ink-2">
           {best.title} · {best.company}
           {best.reasons.length ? ` (${best.reasons.slice(0, 3).join(', ')})` : ''}
-          {result.candidates.length > 1 ? ` +${result.candidates.length - 1} more` : ''}
+          {offered.length > 1 ? ` +${offered.length - 1} more` : ''}
         </span>
         <button
           type="button"
@@ -246,8 +269,8 @@ export function AddBar() {
           Same job
         </button>
       </Line>
-    );
-  } else if (result?.status === 'unreadable') {
+    ) : null;
+  if (result?.status === 'unreadable') {
     alert = (
       <Line tone="warn" icon={AlertTriangle}>
         <span className="shrink-0 font-medium text-warning-ink">Can't read the page</span>
@@ -308,7 +331,12 @@ export function AddBar() {
           </button>
         </Tooltip>
       </div>
-      {alert ? <div className="mt-1.5 text-[12.5px]">{alert}</div> : null}
+      {duplicateLine || alert ? (
+        <div className="mt-1.5 space-y-1 text-[12.5px]">
+          {duplicateLine}
+          {alert}
+        </div>
+      ) : null}
     </section>
   );
 }

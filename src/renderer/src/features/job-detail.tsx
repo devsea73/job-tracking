@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Banknote, CalendarCheck, CalendarDays, CalendarPlus, Clock, Copy, Info, FileText, History, Link2, MapPin, Pencil, StickyNote, Trash2, User, UserPlus, Users, X, type LucideIcon } from 'lucide-react';
 import type { ApplicationDetail, CurrentUser, Interview, JobDetail } from '@shared/api';
 import type { ApplicationStatus } from '@shared/constants';
@@ -198,21 +198,28 @@ interface TimelineEntry {
   key: string;
   oldStatus: ApplicationStatus | null;
   newStatus: ApplicationStatus;
-  at: string;
+  /** Null for the status two merged copies of a job settled on, which has no moment of its own. */
+  at: string | null;
   applied: boolean;
 }
 
 /**
- * The application's own story: it starts when it was applied, then every status change. The start
- * is the applied date, not when a status record was written, which a merge of two copies of a job
- * or an imported list can make different.
+ * The application's own story, oldest first: it starts when it was applied, then every status
+ * change. The start is the applied date, not when a status record was written, which a merge of
+ * two copies of a job or an imported list can make different. Merging keeps the furthest status,
+ * which need not be the last change either copy made: then the story ends by saying so.
  */
 function timelineOf(application: ApplicationDetail): TimelineEntry[] {
-  const changes = application.history.filter((entry) => entry.oldStatus !== null);
-  return [
+  const changes = application.history
+    .filter((entry) => entry.oldStatus !== null)
+    .sort((a, b) => a.changedAt.localeCompare(b.changedAt) || a.id - b.id);
+  const story: TimelineEntry[] = [
     { key: 'applied', oldStatus: null, newStatus: 'Applied', at: application.appliedAt, applied: true },
     ...changes.map((entry) => ({ key: String(entry.id), oldStatus: entry.oldStatus, newStatus: entry.newStatus, at: entry.changedAt, applied: false }))
   ];
+  const last = story[story.length - 1].newStatus;
+  if (last !== application.status) story.push({ key: 'merged', oldStatus: last, newStatus: application.status, at: null, applied: false });
+  return story;
 }
 
 /** One profile's whole process on this job. Everyone can read it; only the owner can change it. */
@@ -281,7 +288,7 @@ function ApplicationCard({ application }: { application: ApplicationDetail }) {
               ) : null}
               <StatusBadge status={entry.newStatus} className="size-5" />
               {entry.applied ? <span>Applied</span> : null}
-              <span className="ml-auto whitespace-nowrap tabular-nums text-ink-3">{formatDateTime(entry.at)}</span>
+              <span className="ml-auto whitespace-nowrap tabular-nums text-ink-3">{entry.at ? formatDateTime(entry.at) : 'When two copies of this job were merged'}</span>
             </li>
           ))}
         </ol>
@@ -354,12 +361,26 @@ function ApplySection({ job }: { job: JobDetail }) {
   );
 }
 
+type JobFields = { title: string; company: string; location: string; description: string };
+const fieldsOf = (job: JobDetail): JobFields => ({ title: job.title, company: job.company, location: job.location ?? '', description: job.description });
+
 function EditJobDialog({ job, open, onOpenChange }: { job: JobDetail; open: boolean; onOpenChange: (open: boolean) => void }) {
-  const [fields, setFields] = useState({ title: job.title, company: job.company, location: job.location ?? '', description: job.description });
+  const [fields, setFields] = useState(() => fieldsOf(job));
+  // What the job said when the dialog opened, to notice someone else changing it meanwhile.
+  const [opened, setOpened] = useState(() => fieldsOf(job));
+  const latest = useRef(job);
+  latest.current = job;
   const queryClient = useQueryClient();
+  // Filled in when the dialog opens, then left alone: live updates fetch the job again whenever
+  // anyone changes anything, and refilling then would wipe out what is being typed.
   useEffect(() => {
-    if (open) setFields({ title: job.title, company: job.company, location: job.location ?? '', description: job.description });
-  }, [open, job]);
+    if (!open) return;
+    setFields(fieldsOf(latest.current));
+    setOpened(fieldsOf(latest.current));
+  }, [open]);
+  const now = fieldsOf(job);
+  // Not this person's own save coming back: what changed is neither what was there nor what they typed.
+  const changedMeanwhile = open && (Object.keys(now) as Array<keyof JobFields>).some((key) => now[key].trim() !== opened[key].trim() && now[key].trim() !== fields[key].trim());
   const save = useMutation({
     mutationFn: () => call('PATCH', `/api/jobs/${job.id}`, { ...fields, location: fields.location.trim() || null }),
     onSuccess: async () => {
@@ -397,6 +418,11 @@ function EditJobDialog({ job, open, onOpenChange }: { job: JobDetail; open: bool
         <Field label="Job description" htmlFor="edit-description">
           <Textarea id="edit-description" rows={12} value={fields.description} onChange={(event) => setFields({ ...fields, description: event.target.value })} />
         </Field>
+        {changedMeanwhile ? (
+          <Notice kind="warning" title="Changed by someone else">
+            These details were updated since you opened this. Saving replaces that version with what is here.
+          </Notice>
+        ) : null}
         {save.isError ? <Notice kind="error">{errorMessage(save.error)}</Notice> : null}
       </div>
     </Dialog>

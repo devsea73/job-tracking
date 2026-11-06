@@ -302,26 +302,250 @@ export function extractRequisitionIds(text: string): Set<string> {
 
 export type LocationComparison = 'match' | 'unknown' | 'conflict';
 
-const LOCATION_STOPWORDS = new Set(['united', 'states', 'usa', 'us', 'of', 'america', 'the', 'in', 'and', 'or']);
+const US_STATES: Record<string, string> = {
+  alabama: 'al',
+  alaska: 'ak',
+  arizona: 'az',
+  arkansas: 'ar',
+  california: 'ca',
+  colorado: 'co',
+  connecticut: 'ct',
+  delaware: 'de',
+  florida: 'fl',
+  georgia: 'ga',
+  hawaii: 'hi',
+  idaho: 'id',
+  illinois: 'il',
+  indiana: 'in',
+  iowa: 'ia',
+  kansas: 'ks',
+  kentucky: 'ky',
+  louisiana: 'la',
+  maine: 'me',
+  maryland: 'md',
+  massachusetts: 'ma',
+  michigan: 'mi',
+  minnesota: 'mn',
+  mississippi: 'ms',
+  missouri: 'mo',
+  montana: 'mt',
+  nebraska: 'ne',
+  nevada: 'nv',
+  'new hampshire': 'nh',
+  'new jersey': 'nj',
+  'new mexico': 'nm',
+  'new york': 'ny',
+  'north carolina': 'nc',
+  'north dakota': 'nd',
+  ohio: 'oh',
+  oklahoma: 'ok',
+  oregon: 'or',
+  pennsylvania: 'pa',
+  'rhode island': 'ri',
+  'south carolina': 'sc',
+  'south dakota': 'sd',
+  tennessee: 'tn',
+  texas: 'tx',
+  utah: 'ut',
+  vermont: 'vt',
+  virginia: 'va',
+  washington: 'wa',
+  'west virginia': 'wv',
+  wisconsin: 'wi',
+  wyoming: 'wy',
+  'district of columbia': 'dc',
+  'puerto rico': 'pr'
+};
+const STATE_CODES = new Set(Object.values(US_STATES));
 
-function locationTokens(location: string): Set<string> {
-  return new Set(
-    stripDiacritics(location)
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, ' ')
-      .trim()
-      .split(' ')
-      .filter((token) => token && !LOCATION_STOPWORDS.has(token))
-  );
+const PROVINCES: Record<string, string> = {
+  ontario: 'on',
+  quebec: 'qc',
+  'british columbia': 'bc',
+  alberta: 'ab',
+  manitoba: 'mb',
+  saskatchewan: 'sk',
+  'nova scotia': 'ns',
+  'new brunswick': 'nb',
+  newfoundland: 'nl',
+  'prince edward island': 'pe'
+};
+const PROVINCE_CODES = new Set(Object.values(PROVINCES));
+
+const COUNTRIES: Record<string, string> = {
+  'united states': 'us',
+  'united states of america': 'us',
+  usa: 'us',
+  us: 'us',
+  america: 'us',
+  canada: 'ca',
+  'united kingdom': 'gb',
+  uk: 'gb',
+  'great britain': 'gb',
+  britain: 'gb',
+  england: 'gb',
+  scotland: 'gb',
+  wales: 'gb',
+  'northern ireland': 'gb',
+  ireland: 'ie',
+  germany: 'de',
+  france: 'fr',
+  spain: 'es',
+  portugal: 'pt',
+  italy: 'it',
+  netherlands: 'nl',
+  belgium: 'be',
+  switzerland: 'ch',
+  austria: 'at',
+  sweden: 'se',
+  norway: 'no',
+  denmark: 'dk',
+  finland: 'fi',
+  poland: 'pl',
+  romania: 'ro',
+  ukraine: 'ua',
+  israel: 'il',
+  india: 'in',
+  pakistan: 'pk',
+  philippines: 'ph',
+  singapore: 'sg',
+  japan: 'jp',
+  china: 'cn',
+  'south korea': 'kr',
+  korea: 'kr',
+  vietnam: 'vn',
+  australia: 'au',
+  'new zealand': 'nz',
+  mexico: 'mx',
+  brazil: 'br',
+  argentina: 'ar',
+  colombia: 'co',
+  chile: 'cl',
+  peru: 'pe',
+  'south africa': 'za',
+  nigeria: 'ng',
+  egypt: 'eg',
+  kenya: 'ke',
+  'united arab emirates': 'ae',
+  uae: 'ae'
+};
+
+/** Words around a place that are not part of its name. */
+const LOCATION_NOISE = new Set(['hybrid', 'onsite', 'office', 'based', 'area', 'greater', 'metro', 'metropolitan', 'region', 'downtown', 'flexible', 'location', 'locations', 'site', 'wfh']);
+const REMOTE_WORDS = new Set(['remote', 'anywhere', 'worldwide', 'global', 'nationwide', 'virtual', 'telecommute', 'distributed']);
+const MULTIPLE_WORDS = new Set(['multiple', 'various', 'several']);
+const LOCATION_STOPWORDS = new Set(['of', 'the', 'in', 'and', 'or', 'within', 'near', 'only', 'from', 'home', 'work']);
+const PLACE_ALIASES: Record<string, string[]> = {
+  st: ['saint'],
+  ft: ['fort'],
+  mt: ['mount'],
+  nyc: ['new', 'york'],
+  sf: ['san', 'francisco'],
+  bangalore: ['bengaluru'],
+  bombay: ['mumbai'],
+  gurgaon: ['gurugram']
+};
+
+/** "s:tx" for a state, "p:on" for a province, "c:us" for a country. */
+function regionOf(phrase: string): string | null {
+  if (COUNTRIES[phrase]) return `c:${COUNTRIES[phrase]}`;
+  if (US_STATES[phrase]) return `s:${US_STATES[phrase]}`;
+  if (PROVINCES[phrase]) return `p:${PROVINCES[phrase]}`;
+  if (STATE_CODES.has(phrase)) return `s:${phrase}`;
+  if (PROVINCE_CODES.has(phrase)) return `p:${phrase}`;
+  return null;
 }
 
+interface ParsedLocation {
+  /** City names, as words. */
+  places: string[][];
+  regions: Set<string>;
+  remote: boolean;
+  multiple: boolean;
+}
+
+/**
+ * Reads "Austin, TX", "Hybrid - New York, NY 10001; Remote" or "London, England" into the
+ * places named, the states and countries around them, and whether it is remote or several places.
+ * Linear in the text: one split, one pass over the words.
+ */
+function parseLocation(text: string): ParsedLocation {
+  const parsed: ParsedLocation = { places: [], regions: new Set(), remote: false, multiple: false };
+  const cleaned = stripDiacritics(text)
+    .toLowerCase()
+    .replace(/\bon[\s-]?site\b/g, ' onsite ')
+    .replace(/\bin[\s-]office\b/g, ' office ');
+  for (const segment of cleaned.split(/[;|/•·()\n]|\s[-–—]\s|\s(?:or|and|&)\s/)) {
+    const parts = segment
+      .split(',')
+      .map((part) => {
+        let words = part
+          .replace(/[^a-z0-9\s]+/g, ' ')
+          .split(/\s+/)
+          .filter((word) => word && !/^\d+$/.test(word));
+        if (words.some((word) => REMOTE_WORDS.has(word))) parsed.remote = true;
+        if (words.some((word) => MULTIPLE_WORDS.has(word))) parsed.multiple = true;
+        words = words.filter((word) => !REMOTE_WORDS.has(word) && !MULTIPLE_WORDS.has(word) && !LOCATION_NOISE.has(word));
+        if (words.length > 1) words = words.filter((word) => !LOCATION_STOPWORDS.has(word));
+        return words.flatMap((word) => PLACE_ALIASES[word] ?? [word]);
+      })
+      .filter((words) => words.length > 0);
+    if (parts.length === 0) continue;
+    // "Austin TX": the state after the city, without a comma.
+    const only = parts[0];
+    if (parts.length === 1 && only.length > 1 && regionOf(only[only.length - 1]) && !regionOf(only.join(' '))) parts.splice(0, 1, only.slice(0, -1), only.slice(-1));
+
+    const later = parts.slice(1).map((words) => regionOf(words.join(' ')));
+    const first = regionOf(parts[0].join(' '));
+    // A state's name is a city's when a state follows it: "New York, NY", "Washington, DC".
+    const stateFollows = later.some((region) => region?.startsWith('s:') || region?.startsWith('p:'));
+    if (first && !(stateFollows && (first.startsWith('s:') || first.startsWith('p:')))) parsed.regions.add(first);
+    else parsed.places.push(parts[0]);
+    parts.slice(1).forEach((words, index) => parsed.regions.add(later[index] ?? words.join(' ')));
+  }
+  return parsed;
+}
+
+/** "New York" and "New York City": one name is the other with more words. */
+function samePlace(a: string[], b: string[]): boolean {
+  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
+  const words = new Set(longer);
+  return shorter.every((word) => words.has(word));
+}
+
+/** Both name regions of this kind and none is shared: "TX" and "CA". */
+function regionsDisagree(a: Set<string>, b: Set<string>, kinds: string[]): boolean {
+  const pick = (set: Set<string>) => [...set].filter((region) => kinds.some((kind) => region.startsWith(kind)));
+  const left = pick(a);
+  const right = pick(b);
+  return left.length > 0 && right.length > 0 && !left.some((region) => right.includes(region));
+}
+
+/**
+ * Whether two postings name the same place. Cities decide: "Austin, TX" and "Houston, TX" are two
+ * places though both are in Texas. A state or country only says something when a side names no
+ * city. Remote and multi-place postings are often listed under one of their places per site, so
+ * a different place says nothing about them.
+ */
 export function compareLocations(a: string | null | undefined, b: string | null | undefined): LocationComparison {
   if (!a?.trim() || !b?.trim()) return 'unknown';
-  const ta = locationTokens(a);
-  const tb = locationTokens(b);
-  if (ta.size === 0 || tb.size === 0) return 'unknown';
-  for (const token of ta) if (tb.has(token)) return 'match';
-  // Multi-location or remote postings are often listed under just one place per site.
-  if (ta.has('remote') || tb.has('remote') || ta.has('multiple') || tb.has('multiple')) return 'unknown';
-  return 'conflict';
+  const left = parseLocation(a);
+  const right = parseLocation(b);
+  const flexible = left.remote || right.remote || left.multiple || right.multiple;
+  const countriesDiffer = regionsDisagree(left.regions, right.regions, ['c:']);
+  const statesDiffer = regionsDisagree(left.regions, right.regions, ['s:', 'p:']);
+
+  if (left.places.length > 0 && right.places.length > 0) {
+    const shared = left.places.some((place) => right.places.some((other) => samePlace(place, other)));
+    if (shared && !statesDiffer && !countriesDiffer) return 'match';
+    return flexible ? 'unknown' : 'conflict';
+  }
+  if (left.regions.size > 0 && right.regions.size > 0) {
+    if ([...left.regions].some((region) => right.regions.has(region))) return left.places.length === 0 && right.places.length === 0 ? 'match' : 'unknown';
+    if (countriesDiffer) return 'conflict';
+    if (statesDiffer) return flexible ? 'unknown' : 'conflict';
+    return 'unknown';
+  }
+  if (left.remote && right.remote && left.places.length === 0 && right.places.length === 0) return 'match';
+  return 'unknown';
 }

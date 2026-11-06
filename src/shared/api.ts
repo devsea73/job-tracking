@@ -245,7 +245,11 @@ export interface ManualJobFields {
 
 export type DuplicateResolution =
   | { action: 'merge'; jobId: number }
-  | { action: 'new' };
+  /**
+   * "None of these": `seen` lists the candidates the person was shown. Only those are recorded as
+   * different jobs; any other wait on the Duplicates page, and a likelier one found since is asked about.
+   */
+  | { action: 'new'; seen?: number[] };
 
 export interface CreateApplicationRequest {
   url: string;
@@ -586,7 +590,8 @@ export interface ServerInfo {
 }
 
 export interface ServerEvent {
-  type: 'jobs_changed' | 'applications_changed' | 'users_changed' | 'database_restored' | 'application_added';
+  /** `resync` never comes from the host: the app sends it to its own window once the live stream is back after a break. */
+  type: 'jobs_changed' | 'applications_changed' | 'users_changed' | 'database_restored' | 'application_added' | 'resync';
   jobId?: number;
   /** application_added: who applied, and the new application. */
   userId?: number;

@@ -53,8 +53,11 @@ export class LoginRateLimiter {
     this.prune();
   }
 
+  /** Clears the account's failures, and takes this attempt, counted when it began, back off the address. */
   recordSuccess(address: string, username: string): void {
     this.buckets.delete(accountKey(address, username));
+    const addr = this.read(addressKey(address));
+    if (addr && addr.failures > 0) addr.failures -= 1;
   }
 
   private bump(key: string): void {

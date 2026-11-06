@@ -79,7 +79,11 @@ const autoBackup = new AutoBackup({
   get: () => settings.autoBackup,
   save: (next) => {
     settings = { ...settings, autoBackup: next };
-    saveSettings(settings);
+    try {
+      saveSettings(settings);
+    } catch {
+      // Remembered for this run. The copy itself is already safe in its folder.
+    }
     broadcastState();
   },
   role: async () => {
@@ -115,15 +119,28 @@ function setNotifications(changes: Partial<NotificationSettings>): NotificationS
   return next;
 }
 
+/** When the server was last restarted after a crash: one that crashes again soon after is left stopped. */
+let lastAutomaticRestart = 0;
+const RESTART_AGAIN_AFTER_MS = 10 * 60_000;
+
 const hostServer = new HostServer((message) => {
   hostInfo = null;
   status = 'host_failed';
-  statusMessage = message;
-  broadcastState();
   connection.disconnect();
   // A crashed server gets one automatic restart, so people on other computers can keep working.
+  // Crashing again within minutes means something is wrong that a restart will not fix.
+  if (Date.now() - lastAutomaticRestart < RESTART_AGAIN_AFTER_MS) {
+    statusMessage = `${message} It also stopped shortly after the last restart, so it was left stopped. Details are in its log; press Retry to start it again.`;
+    broadcastState();
+    return;
+  }
+  statusMessage = message;
+  broadcastState();
   setTimeout(() => {
-    if (settings.mode === 'host' && !hostServer.running && !quitting) void startHost(settings.hostPort);
+    if (settings.mode === 'host' && !hostServer.running && !quitting) {
+      lastAutomaticRestart = Date.now();
+      void startHost(settings.hostPort);
+    }
   }, 3_000);
 });
 

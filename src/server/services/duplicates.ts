@@ -4,6 +4,7 @@ import type { AppContext } from '../context';
 import { prepared } from '../db/client';
 import { findContentMatches, type ContentCandidate } from '../dedupe/matcher';
 import { ApiError, notFound } from '../errors';
+import { createBackup, listBackups } from './backups';
 import { FACTS_COLUMNS, loadTextFeatures, readJobFacts, toJobFacts, type FactsRow } from './job-facts-store';
 import { canMergeJobs, mergeJobs, pickKeeper } from './job-merge';
 
@@ -17,7 +18,8 @@ export function markDistinct(sqlite: Database.Database, a: number, b: number): v
   prepared(sqlite, `INSERT INTO duplicate_candidates (job_id_low, job_id_high, status) VALUES (?, ?, 'distinct') ON CONFLICT (job_id_low, job_id_high) DO UPDATE SET status = 'distinct'`).run(low, high);
 }
 
-function recordPending(sqlite: Database.Database, a: number, candidate: ContentCandidate): void {
+/** A pair for someone to look at on the Duplicates page. */
+export function recordPending(sqlite: Database.Database, a: number, candidate: ContentCandidate): void {
   const [low, high] = pairKey(a, candidate.jobId);
   // A pair someone already called different stays that way.
   prepared(
@@ -195,10 +197,30 @@ function assertBothExist(sqlite: Database.Database, a: number, b: number): void 
   if (found.total !== 2) throw notFound('That job no longer exists.');
 }
 
+/** Only a pair waiting on the Duplicates page can be merged from it: not one a person already called different. */
+function assertWaiting(sqlite: Database.Database, a: number, b: number): void {
+  const [low, high] = pairKey(a, b);
+  const row = prepared(sqlite, 'SELECT status FROM duplicate_candidates WHERE job_id_low = ? AND job_id_high = ?').get(low, high) as { status: string } | undefined;
+  if (row?.status === 'distinct') throw new ApiError(409, 'pair_settled', 'Someone has already marked these as different jobs.');
+  if (row?.status !== 'pending') throw new ApiError(409, 'pair_not_waiting', 'These two jobs are no longer waiting to be compared. Refresh the list.');
+}
+
+/** Merging cannot be undone, so the database is copied first. A run of merges shares one copy an hour. */
+async function backupBeforeMerging(ctx: AppContext): Promise<void> {
+  const latest = listBackups(ctx).find((backup) => backup.name.startsWith('before-merge-'));
+  if (latest && Date.now() - Date.parse(latest.createdAt) < 3_600_000) return;
+  await createBackup(ctx, 'before-merge');
+}
+
 /** Someone looked at both and says they are one job. Their word overrides the matcher's doubts. */
-export function mergeDuplicatePair(ctx: AppContext, a: number, b: number): { keptJobId: number } {
+export async function mergeDuplicatePair(ctx: AppContext, a: number, b: number): Promise<{ keptJobId: number }> {
+  assertBothExist(ctx.handle.sqlite, a, b);
+  assertWaiting(ctx.handle.sqlite, a, b);
+  await backupBeforeMerging(ctx);
+  // Looked at again: while the copy was made, someone may have settled the pair or merged a job away.
   const sqlite = ctx.handle.sqlite;
   assertBothExist(sqlite, a, b);
+  assertWaiting(sqlite, a, b);
   const keep = pickKeeper(sqlite, a, b);
   sqlite
     .transaction(() => {

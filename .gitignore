@@ -7,6 +7,8 @@ coverage/
 tests/.tmp/
 survey-report.json
 .env
+# Working copies made by coding assistants.
+.claude/worktrees/
 
 # Real job links can carry personal login tokens. Keep lists of them out of the repository.
 job.txt

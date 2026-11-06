@@ -145,10 +145,19 @@ const RULES: Rule[] = [
     id: `${m[1].toLowerCase()}/${m[2]}`,
     board: m[1]
   })),
-  pathRule('bamboohr', /^([a-z0-9-]+)\.bamboohr\.com$/i, /^\/(?:careers|jobs)\/(?:view\.php\?id=)?(\d+)/, (m, h) => ({
+  pathRule('bamboohr', /^([a-z0-9-]+)\.bamboohr\.com$/i, /^\/(?:careers|jobs)\/(\d+)/, (m, h) => ({
     id: `${h[1].toLowerCase()}/${m[1]}`,
     board: h[1]
   })),
+  {
+    // The older shape of the same link: /jobs/view.php?id=42 is /careers/42.
+    provider: 'bamboohr',
+    host: /^([a-z0-9-]+)\.bamboohr\.com$/i,
+    match: (url, h) => {
+      const id = url.searchParams.get('id');
+      return /\/view\.php$/i.test(url.pathname) && id && /^\d+$/.test(id) ? { id: `${h[1].toLowerCase()}/${id}`, board: h[1] } : null;
+    }
+  },
   pathRule('jazzhr', /^([a-z0-9-]+)\.applytojob\.com$/i, /^\/apply\/([A-Za-z0-9]+)/, (m, h) => ({
     id: `${h[1].toLowerCase()}/${m[1]}`,
     board: h[1]
@@ -323,6 +332,15 @@ const RULES: Rule[] = [
       if (id && /^\d+$/.test(id)) return { id };
       const path = url.pathname.match(/_JV_.*?KO\d+,\d+.*?(\d{6,})\.htm/) ?? url.pathname.match(/JL(\d{6,})/);
       return path ? { id: path[1] } : null;
+    }
+  },
+  {
+    // A listing site's ids, so they never show two jobs differ: it lists one job under several.
+    provider: 'ziprecruiter',
+    host: /(^|\.)ziprecruiter\.com$/,
+    match: (url) => {
+      const id = url.searchParams.get('jid') ?? url.searchParams.get('lvk');
+      return id && /^[A-Za-z0-9_-]{4,}$/.test(id) ? { id } : null;
     }
   },
   pathRule('workable-board', /^jobs\.workable\.com$/, /^\/view\/([A-Za-z0-9]+)/, (m) => ({ id: m[1] })),
@@ -522,6 +540,21 @@ export const AGGREGATOR_PROVIDERS = ['linkedin', 'indeed', 'builtin', 'jobright'
 
 export function isAggregator(provider: string | null | undefined): boolean {
   return !!provider && AGGREGATOR_PROVIDERS.includes(provider);
+}
+
+/** The page and customer a site's own id belongs to: "host/path|tenant…" without the id itself. */
+function siteSystem(externalId: string): string {
+  return externalId.slice(0, externalId.lastIndexOf('|'));
+}
+
+/**
+ * Two ids from one system that differ: by that system's own word, two postings. An id a site
+ * puts in a "?jobId=" parameter only says that about another id from the same page of the same
+ * site, since two sites number their jobs separately.
+ */
+export function identifiersConflict(a: { provider: string; externalId: string }, b: { provider: string; externalId: string }): boolean {
+  if (a.provider !== b.provider || a.externalId === b.externalId) return false;
+  return a.provider !== 'site' || siteSystem(a.externalId) === siteSystem(b.externalId);
 }
 
 /**

@@ -1,5 +1,6 @@
 import type { JobFacts } from '../../shared/api';
 import { isUnreadableNote } from '../../shared/unreadable';
+import { identifiersConflict } from './ats';
 import { annualSalary } from './job-facts';
 import { EMPTY_FEATURES, phraseSimilarity, textFeatures, vocabularySimilarity, type TextFeatures } from './text-features';
 import { compareLocations, levelsConflict, normalizeCompany, titleSimilarity } from './text-normalize';
@@ -77,12 +78,7 @@ export const THRESHOLDS = {
 
 /** Same provider with a different id: the provider itself says these are separate postings. */
 function hasConflictingIdentifier(a: ComparableJob, b: ComparableJob): boolean {
-  for (const left of a.identifiers) {
-    for (const right of b.identifiers) {
-      if (left.provider === right.provider && left.externalId !== right.externalId) return true;
-    }
-  }
-  return false;
+  return a.identifiers.some((left) => b.identifiers.some((right) => identifiersConflict(left, right)));
 }
 
 export function compareSalaries(a: JobFacts | null | undefined, b: JobFacts | null | undefined): SalaryComparison {
@@ -268,7 +264,9 @@ export function compareJobs(incoming: ComparableJob, existing: ComparableJob): C
     // posting up to a year apart, so a far date only counts against text that is not clearly the same work.
     const sameWork = vocabulary >= THRESHOLDS.strongVocabulary && substantial;
     const notStale = postedDaysApart === null || postedDaysApart <= THRESHOLDS.farDays || sameWork;
-    const textSupports = vocabulary >= THRESHOLDS.someVocabulary || salary === 'same';
+    // The wording has to cover the same work: a company pays one rate for many openings with one
+    // title, so a matching salary stands in for none of it.
+    const textSupports = vocabulary >= THRESHOLDS.someVocabulary;
     // Title and wording alone are not enough: one company's openings share its standard text, so
     // other facts have to agree as well.
     if (titleScore >= THRESHOLDS.autoTitle && notStale && textSupports && corroboration >= THRESHOLDS.autoCorroboration) {

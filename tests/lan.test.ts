@@ -2,10 +2,12 @@ import { X509Certificate } from 'node:crypto';
 import { rmSync } from 'node:fs';
 import { createServer as createHttpsServer } from 'node:https';
 import { join } from 'node:path';
-import type { AddressInfo } from 'node:net';
+import { createServer as createNetServer, type AddressInfo } from 'node:net';
 import { describe, expect, it } from 'vitest';
+import { Connection } from '../src/main/connection';
 import { CertificateMismatchError, parseServerAddress, PinnedClient, probeServer, ServerUnreachableError } from '../src/main/lan-client';
 import { buildApp } from '../src/server/app';
+import { createSession } from '../src/server/auth/sessions';
 import { lanAddresses } from '../src/server/network';
 import { loadOrCreateTls } from '../src/server/tls';
 import type { ServerEvent, LoginResponse } from '../src/shared/api';
@@ -150,6 +152,63 @@ describe('client and host over real TLS', () => {
     } finally {
       client.destroy();
       await app.close();
+    }
+  });
+});
+
+describe('the connection to the host', () => {
+  it('comes back from "offline" after one failed call, and fetches what it may have missed', async () => {
+    const server = await createTestServer();
+    const tls = await loadOrCreateTls(server.dataDir);
+    const app = buildApp(server.ctx, { https: { key: tls.key, cert: tls.cert } });
+    // A call that dies on the way, as one can when the network hiccups. The live stream stays up.
+    app.get('/api/test/drop', { config: { public: true } }, async (request) => {
+      request.raw.socket.destroy();
+    });
+    const port = await new Promise<number>((resolve) => {
+      const probe = createNetServer().listen(0, '127.0.0.1', () => {
+        const free = (probe.address() as AddressInfo).port;
+        probe.close(() => resolve(free));
+      });
+    });
+    const { token } = createSession(server.ctx.db, 1);
+    const statuses: string[] = [];
+    const events: ServerEvent[] = [];
+    const connection = new Connection({ onStatus: (status) => statuses.push(status), onEvent: (event) => events.push(event), onSessionEnded: () => undefined });
+    try {
+      // The host is not up yet: the first look fails and is retried on a timer.
+      connection.connect({ host: '127.0.0.1', port, fingerprint: tls.fingerprint, certPem: tls.cert }, token);
+      await expect.poll(() => statuses.at(-1), { timeout: 5_000 }).toBe('offline');
+      await app.listen({ host: '127.0.0.1', port });
+      await expect.poll(() => events.map((event) => event.type), { timeout: 8_000 }).toContain('resync');
+      expect(statuses.at(-1)).toBe('connected');
+
+      events.length = 0;
+      const failed = await connection.api('GET', '/api/test/drop', undefined, () => undefined);
+      expect(failed.ok).toBe(false);
+      expect(statuses.at(-1)).toBe('offline');
+      // Not stuck there: it looks again by itself, and asks for what changed meanwhile.
+      await expect.poll(() => statuses.at(-1), { timeout: 8_000 }).toBe('connected');
+      await expect.poll(() => events.map((event) => event.type), { timeout: 8_000 }).toContain('resync');
+    } finally {
+      connection.disconnect();
+      await app.close();
+    }
+  }, 30_000);
+
+  it('signs out on this computer even when the host cannot be reached', async () => {
+    const tls = await loadOrCreateTls(tempDir());
+    const connection = new Connection({ onStatus: () => undefined, onEvent: () => undefined, onSessionEnded: () => undefined });
+    const tokens: Array<string | null> = [];
+    try {
+      connection.connect({ host: '127.0.0.1', port: 1, fingerprint: tls.fingerprint, certPem: tls.cert }, 'a-stored-token');
+      expect(connection.signedIn).toBe(true);
+      const result = await connection.api('POST', '/api/auth/logout', undefined, (token) => tokens.push(token));
+      expect(result.ok).toBe(true);
+      expect(tokens).toEqual([null]);
+      expect(connection.signedIn).toBe(false);
+    } finally {
+      connection.disconnect();
     }
   });
 });

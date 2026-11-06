@@ -232,15 +232,31 @@ export class PinnedClient {
         res.on('data', (chunk: Buffer) => {
           bytes += chunk.length;
         });
-        pipeline(res, createWriteStream(partial, { flags: 'w' }))
+        // A full disk or a folder that refuses writing is this computer's problem, not the host's.
+        const file = createWriteStream(partial, { flags: 'w' });
+        let diskError: NodeJS.ErrnoException | null = null;
+        file.once('error', (error: NodeJS.ErrnoException) => {
+          diskError = error;
+        });
+        const onDisk = (error: NodeJS.ErrnoException) => new Error(`The copy could not be written to ${destination}: ${error.code === 'ENOSPC' ? 'the disk is full' : error.message}.`);
+        pipeline(res, file)
           .then(() => {
             if (Number.isFinite(expected) && bytes !== expected) throw new Error('The download was cut short. Nothing was kept.');
-            renameSync(partial, destination);
+            try {
+              renameSync(partial, destination);
+            } catch (error) {
+              throw onDisk(error as NodeJS.ErrnoException);
+            }
             resolve({ bytes });
           })
           .catch((error: NodeJS.ErrnoException) => {
-            rmSync(partial, { force: true });
-            reject(error.code ? classifyNetworkError(error, this.target) : error);
+            try {
+              rmSync(partial, { force: true });
+            } catch {
+              // Left as a ".part" file, which never passes for a finished copy.
+            }
+            if (diskError) reject(onDisk(diskError));
+            else reject(error.code ? classifyNetworkError(error, this.target) : error);
           });
       });
       req.setTimeout(timeoutMs, () => req.destroy(Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' })));

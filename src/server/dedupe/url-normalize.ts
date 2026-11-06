@@ -102,7 +102,8 @@ const HOST_RULES: HostRule[] = [
   { host: /\.smartrecruiters\.com$/, keepParams: NO_PARAMS },
   { host: /\.catsone\.com$/, keepParams: NO_PARAMS, stripPathSuffix: /\/apply$/ },
   { host: /\.careerplug\.com$/, keepParams: NO_PARAMS, stripPathSuffix: /\/apps\/new$/ },
-  { host: /\.bamboohr\.com$/, keepParams: NO_PARAMS },
+  // "/jobs/view.php?id=42": the id is the job.
+  { host: /\.bamboohr\.com$/, keepParams: ['id'] },
   { host: /\.zohorecruit\.com$/, keepParams: NO_PARAMS },
   { host: /\.breezy\.hr$/, keepParams: NO_PARAMS },
   { host: /^jobs\.gem\.com$/, keepParams: NO_PARAMS },
@@ -141,7 +142,8 @@ const HOST_RULES: HostRule[] = [
     keepParams: ['currentJobId'],
     rewritePath: (path) => path.replace(/\/jobs\/view\/(?:[^/]*-)?(\d+)\/?$/, '/jobs/view/$1')
   },
-  { host: /(^|\.)indeed\.[a-z.]+$/, keepParams: ['jk', 'vjk'] },
+  // A sponsored listing's link ("/pagead/clk?ad=…") names its job only in "ad".
+  { host: /(^|\.)indeed\.[a-z.]+$/, keepParams: ['jk', 'vjk', 'ad'] },
   { host: /^jobright\.ai$/, keepParams: NO_PARAMS },
   { host: /^builtin[a-z]*\.com$/, keepParams: NO_PARAMS },
   { host: /(^|\.)glassdoor\.[a-z.]+$/, keepParams: ['jl', 'jobListingId'] },
@@ -300,6 +302,63 @@ function isMeaningfulFragment(fragment: string): boolean {
   return /(job|req|position|opening)/i.test(fragment) && /\d/.test(fragment);
 }
 
+/** Anchors a careers page uses for its own sections, not for one job. */
+const PAGE_ANCHORS = new Set([
+  'top',
+  'main',
+  'content',
+  'main-content',
+  'skip',
+  'skip-to-content',
+  'apply',
+  'application',
+  'jobs',
+  'careers',
+  'openings',
+  'open-roles',
+  'open-positions',
+  'positions',
+  'roles',
+  'all-jobs',
+  'job-list',
+  'listings',
+  'join',
+  'join-us',
+  'about',
+  'about-us',
+  'team',
+  'teams',
+  'benefits',
+  'perks',
+  'values',
+  'culture',
+  'life',
+  'contact',
+  'faq',
+  'faqs',
+  'footer',
+  'header',
+  'nav',
+  'menu',
+  'search',
+  'filters',
+  'results',
+  'overview',
+  'intro',
+  'home'
+]);
+
+/** A page that lists every job of a site: its home or its careers page. */
+function isListingPath(path: string): boolean {
+  const segments = path.split('/').filter(Boolean);
+  return segments.length === 0 || (segments.length === 1 && /^(careers?|jobs?|job-board|openings|positions|join-us|work-with-us)$/i.test(segments[0]));
+}
+
+/** On such a page, "#backend-engineer" is the only thing that says which job is meant. */
+function isJobAnchor(fragment: string): boolean {
+  return /^[a-z0-9][a-z0-9_-]{2,80}$/i.test(fragment) && !PAGE_ANCHORS.has(fragment.toLowerCase());
+}
+
 export function normalizeUrl(input: string | URL): string {
   const url = typeof input === 'string' ? parseUserUrl(input) : new URL(input);
   const host = url.hostname.toLowerCase().replace(/^www\./, '');
@@ -329,7 +388,7 @@ export function normalizeUrl(input: string | URL): string {
   const query = params.toString();
 
   const rawFragment = url.hash.replace(/^#/, '');
-  const fragment = rule?.keepFragment || isMeaningfulFragment(rawFragment) ? rawFragment : '';
+  const fragment = rule?.keepFragment || isMeaningfulFragment(rawFragment) || (!rule && !query && isListingPath(path) && isJobAnchor(rawFragment)) ? rawFragment : '';
 
   const port = url.port && !['80', '443'].includes(url.port) ? `:${url.port}` : '';
   return `https://${host}${port}${path}${query ? `?${query}` : ''}${fragment ? `#${fragment}` : ''}`;

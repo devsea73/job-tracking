@@ -73,6 +73,10 @@ describe('the link a new-job notification copies', () => {
     const second = await users.tyler.addJob('https://jobs.example.org/initech/backend', { resolution: { action: 'new' } });
     if (first.outcome !== 'created' || second.outcome !== 'created') throw new Error(`${first.outcome} ${second.outcome}`);
     expect(second.jobId).not.toBe(first.jobId);
+    // Offered on the Duplicates page, as the background check would.
+    server.ctx.db.$client
+      .prepare(`INSERT INTO duplicate_candidates (job_id_low, job_id_high, status, score, reasons) VALUES (?, ?, 'pending', 0.7, '[]') ON CONFLICT (job_id_low, job_id_high) DO UPDATE SET status = 'pending'`)
+      .run(Math.min(first.jobId, second.jobId), Math.max(first.jobId, second.jobId));
     const merged = await users.tyler.post('/api/duplicates/merge', { jobIdA: first.jobId, jobIdB: second.jobId });
     const job = (await users.tyler.get(`/api/jobs/${merged.json.keptJobId}`)).json as JobDetail;
     expect(job.applications).toHaveLength(1);

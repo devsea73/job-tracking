@@ -12,10 +12,10 @@ import type {
   MatchedBy
 } from '../../shared/api';
 import { DEFAULT_STATUS } from '../../shared/constants';
-import { unreadableNote } from '../../shared/unreadable';
+import { isUnreadableNote, unreadableNote } from '../../shared/unreadable';
 import type { AppContext } from '../context';
 import { nowIso, prepared } from '../db/client';
-import { applications, applicationStatusHistory, jobIdentifiers, jobs, jobUrls } from '../db/schema';
+import { applications, applicationStatusHistory, jobIdentifiers, jobs, jobUrls, profiles } from '../db/schema';
 import { identifyAts, isAggregator, titleFromUrl } from '../dedupe/ats';
 import { deriveJobFacts } from '../dedupe/job-facts';
 import { buildEvidence, findContentMatches, findExactMatch, identifiersFromEvidence, isSpecificPage, type UrlEvidence } from '../dedupe/matcher';
@@ -27,8 +27,8 @@ import { extractJob } from '../extraction/pipeline';
 import { htmlToText, looksLikeHtml } from '../extraction/text';
 import { MIN_DESCRIPTION_LENGTH, type ExtractionResult, type ExtractionSuccess } from '../extraction/types';
 import { loggableUrl } from '../logger';
-import { markDistinct } from './duplicates';
-import { addFactsFromListing, readJobFacts, saveNewJobFacts, saveSignatures } from './job-facts-store';
+import { markDistinct, recordPending } from './duplicates';
+import { addFactsFromListing, readJobFacts, refreshJobFacts, saveNewJobFacts, saveSignatures } from './job-facts-store';
 import { absorbDuplicates } from './job-merge';
 import { listApplicationsForJobs } from './job-queries';
 import { requireOwnActiveProfile } from './profiles';
@@ -58,6 +58,18 @@ function extractOnce(ctx: AppContext, key: string, url: string): Promise<Extract
   return promise;
 }
 
+const bareHost = (link: URL) => link.hostname.toLowerCase().replace(/^www\./, '');
+const barePath = (link: URL) => link.pathname.replace(/\/+$/, '').toLowerCase();
+
+/**
+ * A canonical link names the page a posting really lives on, often the employer's own. One that
+ * points at another page of the same site is more likely a page every posting there names, like
+ * "all open roles", so it is no evidence: different openings would be taken for one job.
+ */
+function countsAsCanonical(page: URL, canonical: URL): boolean {
+  return bareHost(page) !== bareHost(canonical) || barePath(page) === barePath(canonical) || identifyAts(canonical) !== null;
+}
+
 function toEvidence(url: URL, extraction: ExtractionResult | null): UrlEvidence[] {
   const list: Array<UrlEvidence | null> = [buildEvidence(url, 'original')];
   // A page that failed to read says nothing about its links: closed postings often
@@ -65,7 +77,9 @@ function toEvidence(url: URL, extraction: ExtractionResult | null): UrlEvidence[
   if (extraction?.ok) {
     if (extraction.canonicalUrl) {
       try {
-        list.push(buildEvidence(new URL(extraction.canonicalUrl, extraction.finalUrl ?? url), 'canonical'));
+        const page = new URL(extraction.finalUrl ?? url);
+        const canonical = new URL(extraction.canonicalUrl, page);
+        if (countsAsCanonical(page, canonical)) list.push(buildEvidence(canonical, 'canonical'));
       } catch {
         // A malformed canonical link is simply no evidence.
       }
@@ -189,7 +203,11 @@ interface ApplyingProfile {
   profileName: string;
 }
 
-/** Links a profile to a job: each profile applies to a job once, enforced by a unique index. */
+/**
+ * Links a profile to a job: each profile applies to a job once, enforced by a unique index.
+ * With `anyProfile`, an application from any of the person's profiles counts as applied: a
+ * notification only offers jobs none of them has, and the main window may have just added it.
+ */
 function linkProfile(
   ctx: AppContext,
   applicant: ApplyingProfile,
@@ -199,7 +217,8 @@ function linkProfile(
   jobWasNew: boolean,
   matchedBy: MatchedBy,
   better: JobFields | null,
-  chosenLink: number | null = null
+  chosenLink: number | null = null,
+  anyProfile = false
 ): CreateApplicationResponse {
   const db = ctx.db;
   let merged = false;
@@ -213,27 +232,39 @@ function linkProfile(
       const job = db.select().from(jobs).where(eq(jobs.id, jobId)).get();
       if (!job) throw notFound('That job no longer exists.');
 
-      // An aggregator's excerpt is replaced when the employer's full posting comes along.
-      if (better && better.description.length > job.description.length * 1.2) {
-        const overlap = descriptionSimilarity(better.description, job.description);
-        if (overlap.containment >= 0.6) {
-          db.update(jobs)
-            .set({ description: better.description, descriptionHash: hashDescription(better.description), extractionMethod: better.method, lastExtractedAt: better.extractedAt })
-            .where(eq(jobs.id, jobId))
-            .run();
-          saveSignatures(ctx.handle.sqlite, jobId, better.description);
-        }
+      // An aggregator's excerpt is replaced when the employer's full posting comes along, and a note
+      // saying the posting could not be read gives way to its real text, whatever the length.
+      const replacesNote = !!better && isUnreadableNote(job.description) && !isUnreadableNote(better.description) && better.description.length >= MIN_DESCRIPTION_LENGTH;
+      if (better && (replacesNote || (better.description.length > job.description.length * 1.2 && descriptionSimilarity(better.description, job.description).containment >= 0.6))) {
+        db.update(jobs)
+          .set({ description: better.description, descriptionHash: hashDescription(better.description), extractionMethod: better.method, lastExtractedAt: better.extractedAt })
+          .where(eq(jobs.id, jobId))
+          .run();
+        // Now readable, a note's job is compared again, with what its text says.
+        if (replacesNote) refreshJobFacts(ctx.handle.sqlite, jobId);
+        else saveSignatures(ctx.handle.sqlite, jobId, better.description);
       }
       // This listing may say what the first one did not: a salary, a date, a work arrangement.
       if (better) addFactsFromListing(ctx.handle.sqlite, jobId, better.facts);
 
       const existing = db
-        .select({ id: applications.id })
+        .select({ id: applications.id, profileId: applications.profileId })
         .from(applications)
-        .where(and(eq(applications.profileId, applicant.profileId), eq(applications.jobId, jobId)))
+        .where(and(anyProfile ? eq(applications.userId, applicant.userId) : eq(applications.profileId, applicant.profileId), eq(applications.jobId, jobId)))
         .get();
       if (existing) {
-        return { outcome: 'already_applied', applicationId: existing.id, jobId, title: job.title, company: job.companyName, profileName: applicant.profileName };
+        const profileName =
+          existing.profileId === applicant.profileId ? applicant.profileName : (db.select({ name: profiles.name }).from(profiles).where(eq(profiles.id, existing.profileId)).get()?.name ?? applicant.profileName);
+        return { outcome: 'already_applied', applicationId: existing.id, jobId, title: job.title, company: job.companyName, profileName };
+      }
+      // Reading the page can take a while: the profile may have been archived or deleted meanwhile.
+      const profile = db
+        .select({ isArchived: profiles.isArchived })
+        .from(profiles)
+        .where(and(eq(profiles.id, applicant.profileId), eq(profiles.userId, applicant.userId)))
+        .get();
+      if (!profile || profile.isArchived) {
+        throw new ApiError(409, 'profile_unavailable', `The profile "${applicant.profileName}" was archived or removed while this was being saved. Choose another profile and save again.`);
       }
 
       const application = db
@@ -317,14 +348,26 @@ export async function createApplication(ctx: AppContext, userId: number, body: C
   if (body.resolution?.action === 'merge') {
     const draft = ctx.drafts.get(body.draftId, userId, original.normalized);
     const evidence = toEvidence(url, draft?.extraction ?? null);
-    const response = linkProfile(ctx, applicant, body.resolution.jobId, memo, evidence, false, 'user_confirmed', fieldsFrom(draft?.extraction ?? null, body.manual));
+    const fields = fieldsFrom(draft?.extraction ?? null, body.manual);
+    const chosen = body.resolution.jobId;
+    // Someone else may have saved this very link since, as a job of its own. The application goes
+    // where the link is, and whether the two are one job is left for someone to settle.
+    const saved = findExactMatch(ctx.db, [original]);
+    if (saved && saved.jobId !== chosen) {
+      const response = linkProfile(ctx, applicant, saved.jobId, memo, evidence, false, saved.matchedBy, fields);
+      askAboutPair(ctx, saved.jobId, chosen, 'Someone said these are the same job');
+      ctx.drafts.delete(body.draftId);
+      return response;
+    }
+    const response = linkProfile(ctx, applicant, chosen, memo, evidence, false, 'user_confirmed', fields);
     ctx.drafts.delete(body.draftId);
     return response;
   }
 
-  // Layers A and C need no network: most repeats end here.
+  // Layers A and C need no network: most repeats end here. A job saved without its text (the
+  // page could not be read then) is read again through this link, which may work now.
   const early = findExactMatch(ctx.db, [original]);
-  if (early) return linkProfile(ctx, applicant, early.jobId, memo, [original], false, early.matchedBy, null);
+  if (early && !lacksText(ctx, early.jobId)) return linkProfile(ctx, applicant, early.jobId, memo, [original], false, early.matchedBy, null);
 
   const draft = ctx.drafts.get(body.draftId, userId, original.normalized);
   const extraction = draft?.extraction ?? (await extractOnce(ctx, original.normalized, original.raw));
@@ -335,6 +378,10 @@ export async function createApplication(ctx: AppContext, userId: number, body: C
 
   const fields = fieldsFrom(extraction, body.manual, [url.toString()]);
   const evidence = toEvidence(url, extraction);
+  if (early) {
+    ctx.drafts.delete(body.draftId);
+    return linkProfile(ctx, applicant, early.jobId, memo, evidence, false, early.matchedBy, extraction.ok ? fields : null);
+  }
 
   // Layers B and C again, now knowing where the link really leads.
   const titleHint = titleFromUrl(url);
@@ -372,19 +419,26 @@ export async function createApplication(ctx: AppContext, userId: number, body: C
     facts: fields.facts,
     identifiers: identifiersFromEvidence(evidence)
   });
+  const found = content.auto ? [content.auto, ...content.possible] : content.possible;
+  const askPerson = (): CreateApplicationResponse => ({
+    outcome: 'possible_duplicate',
+    draftId: draft?.id ?? ctx.drafts.create(userId, original.normalized, extraction),
+    extracted: { title: fields.title, company: fields.company, description: fields.description, location: fields.location },
+    candidates: toCandidates(ctx, userId, found)
+  });
+  // "A new job" answers only for the jobs the person was shown. The likeliest match has to be one
+  // of them: one that turned up since (someone just saved it) is put to them first. Without a
+  // list (an import, say), nobody was shown anything: saved as new, and every match waits for review.
+  const seen = body.resolution?.action === 'new' ? body.resolution.seen : undefined;
+  const shown = new Set(seen ?? []);
   if (body.resolution?.action !== 'new') {
     if (content.auto) {
       ctx.drafts.delete(body.draftId);
       return linkProfile(ctx, applicant, content.auto.jobId, memo, evidence, false, 'content', fields);
     }
-    if (content.possible.length > 0) {
-      return {
-        outcome: 'possible_duplicate',
-        draftId: draft?.id ?? ctx.drafts.create(userId, original.normalized, extraction),
-        extracted: { title: fields.title, company: fields.company, description: fields.description, location: fields.location },
-        candidates: toCandidates(ctx, userId, content.possible)
-      };
-    }
+    if (content.possible.length > 0) return askPerson();
+  } else if (seen && found.length > 0 && !shown.has(found[0].jobId)) {
+    return askPerson();
   }
 
   // The job, its links and the application commit together or not at all.
@@ -408,8 +462,12 @@ export async function createApplication(ctx: AppContext, userId: number, body: C
         .returning({ id: jobs.id })
         .get();
       saveNewJobFacts(ctx.handle.sqlite, job.id, fields.facts, fields.description);
-      // Someone looked at these and said this is a different job, so they are not offered again.
-      for (const candidate of content.auto ? [content.auto, ...content.possible] : content.possible) markDistinct(ctx.handle.sqlite, job.id, candidate.jobId);
+      for (const candidate of found) {
+        // Someone looked at this one and said it is a different job, so it is not offered again.
+        if (shown.has(candidate.jobId)) markDistinct(ctx.handle.sqlite, job.id, candidate.jobId);
+        // Nobody did: it waits on the Duplicates page instead of being forgotten.
+        else recordPending(ctx.handle.sqlite, job.id, candidate);
+      }
       return linkProfile(ctx, applicant, job.id, memo, evidence, true, 'new', null);
     })
     .immediate();
@@ -444,11 +502,13 @@ export async function checkLink(ctx: AppContext, userId: number, input: string):
   if (!original) throw new ApiError(400, 'invalid_url', 'That does not look like a valid job URL.');
 
   const early = findExactMatch(ctx.db, [original]);
-  if (early) return { status: 'known', draftId: null, matchedBy: early.matchedBy, job: knownJob(ctx, userId, early.jobId) };
+  if (early && !lacksText(ctx, early.jobId)) return { status: 'known', draftId: null, matchedBy: early.matchedBy, job: knownJob(ctx, userId, early.jobId) };
 
   const extraction = await extractOnce(ctx, original.normalized, original.raw);
   if (!extraction.ok && extraction.reason === 'unsafe_url') throw new ApiError(400, 'unsafe_url', extraction.message);
   const draftId = ctx.drafts.create(userId, original.normalized, extraction);
+  // Known, without its text: what was just read goes with saving, so the job gets it.
+  if (early) return { status: 'known', draftId, matchedBy: early.matchedBy, job: knownJob(ctx, userId, early.jobId) };
   const fields = fieldsFrom(extraction, undefined, [url.toString()]);
   const evidence = toEvidence(url, extraction);
   const titleHint = titleFromUrl(url);
@@ -477,8 +537,33 @@ export async function checkLink(ctx: AppContext, userId: number, input: string):
   return { status: 'fresh', draftId, job };
 }
 
-/** "I applied too": joins a job already in the shared catalog, no link needed. A notification names the link it copied. */
-export function applyToExistingJob(ctx: AppContext, userId: number, jobId: number, profileId: number, memo: string, urlId: number | null = null): CreateApplicationResponse {
+/**
+ * "I applied too": joins a job already in the shared catalog, no link needed. A notification names
+ * the link it copied, and applies only if none of the person's profiles has applied yet.
+ */
+export function applyToExistingJob(
+  ctx: AppContext,
+  userId: number,
+  jobId: number,
+  profileId: number,
+  memo: string,
+  urlId: number | null = null,
+  options: { unlessApplied?: boolean } = {}
+): CreateApplicationResponse {
   const profile = requireOwnActiveProfile(ctx.db, userId, profileId);
-  return linkProfile(ctx, { userId, profileId: profile.id, profileName: profile.name }, jobId, memo.trim(), [], false, 'user_confirmed', null, urlId);
+  return linkProfile(ctx, { userId, profileId: profile.id, profileName: profile.name }, jobId, memo.trim(), [], false, 'user_confirmed', null, urlId, options.unlessApplied === true);
+}
+
+/** A job saved with a note in place of its text, because its page could not be read at the time. */
+function lacksText(ctx: AppContext, jobId: number): boolean {
+  const row = prepared(ctx.handle.sqlite, 'SELECT description FROM jobs WHERE id = ?').get(jobId) as { description: string } | undefined;
+  return !!row && isUnreadableNote(row.description);
+}
+
+/** Two jobs a person tied together, for someone to settle on the Duplicates page, unless already settled. */
+function askAboutPair(ctx: AppContext, a: number, b: number, reason: string): void {
+  const exists = prepared(ctx.handle.sqlite, 'SELECT COUNT(*) AS total FROM jobs WHERE id IN (?, ?)').get(a, b) as { total: number };
+  if (a === b || exists.total !== 2) return;
+  recordPending(ctx.handle.sqlite, a, { jobId: b, comparison: { decision: 'possible', score: 1, reasons: [reason] } });
+  ctx.events.publish('jobs_changed');
 }

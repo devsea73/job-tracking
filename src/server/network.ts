@@ -16,6 +16,16 @@ export function isLanAddress(address: string | undefined): boolean {
   return LAN_RANGES.has(parsed.range());
 }
 
+/** This computer itself. */
+export function isLoopbackAddress(address: string | undefined): boolean {
+  if (!address || !ipaddr.isValid(address)) return false;
+  let parsed = ipaddr.parse(address);
+  if (parsed.kind() === 'ipv6' && (parsed as ipaddr.IPv6).isIPv4MappedAddress()) {
+    parsed = (parsed as ipaddr.IPv6).toIPv4Address();
+  }
+  return parsed.range() === 'loopback';
+}
+
 /** The addresses other computers can use to reach this one, most likely first. */
 export function lanAddresses(): string[] {
   const found: Array<{ address: string; rank: number }> = [];

@@ -5,6 +5,7 @@ import { EMPTY_FACTS } from '../src/server/dedupe/job-facts';
 import { findContentMatches } from '../src/server/dedupe/matcher';
 import { compareJobs, compareSalaries, type ComparableJob } from '../src/server/dedupe/scoring';
 import { hashDescription, normalizeCompany, normalizeTitle, textSketch } from '../src/server/dedupe/text-normalize';
+import { listBackups } from '../src/server/services/backups';
 import { markDistinct, sweepDuplicates } from '../src/server/services/duplicates';
 import { backfillJobFacts, saveNewJobFacts } from '../src/server/services/job-facts-store';
 import { mergeJobs, reconcileJobIdentities } from '../src/server/services/job-merge';
@@ -321,12 +322,27 @@ describe('with a real database', () => {
       expect(anonymous.statusCode).toBe(401);
     });
 
-    it('merges a pair when someone says it is one job', async () => {
+    it('merges a pair when someone says it is one job, copying the database first', async () => {
       const { a, b } = await pendingPair();
       const response = await bob.request('POST', '/api/duplicates/merge', { jobIdA: a, jobIdB: b });
       expect(response.status).toBe(200);
       expect(jobIds()).toEqual([a]);
       expect(pendingCount()).toBe(0);
+      expect(listBackups(server.ctx).filter((backup) => backup.name.startsWith('before-merge-'))).toHaveLength(1);
+    });
+
+    it('merges only a pair waiting for review: not two unrelated jobs, nor a pair someone called different', async () => {
+      const { a, b } = await pendingPair();
+      const c = insertJob({ company: 'Initech', title: 'Office Manager', description: MOBILE_TEXT });
+      const unrelated = await bob.request('POST', '/api/duplicates/merge', { jobIdA: a, jobIdB: c });
+      expect(unrelated.status).toBe(409);
+      expect(unrelated.json.error.code).toBe('pair_not_waiting');
+      // Someone else settled it a moment ago; this screen had not refreshed yet.
+      await alice.request('POST', '/api/duplicates/dismiss', { jobIdA: a, jobIdB: b });
+      const settled = await bob.request('POST', '/api/duplicates/merge', { jobIdA: a, jobIdB: b });
+      expect(settled.status).toBe(409);
+      expect(settled.json.error.code).toBe('pair_settled');
+      expect(jobIds()).toEqual([a, b, c]);
     });
 
     it('never asks again once someone says they differ', async () => {
@@ -370,7 +386,7 @@ describe('with a real database', () => {
       const second = await alice.addJob('https://acme-jobs.example.org/role/20');
       expect(second.outcome).toBe('possible_duplicate');
       if (second.outcome !== 'possible_duplicate' || first.outcome !== 'created') throw new Error('unexpected outcome');
-      const third = await alice.addJob('https://acme-jobs.example.org/role/20', { draftId: second.draftId, resolution: { action: 'new' } });
+      const third = await alice.addJob('https://acme-jobs.example.org/role/20', { draftId: second.draftId, resolution: { action: 'new', seen: second.candidates.map((candidate) => candidate.jobId) } });
       if (third.outcome !== 'created') throw new Error('unexpected outcome');
       const row = sqlite().prepare('SELECT status FROM duplicate_candidates WHERE job_id_low = ? AND job_id_high = ?').get(first.jobId, third.jobId) as { status: string };
       expect(row.status).toBe('distinct');

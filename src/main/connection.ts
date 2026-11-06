@@ -6,9 +6,20 @@ const RETRY_MIN_MS = 2_000;
 const RETRY_MAX_MS = 20_000;
 /** Reading a job page can need a full browser, so adding a job is given much longer than other calls. */
 const LONG_CALL_MS = 150_000;
+/** Copying, restoring or merging can take a whole database's worth of work on the host. */
+const DATABASE_CALL_MS = 10 * 60_000;
+
+/** How long the host may take to answer, when it is longer than usual. */
+export function callTimeout(method: string, path: string): number | undefined {
+  if (method !== 'POST') return undefined;
+  if (path === '/api/applications' || path === '/api/applications/check') return LONG_CALL_MS;
+  if (path === '/api/admin/backups' || /^\/api\/admin\/backups\/[^/]+\/restore$/.test(path) || path === '/api/duplicates/merge') return DATABASE_CALL_MS;
+  return undefined;
+}
 
 export interface ConnectionCallbacks {
   onStatus(status: ConnectionStatus, message: string | null): void;
+  /** Events from the host; and `resync` from here once the stream is back, as some may have been missed. */
   onEvent(event: ServerEvent): void;
   onSessionEnded(): void;
 }
@@ -25,8 +36,20 @@ export class Connection {
   private stream: { close: () => void } | null = null;
   private retryTimer: NodeJS.Timeout | null = null;
   private retryDelay = RETRY_MIN_MS;
+  /** The event stream was down for a while: changes made meanwhile were never heard of. */
+  private missedEvents = false;
 
   constructor(private readonly callbacks: ConnectionCallbacks) {}
+
+  /** A timer that forgets itself when it fires, so a later failure knows nothing is scheduled. */
+  private retryIn(ms: number, action: () => void): void {
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    const timer = setTimeout(() => {
+      if (this.retryTimer === timer) this.retryTimer = null;
+      action();
+    }, ms);
+    this.retryTimer = timer;
+  }
 
   get signedIn(): boolean {
     return this.token !== null;
@@ -36,6 +59,8 @@ export class Connection {
     this.disconnect();
     this.client = new PinnedClient(target);
     this.token = token;
+    // Whatever was on screen before (the host restarted, say) is fetched again once the stream is up.
+    this.missedEvents = token !== null;
     this.callbacks.onStatus('connecting', null);
     void this.monitor(this.generation);
   }
@@ -55,6 +80,7 @@ export class Connection {
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
     this.retryDelay = RETRY_MIN_MS;
+    if (this.token) this.missedEvents = true;
     this.generation += 1;
     this.stream?.close();
     this.stream = null;
@@ -70,7 +96,8 @@ export class Connection {
       const message = error instanceof Error ? error.message : 'The host cannot be reached.';
       this.callbacks.onStatus('offline', message);
     }
-    this.retryTimer = setTimeout(() => void this.monitor(generation), this.retryDelay);
+    if (this.token) this.missedEvents = true;
+    this.retryIn(this.retryDelay, () => void this.monitor(generation));
     this.retryDelay = Math.min(this.retryDelay * 2, RETRY_MAX_MS);
   }
 
@@ -89,13 +116,19 @@ export class Connection {
 
     if (!this.token) {
       // Signed out: there is no event stream to watch, so just check back periodically.
-      this.retryTimer = setTimeout(() => void this.monitor(generation), RETRY_MAX_MS);
+      this.retryIn(RETRY_MAX_MS, () => void this.monitor(generation));
       return;
     }
 
     const stream = client.openEvents(
       this.token,
-      () => this.callbacks.onStatus('connected', null),
+      () => {
+        this.callbacks.onStatus('connected', null);
+        if (this.missedEvents) {
+          this.missedEvents = false;
+          this.callbacks.onEvent({ type: 'resync', at: new Date().toISOString() });
+        }
+      },
       (event) => this.callbacks.onEvent(event)
     );
     this.stream = stream;
@@ -134,9 +167,7 @@ export class Connection {
       return { ok: false, status: 0, error: { code: 'invalid_path', message: 'Invalid request.' } };
     }
     try {
-      // Reading a job page can take a browser and a while.
-      const timeout = method === 'POST' && (path === '/api/applications' || path === '/api/applications/check') ? LONG_CALL_MS : undefined;
-      const result = await client.call(method, path, body, this.token, timeout);
+      const result = await client.call(method, path, body, this.token, callTimeout(method, path));
 
       if (path === '/api/auth/login' && result.ok) {
         // The token stops here: page code gets the user and never the credential.
@@ -160,6 +191,14 @@ export class Connection {
       const code = error instanceof CertificateMismatchError ? 'cert_mismatch' : 'offline';
       const message = error instanceof Error ? error.message : 'The host cannot be reached.';
       this.callbacks.onStatus(code === 'cert_mismatch' ? 'cert_mismatch' : 'offline', message);
+      if (path === '/api/auth/logout') {
+        // Signing out happens here whether or not the host heard of it: the token is forgotten,
+        // so nothing on this computer can use the session any more.
+        this.token = null;
+        onToken(null);
+        this.restartMonitor();
+        return { ok: true, status: 200, data: { ok: true } };
+      }
       this.retryNowQuietly();
       return { ok: false, status: 0, error: { code, message } };
     }
@@ -175,6 +214,9 @@ export class Connection {
   /** A failed call means the stream is probably dead too; look again without flashing "connecting". */
   private retryNowQuietly(): void {
     if (this.retryTimer) return;
-    this.retryTimer = setTimeout(() => this.restartMonitor(), this.retryDelay);
+    this.retryIn(this.retryDelay, () => {
+      if (this.token) this.missedEvents = true;
+      this.restartMonitor();
+    });
   }
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { identifyAts } from '../src/server/dedupe/ats';
+import { identifiersConflict, identifyAts, isAggregator } from '../src/server/dedupe/ats';
 import { normalizeUrl, parseUserUrl, stripPersonalParams } from '../src/server/dedupe/url-normalize';
 
 describe('URL normalization (layer A)', () => {
@@ -49,6 +49,21 @@ describe('URL normalization (layer A)', () => {
     for (const bad of ['', 'not a url', 'Glassdoor easy apply', 'javascript:alert(1)', 'file:///etc/passwd', 'ftp://example.com/x', 'https://user:pw@example.com/x']) {
       expect(() => parseUserUrl(bad), bad).toThrow();
     }
+  });
+
+  it('keeps what names the job on sites that put it in a parameter or an anchor', () => {
+    // BambooHR's older links: the id is the only thing that differs.
+    different('https://acme.bamboohr.com/jobs/view.php?id=42', 'https://acme.bamboohr.com/jobs/view.php?id=57');
+    same('https://acme.bamboohr.com/jobs/view.php?id=42', 'https://acme.bamboohr.com/jobs/view.php?id=42&source=indeed');
+    // Indeed's sponsored listings name their job only in "ad".
+    different('https://www.indeed.com/pagead/clk?mo=r&ad=-6NYlbfkN0AAA&p=1', 'https://www.indeed.com/pagead/clk?mo=r&ad=-6NYlbfkN0BBB&p=1');
+    // A careers page listing every job: the anchor is which one.
+    different('https://smallco.com/careers#backend-engineer', 'https://smallco.com/careers#office-manager');
+    different('https://smallco.com/#backend-engineer', 'https://smallco.com/#office-manager');
+    // Its own sections are not jobs.
+    same('https://smallco.com/careers', 'https://smallco.com/careers#open-roles', 'https://smallco.com/careers#benefits');
+    // On a job's own page, an anchor is still just a place on the page.
+    same('https://smallco.com/careers/backend-engineer', 'https://smallco.com/careers/backend-engineer#apply-now');
   });
 
   it('strips personal tokens from what gets stored and compared', () => {
@@ -108,5 +123,29 @@ describe('ATS identifiers (layer C)', () => {
 
   it('finds nothing on ordinary pages', () => {
     expect(identity('https://company.com/careers/backend-engineer')).toBeNull();
+  });
+
+  it('reads BambooHR ids from both shapes of its links, as one posting', () => {
+    expect(identity('https://acme.bamboohr.com/careers/42')).toBe('bamboohr:acme/42');
+    expect(identity('https://acme.bamboohr.com/jobs/view.php?id=42')).toBe('bamboohr:acme/42');
+    expect(identity('https://acme.bamboohr.com/jobs/view.php?id=57')).toBe('bamboohr:acme/57');
+  });
+
+  it('treats ZipRecruiter ids as a listing site’s, never as the employer’s', () => {
+    const found = identifyAts('https://www.ziprecruiter.com/c/Acme/Job/Data-Engineer/-in-Austin,TX?jid=a1b2c3d4e5');
+    expect(found).toMatchObject({ provider: 'ziprecruiter', externalId: 'a1b2c3d4e5' });
+    expect(isAggregator(found?.provider)).toBe(true);
+  });
+
+  it('only sees a conflict between ids from one page of one site', () => {
+    const a = identifyAts('https://acme.com/careers/job?jobId=101');
+    const b = identifyAts('https://acme.com/careers/job?jobId=202');
+    const elsewhere = identifyAts('https://staffing-partner.com/jobs/view?jobId=909');
+    if (!a || !b || !elsewhere) throw new Error('expected ids');
+    expect(identifiersConflict(a, b)).toBe(true);
+    // Two sites number their jobs separately: the same posting copied elsewhere is not "another job".
+    expect(identifiersConflict(a, elsewhere)).toBe(false);
+    expect(identifiersConflict({ provider: 'greenhouse', externalId: '1' }, { provider: 'greenhouse', externalId: '2' })).toBe(true);
+    expect(identifiersConflict({ provider: 'greenhouse', externalId: '1' }, { provider: 'lever', externalId: '2' })).toBe(false);
   });
 });

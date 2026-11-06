@@ -35,6 +35,8 @@ export class HostServer {
       this.child = child;
       this.stopping = false;
       let settled = false;
+      // It said why it could not start, then exits: that exit is expected, and the reason it gave stays shown.
+      let failed = false;
 
       child.on('message', (message: HostMessage) => {
         if (message.type === 'ready' && !settled) {
@@ -42,6 +44,7 @@ export class HostServer {
           resolve({ port: message.port, certPem: message.certPem, fingerprint: message.fingerprint, addresses: message.addresses, dataDir: this.dataDir });
         } else if (message.type === 'failed' && !settled) {
           settled = true;
+          failed = true;
           reject(new Error(message.message));
         }
       });
@@ -51,7 +54,7 @@ export class HostServer {
         if (!settled) {
           settled = true;
           reject(new Error(`The server stopped while starting (code ${code}). Details may be in its log.`));
-        } else if (!this.stopping) {
+        } else if (!this.stopping && !failed) {
           this.onUnexpectedExit(`The server stopped unexpectedly (code ${code}).`);
         }
       });
