@@ -1,4 +1,3 @@
-import * as cheerio from 'cheerio';
 import { discoverAtsLinks, identifyAts, type AtsIdentity } from '../dedupe/ats';
 import { deriveJobFacts, type JobHints } from '../dedupe/job-facts';
 import { stripPersonalParams } from '../dedupe/url-normalize';
@@ -18,6 +17,7 @@ import {
 } from './html';
 import { assertSafeUrlShape, UnsafeUrlError } from './ip-guard';
 import { extractJsonLd } from './jsonld';
+import { loadPage } from './markup';
 import { FetchError, type FetchResult, type HttpClient } from './safe-fetch';
 import { tidyText } from './text';
 import {
@@ -64,7 +64,9 @@ const CLOSED_MESSAGE = 'This posting appears to have been closed or removed from
 const LOGIN_MESSAGE = 'This page requires signing in, so its details cannot be read automatically.';
 
 function readPage(html: string, status: number | null, adapter: SiteAdapter | null, ctx: AdapterContext): PageReading {
-  const $ = cheerio.load(html);
+  // The page as parsed is kept in check (see loadPage); what looks for text in the raw markup
+  // reads all of it, as that takes no longer than the markup is long.
+  const $ = loadPage(html);
   const pageTitle = $('title').first().text().trim();
   const bodyText = visibleText($);
   const attempts: Attempt[] = [];
@@ -114,6 +116,31 @@ interface Combined {
   description: string | null;
 }
 
+const textHint = (value: unknown): string | null => (typeof value === 'string' ? value : null);
+/** An amount, as a number or as the text of one ("120000"). */
+const numberHint = (value: unknown): number | null => {
+  const amount = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+  return typeof amount === 'number' && Number.isFinite(amount) ? amount : null;
+};
+
+/**
+ * A site's data says anything it likes. A hint is only taken in the shape it is read in, so that a
+ * list or an object where text belongs is left out rather than failing the whole posting.
+ */
+function usableHint(field: keyof JobHints, value: unknown): unknown {
+  switch (field) {
+    case 'postedAt':
+      return typeof value === 'string' || typeof value === 'number' ? value : null;
+    case 'salary': {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+      const salary = value as Record<string, unknown>;
+      return { min: numberHint(salary.min), max: numberHint(salary.max), currency: textHint(salary.currency), period: textHint(salary.period) };
+    }
+    default:
+      return textHint(value);
+  }
+}
+
 /** ".../jobs/580106338-data-analyst-at-booz-allen-hamilton-inc" names the employer in the link. */
 function companyFromSlug(url: URL): string | null {
   const slug = url.pathname.split('/').filter(Boolean).pop()?.match(/-at-([a-z0-9-]{3,60})$/i)?.[1];
@@ -135,8 +162,9 @@ function combine(attempts: Attempt[], identity: AtsIdentity | null, url: URL): C
   // Each hint from the most reliable source that has it. Data calls with no value leave it open.
   const hints: JobHints = {};
   for (const attempt of ranked) {
-    for (const [key, value] of Object.entries(attempt.job.hints ?? {})) {
+    for (const [key, raw] of Object.entries(attempt.job.hints ?? {})) {
       const field = key as keyof JobHints;
+      const value = usableHint(field, raw);
       if (hints[field] === undefined && value !== null && value !== undefined && value !== '') (hints as Record<string, unknown>)[field] = value;
     }
   }

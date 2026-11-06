@@ -12,11 +12,21 @@ const CHALLENGE_BODY =
   // Not "g-recaptcha" or "h-captcha": application forms embed those on perfectly normal job pages.
   /(cf-browser-verification|cf_chl_|px-captcha|datadome|distil_r_captcha|incapsula incident|please enable (javascript and )?cookies to continue|verify you are human|unusual traffic from your|checking your browser before|quick security check|confirm you('|&#39;|’)?re human)/i;
 
-/** What a person sees on the page. Cheerio's text() would also count the contents of inline scripts. */
+const visibleByPage = new WeakMap<object, string>();
+
+/**
+ * What a person sees on the page. Cheerio's text() would also count the contents of inline scripts.
+ * Worked out once per page, as several checks ask for it and nothing changes the page once read.
+ */
 export function visibleText($: CheerioAPI): string {
+  const page = $.root()[0];
+  const known = visibleByPage.get(page);
+  if (known !== undefined) return known;
   const body = $('body').clone();
   body.find('script, style, noscript, template').remove();
-  return body.text().replace(/\s+/g, ' ').trim();
+  const text = body.text().replace(/\s+/g, ' ').trim();
+  visibleByPage.set(page, text);
+  return text;
 }
 
 export function detectBlockedPage($: CheerioAPI, html: string, status: number | null): string | null {

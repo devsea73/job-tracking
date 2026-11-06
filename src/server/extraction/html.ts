@@ -1,5 +1,7 @@
 import type { CheerioAPI } from 'cheerio';
-import { cleanInline, htmlToText } from './text';
+import type { AnyNode, Element } from 'domhandler';
+import { isSpaceCode, textOf } from './markup';
+import { cleanInline, finishText, htmlToText, nodesToText } from './text';
 import type { PartialJob } from './types';
 
 /** Pipeline step 2: page metadata. Gives title/company but rarely a complete description. */
@@ -199,50 +201,235 @@ const CONTENT_SELECTORS = [
 const JOB_WORDS =
   /\b(responsibilit|requirement|qualification|experience|skills|you will|you'll|what you|about the role|about the job|the role|benefits|salary|compensation|equal opportunity|we are looking)/gi;
 
-/** Pipeline step 3: well-known description containers used by job boards and career sites. */
+const noiseByPage = new WeakMap<object, Set<Element>>();
+
+/** The page's noise, found once per page: nothing changes the parsed page once it is read. */
+function noiseOf($: CheerioAPI): Set<Element> {
+  const page = $.root()[0];
+  let noise = noiseByPage.get(page);
+  if (!noise) {
+    noise = new Set($.root().find(NOISE_SELECTOR).toArray() as Element[]);
+    noiseByPage.set(page, noise);
+  }
+  return noise;
+}
+
+/** Far longer than any posting: such a block is read straight from the page rather than copied first. */
+const HUGE_BLOCK_CHARS = 100_000;
+
+/**
+ * An element's text without the page's noise inside it: the element copied, the noise taken out,
+ * and the rest written out and read as markup. A block far longer than any posting is read
+ * straight from the parsed page instead, skipping the noise, by the same rules: copying and
+ * reparsing a megabyte of markup takes the best part of a second.
+ */
+function containerText($: CheerioAPI, element: Element, size = textOf(element).length): string {
+  if (size > HUGE_BLOCK_CHARS) {
+    const noise = noiseOf($);
+    return finishText(nodesToText(element.children, (node) => noise.has(node as Element)));
+  }
+  const clone = $(element).clone();
+  clone.find(NOISE_SELECTOR).remove();
+  return htmlToText(clone.html() ?? '');
+}
+
+const ANY_CONTENT_SELECTOR = CONTENT_SELECTORS.join(',');
+
+/**
+ * Pipeline step 3: well-known description containers used by job boards and career sites.
+ *
+ * The longest text wins, so an element inside one already read is passed over when everything in
+ * it was part of that text, which is then at least as long: when neither it nor anything between
+ * them is noise, which is left out of the text around it. Each element is read once, whichever
+ * selectors find it, so a page nesting many of them costs no more than reading it once or twice.
+ * The page is searched once for all the selectors, and each one then picks its own from those.
+ */
 export function extractKnownContainers($: CheerioAPI): string | null {
   let best: string | null = null;
+  const read = new Map<Element, string>();
+  const noise = noiseOf($);
+  const covered = (element: Element): boolean => {
+    if (noise.has(element)) return false;
+    for (let node = element.parent; node; node = node.parent) {
+      if (read.has(node as Element)) return true;
+      if (noise.has(node as Element)) return false;
+    }
+    return false;
+  };
+  const found = $(ANY_CONTENT_SELECTOR);
+  if (found.length === 0) return null;
   for (const selector of CONTENT_SELECTORS) {
-    $(selector).each((_, element) => {
-      const clone = $(element).clone();
-      clone.find(NOISE_SELECTOR).remove();
-      const text = htmlToText(clone.html() ?? '');
+    for (const element of found.filter(selector).toArray() as Element[]) {
+      let text = read.get(element);
+      if (text === undefined) {
+        if (covered(element)) continue;
+        text = containerText($, element);
+        read.set(element, text);
+      }
       if (text.length > (best?.length ?? 0)) best = text;
-    });
-    if (best && (best as string).length >= 400) return best;
+    }
+    if (best && best.length >= 400) return best;
   }
   return best;
 }
 
+const CANDIDATE_TAGS = new Set(['main', 'article', 'section', 'div', 'td']);
+const PARAGRAPH_TAGS = new Set(['p', 'li']);
+/** A page that would take longer than this to score in full keeps the best block found so far. */
+const MAX_SCORED_CHARS = 20_000_000;
+
+/**
+ * How a stretch of text comes out once its spaces are collapsed and trimmed: its visible
+ * characters and the words they make. Two stretches put together merge a word across the join
+ * when neither side has a space there, so the length of any element's collapsed text follows
+ * from its children's without building it.
+ */
+interface TextShape {
+  empty: boolean;
+  visible: number;
+  words: number;
+  startsInWord: boolean;
+  endsInWord: boolean;
+}
+
+const NO_TEXT: TextShape = { empty: true, visible: 0, words: 0, startsInWord: false, endsInWord: false };
+
+function shapeOf(text: string): TextShape {
+  if (text.length === 0) return NO_TEXT;
+  let visible = 0;
+  let words = 0;
+  let inWord = false;
+  for (let index = 0; index < text.length; index += 1) {
+    if (isSpaceCode(text.charCodeAt(index))) inWord = false;
+    else {
+      visible += 1;
+      if (!inWord) words += 1;
+      inWord = true;
+    }
+  }
+  return { empty: false, visible, words, startsInWord: !isSpaceCode(text.charCodeAt(0)), endsInWord: inWord };
+}
+
+function joined(first: TextShape, second: TextShape): TextShape {
+  if (first.empty) return second;
+  if (second.empty) return first;
+  return {
+    empty: false,
+    visible: first.visible + second.visible,
+    words: first.words + second.words - (first.endsInWord && second.startsInWord ? 1 : 0),
+    startsInWord: first.startsInWord,
+    endsInWord: second.endsInWord
+  };
+}
+
+/** The length of `text.replace(/\s+/g, ' ').trim()`. */
+const collapsedLength = (shape: TextShape) => shape.visible + Math.max(shape.words - 1, 0);
+
+interface Block {
+  element: Element;
+  /** Its place in the page, in document order. */
+  order: number;
+  /** Where its text starts and ends in the page's text. */
+  start: number;
+  end: number;
+  paragraphs: number;
+  text: TextShape;
+  links: TextShape;
+}
+
+const isTag = (node: AnyNode): node is Element => node.type === 'tag' || node.type === 'script' || node.type === 'style';
+
 /**
  * Pipeline step 5: readability-style fallback. Scores blocks by how much prose they hold
  * and how much of it reads like a job posting, and penalizes link-heavy (navigation) blocks.
+ *
+ * The page is read once, in one pass without recursion: each block's paragraphs, the length of
+ * its text and of its links' text add up from its children. Only blocks that could still win are
+ * then scored on their actual text, best possible score first. The block chosen, and so the text,
+ * is the one scoring every block in page order would choose.
  */
 export function extractMainContent($: CheerioAPI): string | null {
-  const doc = $.root().clone();
-  doc.find(NOISE_SELECTOR).remove();
+  const noise = noiseOf($);
+  const pageText: string[] = [];
+  let textLength = 0;
+  const blocks: Block[] = [];
+  let order = 0;
 
-  let bestText: string | null = null;
-  let bestScore = 0;
-  doc.find('main, article, section, div, td').each((_, element) => {
-    const node = $(element);
-    const paragraphs = node.find('p, li').length;
-    if (paragraphs < 3) return;
-    const text = node.text().replace(/\s+/g, ' ').trim();
-    if (text.length < 200) return;
-    const linkText = node.find('a').text().replace(/\s+/g, ' ').trim().length;
-    const linkDensity = linkText / text.length;
-    if (linkDensity > 0.4) return;
-    const jobSignals = (text.match(JOB_WORDS) ?? []).length;
-    if (jobSignals === 0) return;
-    // Rewards dense job prose, and stops an outer wrapper from beating its inner content.
-    const score = (Math.min(jobSignals, 25) * 40 + paragraphs * 5) * (1 - linkDensity) - text.length / 120;
-    if (score > bestScore) {
-      bestScore = score;
-      bestText = htmlToText(node.html() ?? '');
+  interface Frame {
+    node: AnyNode & { children: AnyNode[] };
+    /** Reached through elements only, as a selector query would find it. */
+    findable: boolean;
+    next: number;
+    order: number;
+    start: number;
+    paragraphs: number;
+    text: TextShape;
+    links: TextShape;
+  }
+  const root = $.root()[0] as unknown as Frame['node'];
+  const stack: Frame[] = [{ node: root, findable: true, next: 0, order: -1, start: 0, paragraphs: 0, text: NO_TEXT, links: NO_TEXT }];
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1];
+    if (frame.next < frame.node.children.length) {
+      const child = frame.node.children[frame.next];
+      frame.next += 1;
+      if (child.type === 'text') {
+        pageText.push(child.data);
+        textLength += child.data.length;
+        frame.text = joined(frame.text, shapeOf(child.data));
+      } else if (child.type !== 'comment' && 'children' in child && !noise.has(child as Element)) {
+        const findable = frame.findable && isTag(child);
+        stack.push({ node: child as Frame['node'], findable, next: 0, order: findable ? order++ : -1, start: textLength, paragraphs: 0, text: NO_TEXT, links: NO_TEXT });
+      }
+      continue;
     }
-  });
-  return bestText;
+    stack.pop();
+    const parent = stack[stack.length - 1];
+    if (!parent) break;
+    const element = frame.node as unknown as Element;
+    const name = frame.findable ? element.name : '';
+    if (CANDIDATE_TAGS.has(name)) {
+      blocks.push({ element, order: frame.order, start: frame.start, end: textLength, paragraphs: frame.paragraphs, text: frame.text, links: frame.links });
+    }
+    parent.paragraphs += frame.paragraphs + (PARAGRAPH_TAGS.has(name) ? 1 : 0);
+    parent.text = joined(parent.text, frame.text);
+    // A link's own text, then the text of any link inside it: the order a selector query lists them.
+    parent.links = joined(parent.links, name === 'a' ? joined(frame.text, frame.links) : frame.links);
+  }
+
+  const contenders: Array<{ block: Block; linkDensity: number; bound: number }> = [];
+  for (const block of blocks) {
+    if (block.paragraphs < 3) continue;
+    const length = collapsedLength(block.text);
+    if (length < 200) continue;
+    const linkDensity = collapsedLength(block.links) / length;
+    if (linkDensity > 0.4) continue;
+    // The most it can score: as many job signals as count.
+    contenders.push({ block, linkDensity, bound: (25 * 40 + block.paragraphs * 5) * (1 - linkDensity) - length / 120 });
+  }
+  contenders.sort((a, b) => b.bound - a.bound || a.block.order - b.block.order);
+
+  const text = pageText.join('');
+  let best: Block | null = null;
+  let bestScore = 0;
+  let budget = MAX_SCORED_CHARS;
+  for (const { block, linkDensity, bound } of contenders) {
+    // Scored in page order, the first of equal scores wins: a later one cannot beat it or tie with it.
+    if (bound < bestScore) break;
+    if (bound === bestScore && (!best || block.order > best.order)) continue;
+    budget -= block.end - block.start;
+    if (budget < 0) break;
+    const prose = text.slice(block.start, block.end).replace(/\s+/g, ' ').trim();
+    const jobSignals = (prose.match(JOB_WORDS) ?? []).length;
+    if (jobSignals === 0) continue;
+    // Rewards dense job prose, and stops an outer wrapper from beating its inner content.
+    const score = (Math.min(jobSignals, 25) * 40 + block.paragraphs * 5) * (1 - linkDensity) - prose.length / 120;
+    if (score > bestScore || (score === bestScore && best && block.order < best.order)) {
+      bestScore = score;
+      best = block;
+    }
+  }
+  return best ? containerText($, best.element, best.end - best.start) : null;
 }
 
 /** How many different kinds of job-posting language a text uses. */
