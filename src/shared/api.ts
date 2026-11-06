@@ -366,6 +366,8 @@ export interface InterviewQuery {
   person?: number | 'all';
   profileId?: number;
   limit?: number;
+  /** Soonest first, the default, or latest first: past interviews are read from the latest. */
+  order?: 'asc' | 'desc';
 }
 
 export interface MyProfile extends ProfileRef {
@@ -512,8 +514,10 @@ export interface ActivityResponse {
   buckets: ActivityBucket[];
   /**
    * What the trends are compared with: the month or year before a whole month or year, otherwise
-   * as many days just before the range. Its buckets line up with the range's, one for one. The
-   * totals compare the range as far as today with as many days from the start of this period.
+   * as many days just before the range. Its buckets line up with the range's, one for one: weeks,
+   * and months against as many days before, are the range's own moved back to the same place, and
+   * are named by their first day. The totals compare the range as far as today with as many days
+   * from the start of this period.
    */
   previous: { range: DaySpan; buckets: ActivityBucket[]; compared: { current: DaySpan; previous: DaySpan } | null };
   /** The viewer first, then everyone else by rank. */

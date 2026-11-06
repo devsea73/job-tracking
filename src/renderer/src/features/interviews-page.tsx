@@ -46,15 +46,13 @@ export function InterviewsPage({ onOpenJob }: { onOpenJob: (id: number) => void 
       stage: stage === ANY ? undefined : (stage as InterviewStage),
       from: from ? dayBoundary(from, 'start') : range === 'upcoming' ? now : undefined,
       to: to ? dayBoundary(to, 'end') : range === 'past' ? now : undefined,
+      // Past ones from the latest back: a page of them is the most recent, and "Show more" goes further back.
+      order: range === 'past' ? ('desc' as const) : ('asc' as const),
       limit
     };
   }, [range, person, stage, from, to, limit]);
   const interviews = useInterviews(filter);
-
-  const items = useMemo(() => {
-    const list = interviews.data ?? [];
-    return range === 'past' ? [...list].reverse() : list;
-  }, [interviews.data, range]);
+  const items = useMemo(() => interviews.data ?? [], [interviews.data]);
 
   const groups = useMemo(() => {
     const byDay = new Map<string, InterviewListItem[]>();

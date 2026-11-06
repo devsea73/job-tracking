@@ -112,6 +112,25 @@ describe('everyone’s applications on the Team page', () => {
     expect(tokyo.items.map((item) => item.job.company)).toEqual(['Company 2', 'Stripe', 'Company 4', 'Company 5']);
   });
 
+  it('orders by company or by the latest change, the same rows for everyone, each marked for its viewer', async () => {
+    const { users, list, andyToday } = await setUp();
+    expect((await list(users.mia, { sort: 'company' })).items.map((item) => item.job.company)).toEqual(['Company 2', 'Company 3', 'Company 4', 'Company 5', 'Company 6', 'Stripe']);
+    await users.andy.patch(`/api/applications/${andyToday.applicationId}`, { memo: 'Followed up by email' });
+    const asMia = await list(users.mia, { sort: 'updated' });
+    expect(asMia.items[0].id).toBe(andyToday.applicationId);
+    const asAndy = await list(users.andy, { sort: 'updated' });
+    expect(asAndy.items.map((item) => item.id)).toEqual(asMia.items.map((item) => item.id));
+    expect(asAndy.items.filter((item) => item.isMine).map((item) => item.owner.username)).toEqual(['andy', 'andy', 'andy']);
+    expect(asMia.items.some((item) => item.isMine)).toBe(false);
+    expect(asAndy.board.map((row) => [row.user.username, row.isMe])).toEqual([
+      ['andy', true],
+      ['john', false],
+      ['mia', false]
+    ]);
+    // A page past the end has nothing on it, and the full count to step back with.
+    expect(await list(users.mia, { limit: '2', offset: '10' })).toMatchObject({ total: 6, items: [] });
+  });
+
   it('refuses a half-given range, and anyone not signed in', async () => {
     const { server, users } = await setUp();
     expect((await users.andy.get('/api/team/applications?tz=UTC&from=2026-11-05')).status).toBe(400);

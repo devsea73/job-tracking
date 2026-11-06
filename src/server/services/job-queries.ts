@@ -1,3 +1,4 @@
+import type Database from 'better-sqlite3';
 import { asc, desc, eq, sql } from 'drizzle-orm';
 import type {
   ApplicationDetail,
@@ -83,8 +84,8 @@ function sortPlan(userId: number, query: JobListQuery, now: string): SortPlan {
       if (query.scope === 'mine') return { join: keys('MAX(x.id)'), joinParams: [], order: 's.sort_key DESC' };
       return { join: '', joinParams: [], order: 'j.created_at DESC' };
     case 'applied':
-      // Mine: when I applied. Otherwise: the latest anyone shown applied.
-      return { join: keys('MAX(x.applied_at)'), joinParams: [], order: 's.sort_key IS NULL, s.sort_key DESC' };
+      // Mine: when I first applied, with several of my profiles: the date the list shows. Otherwise: the first time anyone shown applied.
+      return { join: keys('MIN(x.applied_at)'), joinParams: [], order: 's.sort_key IS NULL, s.sort_key DESC' };
     case 'updated':
       if (everyone) return { join: '', joinParams: [], order: 'j.last_activity_at DESC' };
       return { join: keys('MAX(x.updated_at)'), joinParams: [], order: "MAX(j.updated_at, COALESCE(s.sort_key, '')) DESC" };
@@ -368,7 +369,10 @@ interface InterviewRow extends FactsRow {
   profile_avatar: string | null;
 }
 
-/** The signed-in user's own interviews, unless the query asks for someone else's or everyone's. */
+/**
+ * The signed-in user's own interviews, unless the query asks for someone else's or everyone's.
+ * Soonest first, or latest first when asked: the latest past ones are the ones worth seeing first.
+ */
 export function listInterviews(db: Db, viewerId: number, filter: InterviewQuery, limit = 2_000): InterviewListItem[] {
   const conditions: string[] = [];
   const params: unknown[] = [];
@@ -407,7 +411,7 @@ export function listInterviews(db: Db, viewerId: number, filter: InterviewQuery,
        LEFT JOIN user_avatars ua ON ua.user_id = u.id
        LEFT JOIN profile_avatars pa ON pa.profile_id = p.id
        ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
-       ORDER BY i.scheduled_at ASC LIMIT ?`
+       ORDER BY ${filter.order === 'desc' ? 'i.scheduled_at DESC, i.id DESC' : 'i.scheduled_at ASC, i.id ASC'} LIMIT ?`
   ).all(...params, limit) as InterviewRow[];
   return rows.map((row): InterviewListItem => ({
     id: row.id,
@@ -464,32 +468,38 @@ interface TeamApplicationRow extends ApplicationRow, FactsRow {
   location: string | null;
 }
 
-/**
- * Everyone's applications, one row per profile's application, with where each one is now, and a
- * board of every member's applications by current status. The board counts the range only, so it
- * stays put while the list below it is narrowed to a person, a status or a search.
- * Administrators are not members, so neither appears.
- */
-export function listTeamApplications(db: Db, viewerId: number, query: TeamApplicationsQuery, span: { from: string; to: string } | null): Omit<TeamApplicationsResponse, 'range'> {
-  const sqlite = db.$client;
-  const inRange = span ? 'a.applied_at >= @from AND a.applied_at < @to' : '1';
-  const params: Record<string, unknown> = { now: new Date().toISOString(), from: span?.from ?? null, to: span?.to ?? null };
+/** Work kept while the data stays the same, shared by everyone's answers: the server's read cache. */
+export interface SharedWork {
+  value<T>(key: string, compute: () => T): T;
+}
 
+/**
+ * Every member's applications in the range by status, before anyone is marked as the viewer: the
+ * same for everyone who looks. Those past Applied got an interview by their furthest stage; the
+ * rest only need looking up when an interview was booked for one.
+ */
+function teamBoard(sqlite: Database.Database, span: { from: string; to: string } | null): TeamBoardRow[] {
+  const inRange = span ? 'a.applied_at >= @from AND a.applied_at < @to' : '1';
+  const params = { from: span?.from ?? null, to: span?.to ?? null };
   const people = prepared(
     sqlite,
     `SELECT u.id, u.username, u.display_name, u.is_active, ua.updated_at AS avatar FROM users u LEFT JOIN user_avatars ua ON ua.user_id = u.id WHERE u.role <> 'admin'`
   ).all() as Array<{ id: number; username: string; display_name: string | null; is_active: number; avatar: string | null }>;
-  const counted = prepared(
+  const counted = prepared(sqlite, `SELECT a.user_id, a.status, COUNT(*) AS total, SUM(a.furthest_rank >= 1) AS interviews FROM applications a WHERE ${inRange} GROUP BY a.user_id, a.status`).all(params) as Array<{
+    user_id: number;
+    status: ApplicationStatus;
+    total: number;
+    interviews: number;
+  }>;
+  const booked = prepared(
     sqlite,
-    `SELECT a.user_id, a.status, COUNT(*) AS total,
-            SUM(a.furthest_rank >= 1 OR EXISTS (SELECT 1 FROM interviews iv WHERE iv.application_id = a.id)) AS interviews
-     FROM applications a WHERE ${inRange} GROUP BY a.user_id, a.status`
-  ).all(params) as Array<{ user_id: number; status: ApplicationStatus; total: number; interviews: number }>;
-  const board = people
+    `SELECT a.user_id, COUNT(*) AS total FROM (SELECT DISTINCT application_id AS id FROM interviews) i JOIN applications a ON a.id = i.id WHERE a.furthest_rank = 0 AND ${inRange} GROUP BY a.user_id`
+  ).all(params) as Array<{ user_id: number; total: number }>;
+  return people
     .map((person): TeamBoardRow => {
       const statuses = Object.fromEntries(APPLICATION_STATUSES.map((status) => [status, 0])) as Record<ApplicationStatus, number>;
       let total = 0;
-      let interviewed = 0;
+      let interviewed = booked.find((row) => row.user_id === person.id)?.total ?? 0;
       for (const row of counted) {
         if (row.user_id !== person.id) continue;
         statuses[row.status] += row.total;
@@ -498,7 +508,7 @@ export function listTeamApplications(db: Db, viewerId: number, query: TeamApplic
       }
       return {
         user: toUserRef({ id: person.id, username: person.username, displayName: person.display_name, avatarVersion: person.avatar }),
-        isMe: person.id === viewerId,
+        isMe: false,
         isActive: person.is_active === 1,
         total,
         statuses,
@@ -506,9 +516,23 @@ export function listTeamApplications(db: Db, viewerId: number, query: TeamApplic
         interviewRate: total > 0 ? Math.round((interviewed / total) * 1000) / 10 : null
       };
     })
-    .sort((a, b) => Number(b.isMe) - Number(a.isMe) || b.total - a.total || a.user.username.localeCompare(b.user.username));
+    .sort((a, b) => b.total - a.total || a.user.username.localeCompare(b.user.username));
+}
 
-  const where = ["u.role <> 'admin'", inRange];
+/**
+ * A page of everyone's applications. The page is chosen first, from the few columns the filters
+ * and the order need, and only its rows are then read in full: reading every application in full
+ * and then keeping fifty took most of a second with tens of thousands.
+ */
+function teamApplicationPage(sqlite: Database.Database, query: TeamApplicationsQuery, span: { from: string; to: string } | null): { total: number; rows: TeamApplicationRow[] } {
+  // Administrators are not members. Asked once, so the list can run down the applications in order.
+  const where = [`a.user_id NOT IN (SELECT id FROM users WHERE role = 'admin')`];
+  const params: Record<string, unknown> = {};
+  if (span) {
+    where.push('a.applied_at >= @from AND a.applied_at < @to');
+    params.from = span.from;
+    params.to = span.to;
+  }
   if (query.person) {
     where.push('a.user_id = @person');
     params.person = query.person;
@@ -517,23 +541,58 @@ export function listTeamApplications(db: Db, viewerId: number, query: TeamApplic
     where.push('a.status = @status');
     params.status = query.status;
   }
-  searchTokens(query.q ?? '').forEach((token, index) => {
+  const tokens = searchTokens(query.q ?? '');
+  tokens.forEach((token, index) => {
     where.push(`(j.title LIKE @q${index} ESCAPE '\\' OR j.company_name LIKE @q${index} ESCAPE '\\' OR p.name LIKE @q${index} ESCAPE '\\')`);
     params[`q${index}`] = `%${escapeLike(token)}%`;
   });
+  const sort = query.sort ?? 'applied';
+  const from = `FROM applications a${tokens.length > 0 || sort === 'company' ? ' JOIN jobs j ON j.id = a.job_id' : ''}${tokens.length > 0 ? ' JOIN profiles p ON p.id = a.profile_id' : ''}`;
   const filter = `WHERE ${where.join(' AND ')}`;
-  const joins = `${APPLICATION_JOINS} JOIN jobs j ON j.id = a.job_id LEFT JOIN job_facts f ON f.job_id = j.id`;
-  const total = (prepared(sqlite, `SELECT COUNT(*) AS total ${joins} ${filter}`).get(params) as { total: number }).total;
-  const rows = prepared(
-    sqlite,
-    `SELECT ${APPLICATION_COLUMNS}, j.title, j.company_name, j.location, ${FACTS_COLUMNS} ${joins} ${filter}
-     ORDER BY ${TEAM_APPLICATION_ORDER[query.sort ?? 'applied']} LIMIT @limit OFFSET @offset`
-  ).all({ ...params, limit: query.limit ?? 50, offset: query.offset ?? 0 }) as TeamApplicationRow[];
+  const total = (prepared(sqlite, `SELECT COUNT(*) AS total ${from} ${filter}`).get(params) as { total: number }).total;
+  const ids = prepared(sqlite, `SELECT a.id ${from} ${filter} ORDER BY ${TEAM_APPLICATION_ORDER[sort]} LIMIT @limit OFFSET @offset`)
+    .pluck()
+    .all({ ...params, limit: query.limit ?? 50, offset: query.offset ?? 0 }) as number[];
+  if (ids.length === 0) return { total, rows: [] };
+  const found = new Map(
+    (
+      prepared(
+        sqlite,
+        `SELECT ${APPLICATION_COLUMNS}, j.title, j.company_name, j.location, ${FACTS_COLUMNS} ${APPLICATION_JOINS} JOIN jobs j ON j.id = a.job_id LEFT JOIN job_facts f ON f.job_id = j.id
+         WHERE a.id IN (SELECT value FROM json_each(@ids))`
+      ).all({ now: new Date().toISOString(), ids: JSON.stringify(ids) }) as TeamApplicationRow[]
+    ).map((row) => [row.id, row])
+  );
+  return { total, rows: ids.map((id) => found.get(id)).filter((row): row is TeamApplicationRow => row !== undefined) };
+}
 
+/**
+ * Everyone's applications, one row per profile's application, with where each one is now, and a
+ * board of every member's applications by current status. The board counts the range only, so it
+ * stays put while the list below it is narrowed to a person, a status or a search.
+ * Administrators are not members, so neither appears. Everyone sees the same board and pages, so
+ * with `shared` they are worked out once, and only "me" and "mine" are marked for each viewer.
+ */
+export function listTeamApplications(
+  db: Db,
+  viewerId: number,
+  query: TeamApplicationsQuery,
+  span: { from: string; to: string } | null,
+  shared?: SharedWork
+): Omit<TeamApplicationsResponse, 'range'> {
+  const sqlite = db.$client;
+  const once = <T>(key: string, compute: () => T): T => (shared ? shared.value(key, compute) : compute());
+  const board = once(`team-board:${span?.from ?? ''}|${span?.to ?? ''}`, () => teamBoard(sqlite, span));
+  const page = once(
+    `team-page:${JSON.stringify([span?.from, span?.to, query.person, query.status, query.q, query.sort, query.limit, query.offset])}`,
+    () => teamApplicationPage(sqlite, query, span)
+  );
+  const mine = board.find((row) => row.user.id === viewerId);
   return {
-    board,
-    total,
-    items: rows.map((row): TeamApplication => ({
+    // The viewer first, then by applications.
+    board: mine ? [{ ...mine, isMe: true }, ...board.filter((row) => row !== mine)] : board,
+    total: page.total,
+    items: page.rows.map((row): TeamApplication => ({
       ...toApplicationSummary(row, viewerId),
       job: { id: row.job_id, title: row.title, company: row.company_name, location: row.location, facts: toJobFacts(row) }
     }))

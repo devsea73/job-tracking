@@ -188,6 +188,10 @@ export const applications = sqliteTable(
     index('applications_status_idx').on(t.status),
     index('applications_user_status_idx').on(t.userId, t.status),
     index('applications_job_url_idx').on(t.jobUrlId),
+    // The numbers pages read a range of days; count each profile's that got somewhere; and find the
+    // offers, which success counts from the start.
+    index('applications_applied_idx').on(t.appliedAt),
+    index('applications_furthest_idx').on(t.furthestRank, t.profileId),
     check(
       'applications_status_check',
       sql`${t.status} in ('Applied', 'Recruiter Screen', 'Technical Interview', 'Final Interview', 'Rejected', 'Offer')`
@@ -211,7 +215,9 @@ export const interviews = sqliteTable(
   },
   (t) => [
     index('interviews_application_idx').on(t.applicationId, t.scheduledAt),
-    index('interviews_scheduled_idx').on(t.scheduledAt)
+    index('interviews_scheduled_idx').on(t.scheduledAt),
+    // Which applications got an interview booked in a range of days.
+    index('interviews_created_idx').on(t.createdAt, t.applicationId)
   ]
 );
 
@@ -226,7 +232,8 @@ export const applicationStatusHistory = sqliteTable(
     newStatus: text('new_status').$type<ApplicationStatus>().notNull(),
     changedAt: text('changed_at').notNull().default(nowIso)
   },
-  (t) => [index('status_history_application_idx').on(t.applicationId, t.changedAt)]
+  // By application; and which applications reached a stage in a range of days.
+  (t) => [index('status_history_application_idx').on(t.applicationId, t.changedAt), index('status_history_reached_idx').on(t.newStatus, t.changedAt, t.applicationId)]
 );
 
 /** What is known about a job wherever it is listed: the tags on it, and what duplicates are judged by. */

@@ -100,7 +100,7 @@ export function seedLoadData(sqlite, { passwordHash, jobs = 10_000, users = 10, 
   const insertIdentifier = sqlite.prepare('INSERT INTO job_identifiers (job_id, provider, external_id) VALUES (?, ?, ?)');
   const insertApplication = sqlite.prepare('INSERT INTO applications (user_id, profile_id, job_id, status, memo, applied_at, updated_at, job_url_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
   const insertHistory = sqlite.prepare('INSERT INTO application_status_history (application_id, old_status, new_status, changed_at) VALUES (?, ?, ?, ?)');
-  const insertInterview = sqlite.prepare('INSERT INTO interviews (application_id, stage, scheduled_at, timezone, note) VALUES (?, ?, ?, ?, ?)');
+  const insertInterview = sqlite.prepare('INSERT INTO interviews (application_id, stage, scheduled_at, timezone, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
 
   const counts = { users: 0, profiles: 0, jobs: 0, urls: 0, applications: 0, interviews: 0, history: 0 };
 
@@ -176,7 +176,9 @@ export function seedLoadData(sqlite, { passwordHash, jobs = 10_000, users = 10, 
           if (stage) {
             // About a third of interviews are still to come.
             const when = random.next() < 0.33 ? now + random.int(45) * DAY : steps[step] + DAY;
-            insertInterview.run(applicationId, stage, iso(when), 'America/New_York', random.next() < 0.3 ? 'Video call with the team' : null);
+            // Booked when the application got to that stage, as people do.
+            const booked = iso(Math.min(steps[step], now));
+            insertInterview.run(applicationId, stage, iso(when), 'America/New_York', random.next() < 0.3 ? 'Video call with the team' : null, booked, booked);
             counts.interviews += 1;
           }
         });

@@ -15,19 +15,30 @@ export interface WallClock {
   hour: number;
 }
 
+/** Each zone's wall clock, kept between requests: the same quarter hours come up in every one. */
+const clocks = new Map<string, (ms: number) => WallClock>();
+const CLOCK_ZONES = 16;
+const CLOCK_TIMES = 100_000;
+
 /** The time on the viewer's wall clock at a moment. The same quarter hours come up again and again, so each is worked out once. */
 export function zoneClock(tz: string): (ms: number) => WallClock {
+  const known = clocks.get(tz);
+  if (known) return known;
   const format = new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit' });
   const seen = new Map<number, WallClock>();
-  return (ms) => {
-    let clock = seen.get(ms);
-    if (!clock) {
+  const clock = (ms: number): WallClock => {
+    let found = seen.get(ms);
+    if (!found) {
       const parts = Object.fromEntries(format.formatToParts(ms).map((part) => [part.type, part.value]));
-      clock = { date: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour) % 24 };
-      seen.set(ms, clock);
+      found = { date: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour) % 24 };
+      if (seen.size >= CLOCK_TIMES) seen.clear();
+      seen.set(ms, found);
     }
-    return clock;
+    return found;
   };
+  if (clocks.size >= CLOCK_ZONES) clocks.clear();
+  clocks.set(tz, clock);
+  return clock;
 }
 
 /**
@@ -79,23 +90,52 @@ export function bucketsFor(group: ActivityGroup, range: DaySpan): { buckets: Act
   }
 }
 
+export interface BucketedRange {
+  buckets: ActivityBucket[];
+  from: number;
+  to: number;
+  /** The bucket a moment falls in, or -1 outside them all. */
+  place: (ms: number) => number;
+}
+
 /**
- * A range of days, in instants, split into its buckets: which bucket a moment falls in, or -1
- * outside the range. A moment is placed by its quarter hour of UTC: inside one, every moment has
- * the same wall-clock hour and day in every time zone.
+ * Buckets that are each a run of whole days, one after the other, in instants. A moment falls in
+ * the last bucket that began at or before it: the days are worked out once per bucket, not per moment.
  */
-export function bucketedRange(group: ActivityGroup, range: DaySpan, clock: (ms: number) => WallClock): { buckets: ActivityBucket[]; from: number; to: number; place: (ms: number) => number } {
-  const { buckets, indexOf } = bucketsFor(group, range);
-  const from = dayBegins(range.first, clock);
-  const to = dayBegins(addDays(range.last, 1), clock);
+export function bucketedDays(buckets: ActivityBucket[], clock: (ms: number) => WallClock): BucketedRange {
+  if (buckets.length === 0) return { buckets, from: 0, to: 0, place: () => -1 };
+  const starts = buckets.map((bucket) => dayBegins(bucket.first, clock));
+  const from = starts[0];
+  const to = dayBegins(addDays(buckets[buckets.length - 1].last, 1), clock);
   return {
     buckets,
     from,
     to,
     place: (ms) => {
       if (!(ms >= from && ms < to)) return -1;
-      const index = indexOf(clock(Math.floor(ms / QUARTER_HOUR_MS) * QUARTER_HOUR_MS));
-      return index >= 0 && index < buckets.length ? index : -1;
+      let low = 0;
+      let high = starts.length - 1;
+      while (low < high) {
+        const middle = (low + high + 1) >> 1;
+        if (starts[middle] <= ms) low = middle;
+        else high = middle - 1;
+      }
+      return low;
     }
   };
+}
+
+/**
+ * A range of days, in instants, split into its buckets: which bucket a moment falls in, or -1
+ * outside the range. Hours go by the wall clock, each quarter hour of the day looked up once: inside
+ * a quarter hour of UTC, every moment has the same wall-clock hour in every time zone.
+ */
+export function bucketedRange(group: ActivityGroup, range: DaySpan, clock: (ms: number) => WallClock): BucketedRange {
+  const { buckets, indexOf } = bucketsFor(group, range);
+  if (group !== 'hour') return bucketedDays(buckets, clock);
+  const from = dayBegins(range.first, clock);
+  const to = dayBegins(addDays(range.last, 1), clock);
+  const hours: number[] = [];
+  for (let quarter = from; quarter < to; quarter += QUARTER_HOUR_MS) hours.push(indexOf(clock(quarter)));
+  return { buckets, from, to, place: (ms) => (ms >= from && ms < to ? hours[Math.floor((ms - from) / QUARTER_HOUR_MS)] : -1) };
 }

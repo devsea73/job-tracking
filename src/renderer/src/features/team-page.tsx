@@ -62,9 +62,15 @@ function PersonCard({ person, color, rangeName, people, lead }: { person: Activi
           </div>
         ))}
       </dl>
+      {/* Two different counts, each named for what it counts: applications that got one, and interviews by their date. */}
       <p className="mt-1.5 text-[11.5px] text-ink-2">
-        Interviews <span className="font-semibold tabular-nums text-ink">{count(person.interviews)}</span>/{count(person.inRange)} · <span className="font-semibold text-ink">{percent(person.interviewRate)}</span>
-        <span className="text-ink-3"> · {count(person.scheduled)} dated in range</span>
+        <span title={`${person.interviews} of the ${person.inRange} applications made ${rangeName.toLowerCase()} got an interview: Recruiter Screen or later, or one booked`}>
+          Got an interview <span className="font-semibold tabular-nums text-ink">{count(person.interviews)}</span>/{count(person.inRange)} · <span className="font-semibold text-ink">{percent(person.interviewRate)}</span>
+        </span>
+        <span className="text-ink-3" title="Interviews whose date falls in the range, whenever their application was made">
+          {' '}
+          · {count(person.scheduled)} {person.scheduled === 1 ? 'interview' : 'interviews'} dated in range
+        </span>
       </p>
     </li>
   );
@@ -470,7 +476,8 @@ function MemberCard({ member, isAdmin }: { member: TeamMember; isAdmin: boolean 
 
       <div className="mb-3 flex flex-wrap justify-between gap-x-3 gap-y-1 border-y border-border py-2">
         <Figure label="Applications" icon={Send} value={stats.applications.toLocaleString()} />
-        <Figure label="Interviews" icon={CalendarDays} value={stats.interviews.toLocaleString()} />
+        {/* Interviews booked, not applications that got one: one application can have several. */}
+        <Figure label="Interviews booked, every stage (one application can have several)" icon={CalendarDays} value={stats.interviews.toLocaleString()} />
         <Figure label="Technical" icon={CodeXml} value={stats.technical.toLocaleString()} />
         <Figure label="Offers" icon={Trophy} value={stats.offers.toLocaleString()} />
         <Figure label="Success" icon={Percent} value={formatRate(stats.success)} />

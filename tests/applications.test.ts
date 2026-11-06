@@ -135,6 +135,41 @@ describe('interviews', () => {
     const byStage = (await tyler.get('/api/interviews?stage=Final%20Interview')).json;
     expect(byStage.map((item: any) => item.stage)).toEqual(['Final Interview']);
   });
+
+  it('lists past interviews from the latest back, so a page of them is the most recent', async () => {
+    const server = await createTestServer();
+    const { tyler, tylerApp } = await jobWithTwoApplicants(server);
+    for (const day of ['2020-01-01', '2020-02-01', '2020-03-01']) {
+      expect((await tyler.post(`/api/applications/${tylerApp}/interviews`, { stage: 'Recruiter Screen', scheduledAt: `${day}T10:00:00Z`, timezone: 'UTC' })).status).toBe(201);
+    }
+    const before = encodeURIComponent('2025-01-01T00:00:00Z');
+    const days = (items: any[]) => items.map((item) => item.scheduledAt.slice(0, 10));
+    expect(days((await tyler.get(`/api/interviews?to=${before}&order=desc&limit=2`)).json)).toEqual(['2020-03-01', '2020-02-01']);
+    expect(days((await tyler.get(`/api/interviews?to=${before}&limit=2`)).json)).toEqual(['2020-01-01', '2020-02-01']);
+    expect((await tyler.get('/api/interviews?order=sideways')).status).toBe(400);
+  });
+});
+
+describe('my applications by applied date', () => {
+  it('sort by the date they show: the first time I applied, with several of my profiles', async () => {
+    const server = await createTestServer();
+    const { users } = await createUsers(server.app, 'tyler');
+    const tyler = users.tyler;
+    const sqlite = server.ctx.handle.sqlite;
+    server.http.serve('https://company.com/jobs/1', jobPage({ title: 'Engineer', company: 'Stripe' }));
+    server.http.serve('https://other.com/jobs/2', jobPage({ title: 'Designer', company: 'Figma' }));
+    const first: any = await tyler.addJob('https://company.com/jobs/1');
+    const second: any = await tyler.addJob('https://other.com/jobs/2');
+    const backend = (await tyler.post('/api/profiles', { name: 'Backend' })).json as { id: number };
+    const again: any = (await tyler.post(`/api/jobs/${first.jobId}/apply`, { profileId: backend.id })).json;
+    // Stripe first in January and again in March; Figma in February.
+    sqlite.prepare('UPDATE applications SET applied_at = ? WHERE id = ?').run('2026-01-10T10:00:00.000Z', first.applicationId);
+    sqlite.prepare('UPDATE applications SET applied_at = ? WHERE id = ?').run('2026-03-10T10:00:00.000Z', again.applicationId);
+    sqlite.prepare('UPDATE applications SET applied_at = ? WHERE id = ?').run('2026-02-10T10:00:00.000Z', second.applicationId);
+    server.ctx.readCache.invalidate();
+    const listed = (await tyler.get('/api/jobs?scope=mine&sort=applied')).json;
+    expect(listed.items.map((job: any) => job.company)).toEqual(['Figma', 'Stripe']);
+  });
 });
 
 describe('global highlights', () => {

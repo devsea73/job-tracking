@@ -140,7 +140,9 @@ export const interviewQuery = z.object({
   stage: z.enum(INTERVIEW_STAGES).optional(),
   person: z.union([z.literal('all'), queryId]).optional(),
   profileId: queryId.optional(),
-  limit: z.coerce.number().int().min(1).max(5_000).optional()
+  limit: z.coerce.number().int().min(1).max(5_000).optional(),
+  /** Soonest first, or latest first: past interviews are read from the latest. */
+  order: z.enum(['asc', 'desc']).optional()
 });
 
 const queryBoolean = z.enum(['true', 'false']).transform((value) => value === 'true');
@@ -162,7 +164,14 @@ export const jobListQuery = z.object({
   offset: z.coerce.number().int().min(0).optional()
 });
 
-const calendarDate = z.string().refine(isCalendarDate, { message: 'Use a date like 2026-11-05.' });
+/**
+ * A real day, in years the counting can work with: the day after 9999-12-31 has no four-digit
+ * year, and Intl writes years before 1000 without their leading zeros.
+ */
+const calendarDate = z
+  .string()
+  .refine(isCalendarDate, { message: 'Use a date like 2026-11-05.' })
+  .refine((value) => value >= '1970-01-01' && value <= '9998-12-31', { message: 'Use a date between 1970 and 9998.' });
 export const activityQuery = z
   .object({ tz: timezone, today: calendarDate, from: calendarDate, to: calendarDate, group: z.enum(ACTIVITY_GROUPS).optional(), scope: z.enum(['me', 'team']).optional() })
   .refine((query) => query.to >= query.from, 'The range ends before it starts.')

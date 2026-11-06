@@ -227,7 +227,7 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
     const range = query.tz && query.from && query.to ? { first: query.from, last: query.to } : null;
     return cachedJson(reply, `team-applications:${userId}:${request.url}`, () => ({
       range,
-      ...listTeamApplications(ctx.db, userId, query, range && query.tz ? instantsOf(query.tz, range) : null)
+      ...listTeamApplications(ctx.db, userId, query, range && query.tz ? instantsOf(query.tz, range) : null, ctx.readCache)
     }));
   });
 
@@ -349,7 +349,8 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
   app.get('/api/activity', async (request, reply) => {
     const userId = requireSession(request).user.id;
     const query = v.parse(v.activityQuery, request.query);
-    return cachedJson(reply, `activity:${userId}:${request.url}`, () => getActivity(ctx.handle.sqlite, userId, query));
+    // Each answer is the viewer's own, but the counting behind it is shared: see getActivity.
+    return cachedJson(reply, `activity:${userId}:${request.url}`, () => getActivity(ctx.handle.sqlite, userId, query, ctx.readCache));
   });
 
   app.get('/api/dashboard', async (request, reply) => {
