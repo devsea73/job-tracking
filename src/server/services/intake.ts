@@ -14,7 +14,7 @@ import type {
 import { DEFAULT_STATUS } from '../../shared/constants';
 import { unreadableNote } from '../../shared/unreadable';
 import type { AppContext } from '../context';
-import { nowIso } from '../db/client';
+import { nowIso, prepared } from '../db/client';
 import { applications, applicationStatusHistory, jobIdentifiers, jobs, jobUrls } from '../db/schema';
 import { identifyAts, isAggregator, titleFromUrl } from '../dedupe/ats';
 import { deriveJobFacts } from '../dedupe/job-facts';
@@ -168,6 +168,20 @@ function addAliases(ctx: AppContext, jobId: number, evidence: UrlEvidence[]): bo
   return added;
 }
 
+/**
+ * The saved link an application came through: the one the person pasted, or, without one, a link
+ * of this job they picked (the one a notification copied). Either way it must belong to this job.
+ */
+function sourceLink(ctx: AppContext, jobId: number, evidence: UrlEvidence[], chosen: number | null): number | null {
+  const pasted = evidence.find((item) => item.kind === 'original');
+  const row = pasted
+    ? (prepared(ctx.handle.sqlite, 'SELECT id FROM job_urls WHERE normalized_url = ? AND job_id = ?').get(pasted.normalized, jobId) as { id: number } | undefined)
+    : chosen
+      ? (prepared(ctx.handle.sqlite, 'SELECT id FROM job_urls WHERE id = ? AND job_id = ?').get(chosen, jobId) as { id: number } | undefined)
+      : undefined;
+  return row?.id ?? null;
+}
+
 /** Who is applying: a signed-in user, under one of their own profiles. */
 interface ApplyingProfile {
   userId: number;
@@ -184,7 +198,8 @@ function linkProfile(
   evidence: UrlEvidence[],
   jobWasNew: boolean,
   matchedBy: MatchedBy,
-  better: JobFields | null
+  better: JobFields | null,
+  chosenLink: number | null = null
 ): CreateApplicationResponse {
   const db = ctx.db;
   let merged = false;
@@ -223,7 +238,7 @@ function linkProfile(
 
       const application = db
         .insert(applications)
-        .values({ userId: applicant.userId, profileId: applicant.profileId, jobId, memo, status: DEFAULT_STATUS })
+        .values({ userId: applicant.userId, profileId: applicant.profileId, jobId, memo, status: DEFAULT_STATUS, jobUrlId: sourceLink(ctx, jobId, evidence, chosenLink) })
         .returning({ id: applications.id })
         .get();
       db.insert(applicationStatusHistory).values({ applicationId: application.id, oldStatus: null, newStatus: DEFAULT_STATUS }).run();
@@ -462,8 +477,8 @@ export async function checkLink(ctx: AppContext, userId: number, input: string):
   return { status: 'fresh', draftId, job };
 }
 
-/** "I applied too": joins a job already in the shared catalog, no link needed. */
-export function applyToExistingJob(ctx: AppContext, userId: number, jobId: number, profileId: number, memo: string): CreateApplicationResponse {
+/** "I applied too": joins a job already in the shared catalog, no link needed. A notification names the link it copied. */
+export function applyToExistingJob(ctx: AppContext, userId: number, jobId: number, profileId: number, memo: string, urlId: number | null = null): CreateApplicationResponse {
   const profile = requireOwnActiveProfile(ctx.db, userId, profileId);
-  return linkProfile(ctx, { userId, profileId: profile.id, profileName: profile.name }, jobId, memo.trim(), [], false, 'user_confirmed', null);
+  return linkProfile(ctx, { userId, profileId: profile.id, profileName: profile.name }, jobId, memo.trim(), [], false, 'user_confirmed', null, urlId);
 }

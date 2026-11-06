@@ -54,6 +54,7 @@ const connection = new Connection({
   },
   onSessionEnded() {
     storeToken(null);
+    notifications.clear();
     broadcastState();
   }
 });
@@ -70,7 +71,8 @@ const notifications = new NotificationCenter({
       if (window?.webContents.isLoading()) window.webContents.once('did-finish-load', () => setTimeout(send, 400));
       else send();
     }
-  }
+  },
+  copy: (url) => copyLink(url)
 });
 
 const autoBackup = new AutoBackup({
@@ -354,6 +356,8 @@ function registerIpc(): void {
       storeToken(token);
       broadcastState();
       if (token) scheduleBackupCheck();
+      // Signed out, or in as someone else: the last person's cards are not for them.
+      notifications.clear();
     });
     return result;
   });

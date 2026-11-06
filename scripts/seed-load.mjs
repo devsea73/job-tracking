@@ -98,7 +98,7 @@ export function seedLoadData(sqlite, { passwordHash, jobs = 10_000, users = 10, 
   );
   const insertUrl = sqlite.prepare('INSERT INTO job_urls (job_id, original_url, normalized_url, source_platform, external_job_id, kind) VALUES (?, ?, ?, ?, ?, ?)');
   const insertIdentifier = sqlite.prepare('INSERT INTO job_identifiers (job_id, provider, external_id) VALUES (?, ?, ?)');
-  const insertApplication = sqlite.prepare('INSERT INTO applications (user_id, profile_id, job_id, status, memo, applied_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+  const insertApplication = sqlite.prepare('INSERT INTO applications (user_id, profile_id, job_id, status, memo, applied_at, updated_at, job_url_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
   const insertHistory = sqlite.prepare('INSERT INTO application_status_history (application_id, old_status, new_status, changed_at) VALUES (?, ?, ?, ?)');
   const insertInterview = sqlite.prepare('INSERT INTO interviews (application_id, stage, scheduled_at, timezone, note) VALUES (?, ?, ?, ?, ?)');
 
@@ -145,12 +145,12 @@ export function seedLoadData(sqlite, { passwordHash, jobs = 10_000, users = 10, 
       );
       counts.jobs += 1;
       const normalized = posting.url.replace(/^https:\/\//, 'https://');
-      insertUrl.run(jobId, posting.url, normalized, posting.provider ?? 'company', posting.externalId, 'original');
+      const links = [Number(insertUrl.run(jobId, posting.url, normalized, posting.provider ?? 'company', posting.externalId, 'original').lastInsertRowid)];
       counts.urls += 1;
       if (posting.provider) insertIdentifier.run(jobId, posting.provider, posting.externalId);
       if (index % 5 === 0) {
         const alias = `https://builtin.com/job/data-engineer/${2_000_000 + index}`;
-        insertUrl.run(jobId, alias, alias, 'builtin', String(2_000_000 + index), 'original');
+        links.push(Number(insertUrl.run(jobId, alias, alias, 'builtin', String(2_000_000 + index), 'original').lastInsertRowid));
         counts.urls += 1;
       }
 
@@ -163,8 +163,10 @@ export function seedLoadData(sqlite, { passwordHash, jobs = 10_000, users = 10, 
         const path = pickPath();
         const applied = added + random.int(5 * DAY);
         const steps = path.map((_, step) => applied + step * (2 + random.int(9)) * DAY);
+        // Each came with one of the job's links, taking turns; now and then someone joined without one.
+        const link = (index + a) % 10 === 9 ? null : links[a % links.length];
         const applicationId = Number(
-          insertApplication.run(userId, profileId, jobId, path[path.length - 1], random.next() < 0.6 ? random.pick(MEMOS) : '', iso(applied), iso(steps[steps.length - 1])).lastInsertRowid
+          insertApplication.run(userId, profileId, jobId, path[path.length - 1], random.next() < 0.6 ? random.pick(MEMOS) : '', iso(applied), iso(steps[steps.length - 1]), link).lastInsertRowid
         );
         counts.applications += 1;
         path.forEach((status, step) => {

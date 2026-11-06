@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react';
-import { BarChart3, CalendarClock, Filter, Inbox, Send, UserRound } from 'lucide-react';
-import type { ActivityPerson, ActivityResponse, JobListItem } from '@shared/api';
+import { useCallback, useMemo, useState } from 'react';
+import { CalendarClock, Filter, Inbox, Send, UserRound } from 'lucide-react';
+import type { ActivityPerson, ActivityResponse, JobListItem, TrendMetric } from '@shared/api';
 import { AvatarStack, StatusBadge } from '@/components/job-bits';
 import { JobTags } from '@/components/job-tags';
 import { STAGE_ICONS } from '@/components/symbols';
@@ -9,51 +9,42 @@ import { EmptyState, Notice, Skeleton } from '@/components/ui/misc';
 import { errorMessage, useActivity, useDashboard } from '@/lib/api';
 import { formatDateTime, formatShortAgo } from '@/lib/utils';
 import type { Page } from '../App';
-import {
-  ColumnChart,
-  count,
-  Delta,
-  FilterBar,
-  fullDay,
-  Funnel,
-  Legend,
-  monthYear,
-  Panel,
-  percent,
-  pickSeries,
-  ProfileTable,
-  Refreshing,
-  SeriesTable,
-  shapeValues,
-  spanLabel,
-  TableSwitch,
-  Tile,
-  Toggle,
-  toLocal,
-  toSeries,
-  useFilters,
-  type Series
-} from './analytics';
+import { bucketStart, count, Delta, FilterBar, fullDay, Funnel, monthYear, Panel, percent, ProfileTable, Refreshing, SERIES_SLOTS, seriesColor, spanLabel, Tile, Toggle, toLocal, useFilters } from './analytics';
+import { entityLines, previousLine, shapeTrend, TrendCard, type TrendView } from './trend-card';
 
 /**
- * My own numbers, today first: how much I applied today, this week and this month, over time,
- * how far it got, and how each of my profiles is doing. Comparing with others is the Team page's job.
+ * My own numbers, today first: how much I applied today, this week and this month; the measures
+ * over time against the period before, or by profile; how far it got; and how each of my profiles
+ * is doing. Comparing with others is the Team page's job.
  */
 
-type Metric = 'applications' | 'interviews';
+type Lines = 'previous' | 'profiles';
 
-/** My applications per period, all together or split by profile; or my interviews by the day they take place. */
-function mySeries(data: ActivityResponse, me: ActivityPerson, metric: Metric, byProfile: boolean, now: Date): Series[] {
-  const shape = (raw: number[]) => shapeValues(raw, data.buckets, data.group, now);
-  if (metric === 'interviews') return [{ key: 'interviews', name: 'Interviews', color: 'var(--series-1)', total: me.scheduled, values: shape(me.interviewSeries) }];
-  if (!byProfile || me.profiles.length < 2) return [{ key: 'applications', name: 'Applications', color: 'var(--series-1)', total: me.inRange, values: shape(me.series) }];
-  const used = me.profiles.filter((profile) => profile.inRange > 0);
-  return toSeries(
-    pickSeries(used, (profile) => profile.id, () => false),
-    (profile) => ({ id: profile.id, name: profile.name, total: profile.inRange, raw: profile.series }),
-    shape,
-    (rest) => `${rest} other profiles`
+/** My measures as lines: mine against the period before, dashed, or one line per profile. */
+function useMyTrends(data: ActivityResponse | undefined, me: ActivityPerson | undefined, lines: Lines, now: Date) {
+  const build = useCallback(
+    (metric: TrendMetric, cumulative: boolean): TrendView => {
+      if (!data || !me) return { series: [] };
+      if (lines === 'profiles' && me.profiles.length > 1) {
+        return {
+          series: entityLines(me.profiles, (profile) => ({ id: profile.id, name: profile.name, raw: profile.trends[metric] }), data, metric, cumulative, now, (rest) => `${rest} other profiles`),
+          footer: { label: 'All profiles', values: shapeTrend(me.trends[metric], data, metric, cumulative, now) },
+          ranked: true
+        };
+      }
+      return {
+        series: [{ key: 'current', name: 'This period', color: seriesColor(0), total: null, values: shapeTrend(me.trends[metric], data, metric, cumulative, now) }, previousLine(me.previousTrends[metric], data, metric, cumulative)],
+        footer: null,
+        marks: new Map([
+          ['current', spanLabel(data.periods.range)],
+          ['previous', spanLabel(data.previous.range)]
+        ])
+      };
+    },
+    [data, me, lines, now]
   );
+  const totals = useCallback((metric: TrendMetric) => me?.trendTotals[metric] ?? { current: null, previous: null }, [me]);
+  return { build, totals };
 }
 
 function JobLine({ job, onOpen }: { job: JobListItem; onOpen: (id: number) => void }) {
@@ -93,23 +84,18 @@ export function DashboardPage({ onOpenJob, onNavigate, onAddJob }: { onOpenJob: 
   const dashboard = useDashboard();
   const data = activity.data;
   const me = data?.people.find((person) => person.isMe);
-
-  const [metric, setMetric] = useState<Metric>('applications');
-  const [byProfile, setByProfile] = useState(false);
-  const [view, setView] = useState<'chart' | 'table'>('chart');
-  const series = useMemo(() => (data && me ? mySeries(data, me, metric, byProfile, now) : []), [data, me, metric, byProfile, now]);
+  const [lines, setLines] = useState<Lines>('previous');
+  const byProfile = lines === 'profiles' && (me?.profiles.length ?? 0) > 1;
+  const trends = useMyTrends(data, me, lines, now);
 
   // An average over the periods that have begun: the ones still to come are not zeros.
-  const started = series[0]?.values.filter((value) => value !== null).length ?? 0;
-  const shownTotal = series.reduce((sum, item) => sum + item.total, 0);
-  const average = started > 0 ? shownTotal / started : null;
-  const busiest = useMemo(() => {
-    if (!data || series.length === 0) return null;
-    const totals = data.buckets.map((_, index) => series.reduce((sum, item) => sum + (item.values[index] ?? 0), 0));
-    const best = Math.max(...totals);
-    return best > 0 ? { value: best, bucket: data.buckets[totals.indexOf(best)] } : null;
-  }, [data, series]);
-  const profileColors = useMemo(() => new Map(series.map((item) => [item.key, item.color])), [series]);
+  const started = data ? data.buckets.filter((bucket) => bucketStart(bucket, data.group) <= now).length : 0;
+  const average = me && started > 0 ? me.series.slice(0, started).reduce((sum, value) => sum + value, 0) / started : null;
+  // Each profile keeps the color of its line, by which profile it is.
+  const profileColors = useMemo(
+    () => new Map([...(me?.profiles ?? [])].sort((a, b) => a.id - b.id).map((profile, index) => [profile.id, index < SERIES_SLOTS ? seriesColor(index) : undefined])),
+    [me]
+  );
 
   return (
     <div className="h-full overflow-y-auto px-5 pb-8 pt-4">
@@ -135,10 +121,10 @@ export function DashboardPage({ onOpenJob, onNavigate, onAddJob }: { onOpenJob: 
           {filters.rangeIsPeriod ? (
             <Tile label="All time" value={me ? count(me.allTime) : undefined} detail="Every application" />
           ) : (
-            <Tile label={rangeName} value={me ? count(me.inRange) : undefined} emphasis detail={label} extra={average !== null && metric === 'applications' ? `${average.toFixed(1)} per ${group} on average` : undefined} />
+            <Tile label={rangeName} value={me ? count(me.inRange) : undefined} emphasis detail={label} extra={average !== null ? `${average.toFixed(1)} per ${group} on average` : undefined} />
           )}
           <Tile
-            label={filters.preset === 'today' ? 'Interviews today' : `Interviews · ${rangeName}`}
+            label={filters.preset === 'today' ? 'Interviews scheduled today' : `Interviews scheduled · ${rangeName}`}
             value={me ? count(filters.preset === 'today' ? me.scheduledToday : me.scheduled) : undefined}
             detail={me ? (filters.preset === 'today' ? `${count(me.scheduled)} in the range` : `${count(me.scheduledToday)} today`) : undefined}
             extra="By the day they take place"
@@ -151,71 +137,40 @@ export function DashboardPage({ onOpenJob, onNavigate, onAddJob }: { onOpenJob: 
           />
         </div>
 
-        <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-          <Panel
-            title={`My ${metric === 'applications' ? 'applications' : 'interviews'} per ${group} · ${label}`}
-            icon={BarChart3}
-            aside={
-              <>
+        <div className="mt-3">
+          {data && me ? (
+            <TrendCard
+              data={data}
+              filters={filters}
+              who="Me"
+              totals={trends.totals}
+              build={trends.build}
+              controls={
                 <Toggle
-                  label="Count"
-                  value={metric}
-                  onChange={setMetric}
+                  label="Lines"
+                  value={byProfile ? 'profiles' : 'previous'}
+                  onChange={setLines}
                   options={[
-                    { value: 'applications', label: 'Applications' },
-                    { value: 'interviews', label: 'Interviews' }
+                    { value: 'previous', label: 'vs previous period' },
+                    { value: 'profiles', label: 'By profile', disabled: me.profiles.length < 2, title: me.profiles.length < 2 ? 'With two profiles or more' : undefined }
                   ]}
                 />
-                <Toggle
-                  label="Split"
-                  value={byProfile && metric === 'applications' ? 'profile' : 'all'}
-                  onChange={(value) => setByProfile(value === 'profile')}
-                  options={[
-                    { value: 'all', label: 'All' },
-                    { value: 'profile', label: 'By profile', disabled: metric !== 'applications' || (me?.profiles.length ?? 0) < 2, title: metric !== 'applications' ? 'Profiles split applications' : undefined }
-                  ]}
-                />
-                <TableSwitch view={view} onChange={setView} />
-              </>
-            }
-          >
-            <div className="px-3 pb-3 pt-2">
-              {!data ? (
-                <Skeleton className="h-[240px] w-full" />
-              ) : view === 'table' ? (
-                <SeriesTable buckets={data.buckets} group={data.group} series={series} />
-              ) : (
-                <>
-                  <ColumnChart buckets={data.buckets} group={data.group} series={series} description={`My ${metric} per ${group}`} />
-                  <Legend series={series} mark="block" />
-                  <p className="mt-1.5 flex flex-wrap gap-x-4 text-[12px] text-ink-3" data-chart-summary>
-                    <span>
-                      Total <span className="font-semibold tabular-nums text-ink">{count(shownTotal)}</span>
-                    </span>
-                    <span>
-                      Average <span className="font-semibold tabular-nums text-ink">{average === null ? '–' : average.toFixed(1)}</span> per {group} so far
-                    </span>
-                    {busiest ? (
-                      <span>
-                        Busiest <span className="font-semibold tabular-nums text-ink">{count(busiest.value)}</span> · {data.group === 'hour' ? `${toLocal(busiest.bucket.first, Number(busiest.bucket.key.slice(11, 13))).toLocaleTimeString(undefined, { hour: 'numeric' })}` : spanLabel(busiest.bucket)}
-                      </span>
-                    ) : null}
-                  </p>
-                </>
-              )}
-            </div>
-          </Panel>
+              }
+            />
+          ) : (
+            <Skeleton className="h-[420px] w-full" />
+          )}
+        </div>
 
+        <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
           <Panel title={`How far my applications got · ${rangeName}`} icon={Filter}>
             <div className="px-3.5 py-2.5">{me ? <Funnel counts={me} /> : <Skeleton className="h-36 w-full" />}</div>
           </Panel>
-        </div>
 
-        <div className="mt-3">
           <Panel title={`My profiles · ${rangeName} · ${label}`} icon={UserRound}>
             <div className="px-3.5 py-2">
               {me ? (
-                <ProfileTable rows={me.profiles.map((profile) => ({ profile, isMine: true, color: byProfile && metric === 'applications' ? profileColors.get(String(profile.id)) : undefined }))} showOwner={false} rangeName={rangeName} />
+                <ProfileTable rows={me.profiles.map((profile) => ({ profile, isMine: true, color: byProfile ? profileColors.get(profile.id) : undefined }))} showOwner={false} rangeName={rangeName} />
               ) : (
                 <Skeleton className="h-20 w-full" />
               )}

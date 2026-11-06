@@ -128,13 +128,12 @@ describe('applying activity', () => {
     expect(after.reached).toEqual({ screen: 2, technical: 1, final: 0, offer: 0, rejected: 1 });
   });
 
-  it('counts interviews by the day they take place, per bucket', async () => {
+  it('counts interviews by the day they take place', async () => {
     const { users, read } = await setUp();
     // John's screen is booked for Tuesday 10 November, 15:00 UTC.
     const nextWeek = await read(users.andy, { from: '2026-11-09', to: '2026-11-15' });
     const john = byName(nextWeek).john;
     expect(john).toMatchObject({ scheduled: 1, scheduledToday: 0, inRange: 0 });
-    expect(john.interviewSeries).toEqual([0, 1, 0, 0, 0, 0, 0]);
     expect(nextWeek.team.scheduled).toBe(1);
     // Asked on the day itself, it is today's interview.
     expect(byName(await read(users.andy, { from: '2026-11-10', to: '2026-11-10', today: '2026-11-10' })).john).toMatchObject({ scheduled: 1, scheduledToday: 1 });

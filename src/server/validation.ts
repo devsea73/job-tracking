@@ -9,6 +9,7 @@ import {
   USERNAME_PATTERN
 } from '../shared/constants';
 import { ACTIVITY_GROUPS, daysBetween, groupFits, isCalendarDate, MAX_RANGE_DAYS } from '../shared/calendar';
+import { TEAM_APPLICATION_SORTS } from '../shared/api';
 import { badRequest } from './errors';
 
 /** Validates request data, reporting the first problem in words a person can act on. */
@@ -84,7 +85,7 @@ export const createApplicationBody = z.object({
 
 export const checkLinkBody = z.object({ url: z.string().trim().min(1, 'Job URL is required.').max(4_000, 'That link is too long.') });
 
-export const applyToJobBody = z.object({ profileId, memo: memo.optional() });
+export const applyToJobBody = z.object({ profileId, memo: memo.optional(), urlId: z.number().int().positive().optional() });
 
 const profileName = z.string().trim().min(1, 'Give the profile a name.').max(PROFILE_NAME_MAX, `Use at most ${PROFILE_NAME_MAX} characters.`);
 
@@ -161,6 +162,22 @@ export const activityQuery = z
   .refine((query) => query.to >= query.from, 'The range ends before it starts.')
   .refine((query) => daysBetween(query.from, query.to) < MAX_RANGE_DAYS, `Choose a range of at most ${MAX_RANGE_DAYS} days.`)
   .refine((query) => !query.group || groupFits(query.group, query.from, query.to), 'Hours can only be shown for a single day.');
+
+/** A range of days needs its time zone, and both ends; without any of them, all time. */
+export const teamApplicationsQuery = z
+  .object({
+    tz: timezone.optional(),
+    from: calendarDate.optional(),
+    to: calendarDate.optional(),
+    person: queryId.optional(),
+    status: z.enum(APPLICATION_STATUSES).optional(),
+    q: z.string().trim().max(200).optional(),
+    sort: z.enum(TEAM_APPLICATION_SORTS).optional(),
+    limit: z.coerce.number().int().min(1).max(500).optional(),
+    offset: z.coerce.number().int().min(0).optional()
+  })
+  .refine((query) => [query.tz, query.from, query.to].every((value) => value === undefined) || [query.tz, query.from, query.to].every((value) => value !== undefined), 'Give the time zone and both days of the range, or none of them.')
+  .refine((query) => !query.from || !query.to || query.to >= query.from, 'The range ends before it starts.');
 
 export const briefQuery = z.object({ application: z.coerce.number().int().positive().optional() });
 

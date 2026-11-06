@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react';
-import { ArrowDown, CalendarDays, CodeXml, Filter, ImageOff, LineChart as LineChartIcon, Percent, Phone, Send, Trophy, User, UserRound, UsersRound, type LucideIcon } from 'lucide-react';
+import { useCallback, useMemo, useState } from 'react';
+import { ArrowDown, CalendarDays, CodeXml, Filter, ImageOff, Percent, Phone, Send, Trophy, User, UserRound, UsersRound, type LucideIcon } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
-import type { ActivityPerson, ActivityResponse, CurrentUser, TeamMember } from '@shared/api';
+import type { ActivityPerson, ActivityResponse, CurrentUser, TeamMember, TrendMetric } from '@shared/api';
 import type { PassRate, ProcessStats } from '@shared/pipeline';
 import { Avatar, userLabel, userName } from '@/components/job-bits';
 import { Button } from '@/components/ui/button';
@@ -10,36 +10,14 @@ import { ANY, Select } from '@/components/ui/select';
 import { useToast } from '@/components/ui/toast';
 import { call, errorMessage, useActivity, useTeam } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import {
-  count,
-  Delta,
-  FilterBar,
-  fullDay,
-  Legend,
-  LineChart,
-  monthYear,
-  OTHERS_COLOR,
-  Panel,
-  peopleSeries,
-  percent,
-  ProfileTable,
-  Refreshing,
-  SeriesTable,
-  shapeValues,
-  share,
-  spanLabel,
-  TableSwitch,
-  Tile,
-  Toggle,
-  toLocal,
-  toSeries,
-  useFilters,
-  type Filters
-} from './analytics';
+import { count, Delta, FilterBar, fullDay, monthYear, OTHERS_COLOR, Panel, percent, ProfileTable, Refreshing, SERIES_SLOTS, seriesColor, share, spanLabel, Tile, toLocal, useFilters, type Filters } from './analytics';
+import { TeamApplications } from './team-applications';
+import { entityLines, shapeTrend, TrendCard, type TrendView } from './trend-card';
 
 /**
- * Everyone side by side, today unless another range is chosen: who applied how much, over time,
- * how far it got, who gets interviews, and which profiles work. The all-time process follows below.
+ * Everyone side by side, today unless another range is chosen: the measures as lines, one per
+ * person, the same for everyone who looks; who applied most; who gets interviews; how far it got;
+ * and which profiles work. Everyone's applications and the all-time process follow below.
  */
 
 // ---- Comparing people over the range ------------------------------------------------------
@@ -237,34 +215,30 @@ function PipelineTable({ data }: { data: ActivityResponse }) {
   );
 }
 
-type Metric = 'applications' | 'interviews';
+/**
+ * Everyone's lines on one chart, the same chart for everyone who opens it: each person keeps one
+ * color, by who they are, and nobody's line is drawn differently. Only the legend marks "(you)".
+ */
+function useTeamTrends(data: ActivityResponse, now: Date) {
+  const build = useCallback(
+    (metric: TrendMetric, cumulative: boolean): TrendView => ({
+      series: entityLines(data.people, (person) => ({ id: person.user.id, name: userName(person.user), raw: person.trends[metric] }), data, metric, cumulative, now, (rest) => `${rest} others`),
+      footer: { label: 'Team', values: shapeTrend(data.teamTrends[metric], data, metric, cumulative, now) },
+      ranked: true,
+      marks: new Map(data.people.filter((person) => person.isMe).map((person) => [String(person.user.id), '(you)']))
+    }),
+    [data, now]
+  );
+  const totals = useCallback((metric: TrendMetric) => data.teamTrendTotals[metric], [data]);
+  return { build, totals };
+}
 
 function TeamAnalytics({ filters, data }: { filters: Filters; data: ActivityResponse }) {
-  const { rangeName, label, group, now } = filters;
-  const [metric, setMetric] = useState<Metric>('applications');
-  const [cumulativeChoice, setCumulativeChoice] = useState<{ key: string; value: boolean } | null>(null);
-  const [view, setView] = useState<'chart' | 'table'>('chart');
-  // Left alone, one day shows the running total: who is ahead, hour by hour. A choice lasts until the range changes.
-  const cumulative = cumulativeChoice?.key === filters.rangeKey ? cumulativeChoice.value : group === 'hour';
-
-  const picked = useMemo(() => peopleSeries(data.people), [data]);
-  const ranked = picked.shown.concat(picked.rest).sort((a, b) => a.rank - b.rank);
-  const series = useMemo(
-    () =>
-      toSeries(
-        picked,
-        (person) => ({
-          id: person.user.id,
-          name: userName(person.user),
-          emphasis: person.isMe,
-          total: metric === 'applications' ? person.inRange : person.scheduled,
-          raw: metric === 'applications' ? person.series : person.interviewSeries
-        }),
-        (raw) => shapeValues(raw, data.buckets, data.group, now, cumulative),
-        (rest) => `${rest} others`
-      ),
-    [picked, metric, data, now, cumulative]
-  );
+  const { rangeName, label, now } = filters;
+  const trends = useTeamTrends(data, now);
+  const ranked = [...data.people].sort((a, b) => a.rank - b.rank);
+  // The same color as each person's line, by who they are.
+  const colors = new Map([...data.people].sort((a, b) => a.user.id - b.user.id).map((person, index) => [person.user.id, index < SERIES_SLOTS ? seriesColor(index) : OTHERS_COLOR]));
 
   const leadOf = (person: ActivityPerson): string => {
     if (person.inRange === 0) return '';
@@ -293,7 +267,7 @@ function TeamAnalytics({ filters, data }: { filters: Filters; data: ActivityResp
           <Tile label={rangeName} value={count(data.team.inRange)} emphasis detail={label} extra={`${(data.team.inRange / Math.max(1, data.people.length)).toFixed(1)} per person`} />
         )}
         <Tile
-          label={filters.preset === 'today' ? 'Interviews today' : `Interviews · ${rangeName}`}
+          label={filters.preset === 'today' ? 'Interviews scheduled today' : `Interviews scheduled · ${rangeName}`}
           value={count(filters.preset === 'today' ? data.team.scheduledToday : data.team.scheduled)}
           detail="By the day they take place"
           extra={`Offers ${count(data.team.reached.offer)} from ${rangeName.toLowerCase()}`}
@@ -302,55 +276,17 @@ function TeamAnalytics({ filters, data }: { filters: Filters; data: ActivityResp
       </div>
 
       <div className="mt-3">
+        <TrendCard data={data} filters={filters} who="Everyone" totals={trends.totals} build={trends.build} racing />
+      </div>
+
+      <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <Panel title={`Leaderboard · ${rangeName} · ${label}`} icon={Trophy}>
           <div className="p-2.5">
             <ol className="grid grid-cols-[repeat(auto-fill,minmax(250px,1fr))] gap-2" aria-label="People by applications">
               {data.people.map((person) => (
-                <PersonCard key={person.user.id} person={person} color={picked.colors.get(person.user.id) ?? OTHERS_COLOR} rangeName={rangeName} people={data.people.length} lead={leadOf(person)} />
+                <PersonCard key={person.user.id} person={person} color={colors.get(person.user.id) ?? OTHERS_COLOR} rangeName={rangeName} people={data.people.length} lead={leadOf(person)} />
               ))}
             </ol>
-          </div>
-        </Panel>
-      </div>
-
-      <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-        <Panel
-          title={`${metric === 'applications' ? 'Applications' : 'Interviews'} per ${group}${cumulative ? ', running total' : ''} · ${label}`}
-          icon={LineChartIcon}
-          aside={
-            <>
-              <Toggle
-                label="Count"
-                value={metric}
-                onChange={setMetric}
-                options={[
-                  { value: 'applications', label: 'Applications' },
-                  { value: 'interviews', label: 'Interviews' }
-                ]}
-              />
-              <Toggle
-                label="Show"
-                value={cumulative ? 'total' : 'each'}
-                onChange={(value) => setCumulativeChoice({ key: filters.rangeKey, value: value === 'total' })}
-                options={[
-                  { value: 'each', label: `Per ${group}` },
-                  { value: 'total', label: 'Running total' }
-                ]}
-              />
-              <TableSwitch view={view} onChange={setView} />
-            </>
-          }
-        >
-          <div className="px-3 pb-3 pt-2">
-            {view === 'table' ? (
-              <SeriesTable buckets={data.buckets} group={data.group} series={series} />
-            ) : (
-              <>
-                <LineChart buckets={data.buckets} group={data.group} series={series} description={`${metric === 'applications' ? 'Applications' : 'Interviews'} per ${group}${cumulative ? ', running total' : ''}, by person`} />
-                <Legend series={series} mark="line" />
-              </>
-            )}
-            {metric === 'interviews' ? <p className="mt-1.5 text-[11.5px] text-ink-3">Interviews by the day they take place, whenever the application was made.</p> : null}
           </div>
         </Panel>
 
@@ -502,7 +438,7 @@ function MemberCard({ member, isAdmin }: { member: TeamMember; isAdmin: boolean 
 
 // ---- The page ------------------------------------------------------------------------------
 
-export function TeamPage({ user }: { user: CurrentUser }) {
+export function TeamPage({ user, onOpenJob }: { user: CurrentUser; onOpenJob: (jobId: number) => void }) {
   const filters = useFilters('jobTracker.teamRange');
   const { range, group } = filters;
   const activity = useActivity({ tz: filters.tz, today: filters.today, from: range.first, to: range.last, group, scope: 'team' });
@@ -530,6 +466,10 @@ export function TeamPage({ user }: { user: CurrentUser }) {
           <Skeleton className="h-64" />
         </div>
       ) : null}
+
+      <div className="mt-3">
+        <TeamApplications filters={filters} onOpenJob={onOpenJob} />
+      </div>
 
       <h2 className="mb-2 mt-5 text-[14px] font-semibold">Process by person · all time</h2>
       {team.isError ? (

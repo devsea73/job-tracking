@@ -220,6 +220,7 @@ function ApplicationCard({ application }: { application: ApplicationDetail }) {
   const [withdrawing, setWithdrawing] = useState(false);
   const withdraw = useDeleteApplication();
   const toast = useToast();
+  const copy = useCopyLink();
   const timeline = timelineOf(application);
   return (
     <article className="rounded-lg border border-border p-3">
@@ -227,8 +228,23 @@ function ApplicationCard({ application }: { application: ApplicationDetail }) {
         <Avatar subject={application.profile} label={applicationLabel(application)} size="md" ring={false} />
         <div className="min-w-0 flex-1">
           <p className="truncate font-semibold leading-tight">{application.profile.name}</p>
-          <p className="truncate text-[12px] text-ink-3" data-applied-at>
-            {application.isMine ? '' : `${userName(application.owner)} · `}Applied {formatDateTime(application.appliedAt)}
+          <p className="flex min-w-0 items-center gap-1 text-[12px] text-ink-3">
+            <span className="truncate" data-applied-at>
+              {application.isMine ? '' : `${userName(application.owner)} · `}Applied {formatDateTime(application.appliedAt)}
+            </span>
+            {application.link ? (
+              <button
+                type="button"
+                title={`Applied with this link:\n${application.link.url}\nClick to copy`}
+                aria-label={`Copy the link this application was added with, ${application.link.url}`}
+                data-application-link={application.link.url}
+                onClick={() => copy(application.link?.url ?? '')}
+                className="inline-flex shrink-0 items-center gap-0.5 rounded px-1 hover:bg-surface-2 hover:text-ink"
+              >
+                <Link2 className="size-3" aria-hidden />
+                {linkHost(application.link.url)}
+              </button>
+            ) : null}
           </p>
         </div>
         <ProcessSteps status={application.status} furthest={application.furthestStage} />
@@ -395,7 +411,8 @@ export function JobDetailSheet({ jobId, user, onClose }: { jobId: number | null;
   const toast = useToast();
   const remove = useDeleteJob();
   const copyLink = useCopyLink();
-  const primaryUrl = job?.urls.find((url) => url.kind === 'original')?.originalUrl ?? job?.urls[0]?.originalUrl;
+  // The link I applied with, when I did; otherwise the one the job was first added with.
+  const primaryUrl = job?.applications.find((application) => application.isMine && application.link)?.link?.url ?? job?.urls.find((url) => url.kind === 'original')?.originalUrl ?? job?.urls[0]?.originalUrl;
   const salary = job ? formatSalary(job.facts) : null;
   // With several of my profiles on this job, the first time I applied.
   const myAppliedAt = job?.applications.filter((application) => application.isMine).map((application) => application.appliedAt).sort()[0];

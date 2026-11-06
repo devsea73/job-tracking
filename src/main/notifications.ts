@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { app, BrowserWindow, clipboard, screen } from 'electron';
+import { app, BrowserWindow, screen } from 'electron';
 import type { CreateApplicationResponse, JobBrief, MyProfilesResponse, ServerEvent } from '../shared/api';
 import { IPC, type ApiCallResult, type NoticeActionResult, type NoticePayload, type NotificationSettings } from '../shared/bridge';
 
@@ -11,6 +11,8 @@ interface Options {
   signedIn: () => boolean;
   /** Brings the main window up, on a job when one is given. */
   open: (jobId?: number) => void;
+  /** Puts a link on the clipboard, with the same checks as every other link the app copies. */
+  copy: (url: string) => Promise<boolean>;
 }
 
 const WIDTH = 384;
@@ -27,27 +29,50 @@ export class NotificationCenter {
   private ready = false;
   private readonly queue: JobBrief[] = [];
   private current: NoticePayload | null = null;
+  /** The card whose Apply was pressed: it stays up to say how that went, whatever else happens. */
+  private applyingId: number | null = null;
   private nextId = 1;
   private height = 180;
 
   constructor(private readonly options: Options) {}
 
   async handleEvent(event: ServerEvent): Promise<void> {
+    // A different database: whatever is waiting may not exist in it.
+    if (event.type === 'database_restored') return this.clear();
     if (event.type !== 'application_added' || !event.jobId) return;
     if (!this.options.settings().enabled || !this.options.signedIn()) return;
-    if (this.isKnown(event.jobId)) return;
     const query = event.applicationId ? `?application=${event.applicationId}` : '';
     const result = await this.options.api<JobBrief>('GET', `/api/jobs/${event.jobId}/brief${query}`);
     if (!result.ok || !result.data) return;
     const brief = result.data;
-    // Only jobs none of my profiles has applied to, found by someone else.
-    if (brief.addedByMe || brief.alreadyApplied || this.isKnown(brief.jobId)) return;
+    if (brief.viewerIsAdmin) return;
+    // I applied, here or in the main window: nothing about this job is news to me any more.
+    if (brief.addedByMe || brief.alreadyApplied) return this.forget(brief.jobId);
+    // Only jobs none of my profiles has applied to, found by someone else, each offered once.
+    if (this.isKnown(brief.jobId)) return;
     this.queue.push(brief);
     if (!this.current) this.showNext();
   }
 
   private isKnown(jobId: number): boolean {
     return this.queue.some((brief) => brief.jobId === jobId) || (this.current?.kind === 'job' && this.current.brief.jobId === jobId);
+  }
+
+  /** Takes a job out of the queue, and off the screen unless its card is busy applying. */
+  private forget(jobId: number): void {
+    for (let index = this.queue.length - 1; index >= 0; index -= 1) if (this.queue[index].jobId === jobId) this.queue.splice(index, 1);
+    const showing = this.current;
+    if (showing?.kind === 'job' && showing.brief.jobId === jobId && this.applyingId !== showing.id) this.finish();
+  }
+
+  /** This card is done: it goes, and the next one follows. */
+  private finish(): void {
+    this.current = null;
+    this.applyingId = null;
+    this.window?.hide();
+    setTimeout(() => {
+      if (!this.current) this.showNext();
+    }, 300);
   }
 
   private showNext(): void {
@@ -144,37 +169,41 @@ export class NotificationCenter {
   async act(id: number, action: string): Promise<NoticeActionResult> {
     const notice = this.current;
     if (!notice || notice.id !== id) return { ok: false, message: 'This notification has already closed.' };
-    if (action === 'apply' && notice.kind === 'job') return this.apply(notice.brief);
-    if (action === 'open') this.options.open(notice.kind === 'job' ? notice.brief.jobId : undefined);
-    if (action === 'link') {
-      if (notice.kind === 'job' && notice.brief.url) await clipboard.writeText(notice.brief.url);
-      return { ok: true, copied: true };
+    if (action === 'apply' && notice.kind === 'job') {
+      // Pressed twice: the first press is still on its way.
+      if (this.applyingId === id) return { ok: false, message: 'Already applying.' };
+      this.applyingId = id;
+      return this.apply(notice.brief);
     }
+    if (action === 'link') {
+      const copied = notice.kind === 'job' && !!notice.brief.url && (await this.options.copy(notice.brief.url));
+      return copied ? { ok: true, copied: true } : { ok: false, message: 'This job has no link to copy.' };
+    }
+    if (action === 'open') this.options.open(notice.kind === 'job' ? notice.brief.jobId : undefined);
     // Ignore, timeout, done, open: this card is finished, and the next one follows.
-    this.current = null;
-    this.window?.hide();
-    setTimeout(() => this.showNext(), 300);
+    this.finish();
     return { ok: true };
   }
 
-  /** Copies the link, then applies with the chosen profile, or the one used last. */
+  /** Copies the link, then applies with the chosen profile, or the one used last, keeping that link on the application. */
   private async apply(brief: JobBrief): Promise<NoticeActionResult> {
-    if (brief.url) await clipboard.writeText(brief.url);
+    const copied = !!brief.url && (await this.options.copy(brief.url));
     const profiles = await this.options.api<MyProfilesResponse>('GET', '/api/profiles');
     if (!profiles.ok || !profiles.data) return { ok: false, message: profiles.error?.message ?? 'Could not read your profiles.' };
     const active = profiles.data.profiles.filter((profile) => !profile.isArchived);
     const wanted = this.options.settings().applyProfileId;
     const profile = active.find((item) => item.id === wanted) ?? active.find((item) => item.id === profiles.data?.lastUsedProfileId) ?? active[0];
     if (!profile) return { ok: false, message: 'You have no active profile to apply with.' };
-    const result = await this.options.api<CreateApplicationResponse>('POST', `/api/jobs/${brief.jobId}/apply`, { profileId: profile.id });
+    const result = await this.options.api<CreateApplicationResponse>('POST', `/api/jobs/${brief.jobId}/apply`, { profileId: profile.id, ...(brief.urlId ? { urlId: brief.urlId } : {}) });
     if (!result.ok || !result.data) return { ok: false, message: result.error?.message ?? 'Could not apply.' };
-    return { ok: true, profileName: profile.name, already: result.data.outcome === 'already_applied', copied: !!brief.url };
+    return { ok: true, profileName: profile.name, already: result.data.outcome === 'already_applied', copied };
   }
 
-  /** Notifications were turned off: whatever is showing or waiting goes away. */
+  /** Notifications turned off, signed out, another database: whatever is showing or waiting goes away. */
   clear(): void {
     this.queue.length = 0;
     this.current = null;
+    this.applyingId = null;
     this.window?.hide();
   }
 

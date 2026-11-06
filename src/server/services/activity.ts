@@ -1,86 +1,19 @@
 import type Database from 'better-sqlite3';
-import type { ActivityBucket, ActivityCounts, ActivityPerson, ActivityProfile, ActivityQuery, ActivityResponse, DaySpan } from '../../shared/api';
-import { addDays, addMonths, autoGroup, daysBetween, monthEnd, monthStart, weekStart, type ActivityGroup } from '../../shared/calendar';
+import type { ActivityCounts, ActivityPerson, ActivityProfile, ActivityQuery, ActivityResponse, DaySpan } from '../../shared/api';
+import { addDays, autoGroup, monthEnd, monthStart, weekStart } from '../../shared/calendar';
 import { prepared } from '../db/client';
+import { computeTrends, comparedRanges, previousRange, rate } from './trends';
 import { toUserRef } from './users';
+import { bucketsFor, dayBegins, zoneClock } from './zone';
 
 /**
  * Applications per person and per profile, counted in the viewer's own calendar: today, yesterday,
  * this week, this month and a chosen range, the range split into hours, days, weeks or months; how
- * far the range's applications got; and the interviews dated in the range.
+ * far the range's applications got; the interviews dated in the range; and the trends over the
+ * range next to the period before it (see trends.ts).
  *
  * Every period has both ends, so an application dated after today is never counted as today's.
- * Days begin where they begin in the viewer's time zone, daylight saving time included: a day can
- * be 23 or 25 hours long, and the host works that out instead of assuming a fixed offset.
  */
-
-const QUARTER_HOUR_MS = 15 * 60_000;
-const HOUR_MS = 3_600_000;
-
-interface WallClock {
-  date: string;
-  hour: number;
-}
-
-/** The time on the viewer's wall clock at a moment. The same quarter hours come up again and again, so each is worked out once. */
-function zoneClock(tz: string): (ms: number) => WallClock {
-  const format = new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit' });
-  const seen = new Map<number, WallClock>();
-  return (ms) => {
-    let clock = seen.get(ms);
-    if (!clock) {
-      const parts = Object.fromEntries(format.formatToParts(ms).map((part) => [part.type, part.value]));
-      clock = { date: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour) % 24 };
-      seen.set(ms, clock);
-    }
-    return clock;
-  };
-}
-
-/**
- * The first moment of a day in the viewer's time zone. Every zone's offset, and every daylight
- * saving change, falls on a quarter hour, so the answer lies on the quarter-hour grid; it is found
- * by halving the 30 hours around midnight UTC, inside which every zone's midnight falls.
- */
-function dayBegins(date: string, clock: (ms: number) => WallClock): number {
-  const midnightUtc = Date.parse(`${date}T00:00:00.000Z`);
-  let before = Math.floor((midnightUtc - 15 * HOUR_MS) / QUARTER_HOUR_MS);
-  let after = Math.ceil((midnightUtc + 15 * HOUR_MS) / QUARTER_HOUR_MS);
-  while (after - before > 1) {
-    const middle = Math.floor((before + after) / 2);
-    if (clock(middle * QUARTER_HOUR_MS).date >= date) after = middle;
-    else before = middle;
-  }
-  return after * QUARTER_HOUR_MS;
-}
-
-/** The range's buckets, and which bucket a wall-clock time falls in. */
-function bucketsFor(group: ActivityGroup, range: DaySpan): { buckets: ActivityBucket[]; indexOf: (clock: WallClock) => number } {
-  const buckets: ActivityBucket[] = [];
-  const clip = (first: string, last: string) => ({ first: first < range.first ? range.first : first, last: last > range.last ? range.last : last });
-  switch (group) {
-    case 'hour':
-      for (let hour = 0; hour < 24; hour += 1) buckets.push({ key: `${range.first}T${String(hour).padStart(2, '0')}`, first: range.first, last: range.first });
-      // A day with a clock change has an hour twice, or not at all: both times count in that hour.
-      return { buckets, indexOf: (clock) => clock.hour };
-    case 'day':
-      for (let day = range.first; day <= range.last; day = addDays(day, 1)) buckets.push({ key: day, first: day, last: day });
-      return { buckets, indexOf: (clock) => daysBetween(range.first, clock.date) };
-    case 'week': {
-      const firstWeek = weekStart(range.first);
-      for (let week = firstWeek; week <= range.last; week = addDays(week, 7)) buckets.push({ key: week, ...clip(week, addDays(week, 6)) });
-      return { buckets, indexOf: (clock) => daysBetween(firstWeek, weekStart(clock.date)) / 7 };
-    }
-    case 'month': {
-      const firstMonth = monthStart(range.first);
-      for (let month = firstMonth; month <= range.last; month = addMonths(month, 1)) buckets.push({ key: month.slice(0, 7), ...clip(month, monthEnd(month)) });
-      const monthNumber = (date: string) => Number(date.slice(0, 4)) * 12 + Number(date.slice(5, 7));
-      return { buckets, indexOf: (clock) => monthNumber(clock.date) - monthNumber(firstMonth) };
-    }
-  }
-}
-
-const rate = (part: number, whole: number): number | null => (whole > 0 ? Math.round((part / whole) * 1000) / 10 : null);
 
 /** Reached Recruiter Screen or later, or has an interview booked. */
 const GOT_INTERVIEW = `(a.furthest_rank >= 1 OR EXISTS (SELECT 1 FROM interviews iv WHERE iv.application_id = a.id))`;
@@ -213,13 +146,11 @@ export function getActivity(sqlite: Database.Database, viewerId: number, query: 
   const profileSeries = place(
     prepared(sqlite, `SELECT a.profile_id AS id, ${quarterOf('a.applied_at')} AS quarter, COUNT(*) AS total FROM applications a WHERE ${inRange} GROUP BY a.profile_id, quarter`).all({ from, to }) as QuarterRow[]
   );
-  const interviewSeries = place(
-    prepared(
-      sqlite,
-      `SELECT a.user_id AS id, ${quarterOf('i.scheduled_at')} AS quarter, COUNT(*) AS total FROM interviews i JOIN applications a ON a.id = i.application_id
-       WHERE i.scheduled_at >= @from AND i.scheduled_at < @to GROUP BY a.user_id, quarter`
-    ).all({ from, to }) as QuarterRow[]
-  );
+
+  // Every measure over the range and the period before it, for the trend charts.
+  const previous = previousRange(periods.range);
+  const compared = comparedRanges(periods.range, previous, query.today);
+  const trends = computeTrends(sqlite, { clock, group, range: periods.range, previous, compared, viewerId, scope: query.scope === 'me' ? 'me' : 'team' });
 
   // Me alone; or every member of the team, switched off or not. Administrators look after
   // accounts and the database and are not part of the team.
@@ -240,6 +171,7 @@ export function getActivity(sqlite: Database.Database, viewerId: number, query: 
         own?.forEach((value, index) => (series[index] += value));
         // An archived profile with no history is left out; one in use always shows, even at nothing.
         if (profile.is_archived === 1 && !row) continue;
+        const profileTrends = trends.forProfile(profile.id);
         profiles.push({
           id: profile.id,
           name: profile.name,
@@ -251,10 +183,13 @@ export function getActivity(sqlite: Database.Database, viewerId: number, query: 
           allTime: row?.all_time ?? 0,
           allTimeInterviews: row?.all_time_interviews ?? 0,
           allTimeInterviewRate: rate(row?.all_time_interviews ?? 0, row?.all_time ?? 0),
-          series: own ?? empty()
+          series: own ?? empty(),
+          trends: profileTrends.trends,
+          trendTotals: profileTrends.trendTotals
         });
       }
       profiles.sort((a, b) => b.inRange - a.inRange || b.allTime - a.allTime || a.name.localeCompare(b.name));
+      const personTrends = trends.forPerson(person.id);
       return {
         user: toUserRef({ id: person.id, username: person.username, displayName: person.display_name, avatarVersion: person.avatar }),
         isMe: person.id === viewerId,
@@ -264,10 +199,10 @@ export function getActivity(sqlite: Database.Database, viewerId: number, query: 
         allTimeInterviews: totals.all_time_interviews,
         allTimeInterviewRate: rate(totals.all_time_interviews, totals.all_time),
         series,
-        interviewSeries: interviewSeries.get(person.id) ?? empty(),
         profiles,
         rank: 0,
-        behindLeader: 0
+        behindLeader: 0,
+        ...personTrends
       };
     });
 
@@ -307,8 +242,11 @@ export function getActivity(sqlite: Database.Database, viewerId: number, query: 
     group,
     periods,
     buckets,
+    previous: { range: previous, buckets: trends.previousBuckets, compared },
     // The viewer first, then everyone else by rank.
     people: [...ranked.filter((person) => person.isMe), ...ranked.filter((person) => !person.isMe)],
-    team
+    team,
+    teamTrends: trends.team.trends,
+    teamTrendTotals: trends.team.trendTotals
   };
 }

@@ -17,9 +17,10 @@ import { getActivity } from './services/activity';
 import { getJobBrief } from './services/job-brief';
 import { applyToExistingJob, checkLink, createApplication } from './services/intake';
 import { refreshJobFacts } from './services/job-facts-store';
-import { getDashboard, getJobDetail, getTeam, listCompanies, listInterviews, listJobs } from './services/job-queries';
+import { getDashboard, getJobDetail, getTeam, listCompanies, listInterviews, listJobs, listTeamApplications } from './services/job-queries';
 import * as profilesService from './services/profiles';
 import * as usersService from './services/users';
+import { instantsOf } from './services/zone';
 import * as v from './validation';
 
 declare module 'fastify' {
@@ -219,6 +220,17 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
 
   app.get('/api/team', async (_request, reply) => cachedJson(reply, 'team', () => getTeam(ctx.db)));
 
+  // Everyone's applications and where each one is, for comparing your own with the rest of the team.
+  app.get('/api/team/applications', async (request, reply) => {
+    const userId = requireSession(request).user.id;
+    const query = v.parse(v.teamApplicationsQuery, request.query);
+    const range = query.tz && query.from && query.to ? { first: query.from, last: query.to } : null;
+    return cachedJson(reply, `team-applications:${userId}:${request.url}`, () => ({
+      range,
+      ...listTeamApplications(ctx.db, userId, query, range && query.tz ? instantsOf(query.tz, range) : null)
+    }));
+  });
+
   // ---- Shared jobs -------------------------------------------------------------------
   app.get('/api/jobs', async (request, reply) => {
     const userId = requireSession(request).user.id;
@@ -231,7 +243,7 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
 
   app.get('/api/jobs/:id/brief', async (request) => {
     const { application } = v.parse(v.briefQuery, request.query);
-    return getJobBrief(ctx, requireSession(request).user.id, v.parse(v.idParam, request.params).id, application);
+    return getJobBrief(ctx, requireSession(request).user, v.parse(v.idParam, request.params).id, application);
   });
 
   app.post('/api/jobs/:id/highlight', async (request) => {
@@ -243,7 +255,7 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
   app.post('/api/jobs/:id/apply', async (request) => {
     const { id } = v.parse(v.idParam, request.params);
     const body = v.parse(v.applyToJobBody, request.body ?? {});
-    return applyToExistingJob(ctx, requireSession(request).user.id, id, body.profileId, body.memo ?? '');
+    return applyToExistingJob(ctx, requireSession(request).user.id, id, body.profileId, body.memo ?? '', body.urlId ?? null);
   });
 
   // Job details are shared by everyone, so corrections go through the administrator.

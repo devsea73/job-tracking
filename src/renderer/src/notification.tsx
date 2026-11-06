@@ -29,6 +29,8 @@ function NoticeCard() {
       setNotice(next);
       setBusy(false);
       setResult(null);
+      // The tick belonged to the last card's link.
+      setLinkCopied(false);
     });
     bridge.noticeReady();
     return stop;
@@ -48,12 +50,23 @@ function NoticeCard() {
   const act = (action: Parameters<typeof bridge.noticeAction>[1]) => bridge.noticeAction(notice.id, action);
 
   const apply = async () => {
+    if (busy) return;
     setBusy(true);
     const outcome = await act('apply');
     setBusy(false);
     setResult(outcome);
     // Long enough to read what happened.
     setTimeout(() => void act('done'), outcome.ok ? 2500 : 5000);
+  };
+
+  const copyLink = async () => {
+    const outcome = await act('link');
+    if (!outcome.ok) {
+      setResult(outcome);
+      return;
+    }
+    setLinkCopied(true);
+    setTimeout(() => setLinkCopied(false), 1500);
   };
 
   const countdown = !busy && !result ? <div key={notice.id} className="notice-countdown absolute inset-x-0 bottom-0 h-0.5 bg-accent" style={{ animationDuration: `${notice.hideSeconds}s` }} onAnimationEnd={() => void act('timeout')} /> : null;
@@ -159,14 +172,11 @@ function NoticeCard() {
             <button
               type="button"
               aria-label="Copy the link"
-              title={linkCopied ? 'Link copied' : 'Copy the link'}
+              title={linkCopied ? 'Link copied' : `Copy the link\n${brief.url}`}
+              data-notice-link={brief.url}
+              disabled={busy}
               className="ml-auto rounded p-1 text-ink-3 hover:bg-surface-2 hover:text-ink"
-              onClick={() =>
-                void act('link').then(() => {
-                  setLinkCopied(true);
-                  setTimeout(() => setLinkCopied(false), 1500);
-                })
-              }
+              onClick={() => void copyLink()}
             >
               {linkCopied ? <Check className="size-4 text-success-ink" aria-hidden /> : <Link2 className="size-4" aria-hidden />}
             </button>

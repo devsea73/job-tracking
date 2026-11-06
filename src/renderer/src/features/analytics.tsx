@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDown, ArrowRight, ArrowUp, CalendarDays, LineChart as LineChartIcon, Table2, type LucideIcon } from 'lucide-react';
-import type { ActivityBucket, ActivityCounts, ActivityPerson, ActivityProfile, DaySpan, UserRef } from '@shared/api';
+import type { ActivityBucket, ActivityCounts, ActivityProfile, DaySpan, UserRef } from '@shared/api';
 import { addDays, addMonths, autoGroup, daysBetween, groupFits, localCalendarDate, MAX_RANGE_DAYS, monthEnd, monthStart, weekStart, type ActivityGroup } from '@shared/calendar';
 import { userName } from '@/components/job-bits';
 import { Button } from '@/components/ui/button';
@@ -246,65 +246,37 @@ export const share = (part: number, whole: number) => (whole > 0 ? Math.round((p
 
 // ---- Series: one per person or profile, colored by who it is --------------------------------
 
-const SERIES_SLOTS = 8;
+/** The validated categorical palette has eight hues; a ninth series is never a new color. */
+export const SERIES_SLOTS = 8;
 export const OTHERS_COLOR = 'var(--ink-3)';
-
-/**
- * Who gets a series of their own, and its color. Up to eight each get one; beyond that, the ones
- * marked first and the leaders do, and the rest are added together. Colors go by who it is, never
- * by rank, so a color means the same person or profile on every chart and card.
- */
-export function pickSeries<T>(items: T[], id: (item: T) => number, first: (item: T) => boolean): { shown: T[]; rest: T[]; colors: Map<number, string> } {
-  const shown = items.length <= SERIES_SLOTS ? items : [...items.filter(first), ...items.filter((item) => !first(item))].slice(0, SERIES_SLOTS - 1);
-  const ids = shown.map(id).sort((a, b) => a - b);
-  return { shown, rest: items.filter((item) => !shown.includes(item)), colors: new Map(ids.map((value, index) => [value, `var(--series-${index + 1})`])) };
-}
-
-export const peopleSeries = (people: ActivityPerson[]) =>
-  pickSeries(
-    [...people].sort((a, b) => a.rank - b.rank),
-    (person) => person.user.id,
-    (person) => person.isMe
-  );
+export const seriesColor = (index: number) => `var(--series-${index + 1})`;
 
 export interface Series {
   key: string;
   name: string;
   color: string;
-  emphasis?: boolean;
-  total: number;
+  /** Drawn dashed and without points: the period before, for comparison. */
+  dashed?: boolean;
+  /** Shown next to the name in the legend and table; null for none. */
+  total: number | null;
   /** Null for a period that has not begun yet: no applications yet is not zero applications. */
   values: Array<number | null>;
+  /** What each point is called in the hover readout when it is not the bucket's own day: the days of the period before. */
+  pointLabels?: Array<string | null>;
 }
 
 /** Periods still to come become gaps, and a running total adds up as it goes. */
-export function shapeValues(raw: number[], buckets: ActivityBucket[], group: ActivityGroup, now: Date, cumulative = false): Array<number | null> {
+export function shapeValues(raw: Array<number | null>, buckets: ActivityBucket[], group: ActivityGroup, now: Date, cumulative = false): Array<number | null> {
   let running = 0;
   return raw.map((value, index) => {
-    if (bucketStart(buckets[index], group) > now) return null;
-    running += value;
-    return cumulative ? running : value;
+    if (!buckets[index] || bucketStart(buckets[index], group) > now) return null;
+    running += value ?? 0;
+    return cumulative ? running : (value ?? 0);
   });
 }
 
-/** The given items as series, the rest summed as "others". */
-export function toSeries<T>(
-  picked: { shown: T[]; rest: T[]; colors: Map<number, string> },
-  describe: (item: T) => { id: number; name: string; emphasis?: boolean; total: number; raw: number[] },
-  shape: (raw: number[]) => Array<number | null>,
-  othersName: (count: number) => string
-): Series[] {
-  const series = picked.shown.map((item) => {
-    const { id, name, emphasis, total, raw } = describe(item);
-    return { key: String(id), name, emphasis, total, color: picked.colors.get(id) ?? OTHERS_COLOR, values: shape(raw) };
-  });
-  if (picked.rest.length) {
-    const rest = picked.rest.map(describe);
-    const summed = rest[0].raw.map((_, index) => rest.reduce((total, item) => total + item.raw[index], 0));
-    series.push({ key: 'others', name: othersName(rest.length), emphasis: false, total: rest.reduce((total, item) => total + item.total, 0), color: OTHERS_COLOR, values: shape(summed) });
-  }
-  return series;
-}
+/** The readout's last line: everyone together. Left out, the series are added up; null, there is none. */
+export type ChartFooter = { label: string; values: Array<number | null> } | null;
 
 // ---- Pieces --------------------------------------------------------------------------------
 
@@ -387,27 +359,70 @@ export function TableSwitch({ view, onChange }: { view: 'chart' | 'table'; onCha
   );
 }
 
-export function Legend({ series, mark }: { series: Series[]; mark: 'line' | 'block' }) {
-  if (series.length < 2) return null;
+/** A short line in the series' color: dashed for the period before. */
+export function LineMark({ color, dashed }: { color: string; dashed?: boolean }) {
   return (
-    <ul className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-ink-2" aria-label="Legend">
-      {series.map((item) => (
-        <li key={item.key} className="inline-flex items-center gap-1.5">
-          <span className={mark === 'line' ? 'w-3.5 rounded-full' : 'size-2.5 rounded-[2px]'} style={{ backgroundColor: item.color, height: mark === 'line' ? (item.emphasis ? 3 : 2) : undefined }} aria-hidden />
-          <span className={item.emphasis ? 'font-semibold text-ink' : undefined}>{item.name}</span>
-          <span className="tabular-nums text-ink-3">{count(item.total)}</span>
+    <svg width={16} height={6} className="shrink-0" aria-hidden>
+      <line x1={1} x2={15} y1={3} y2={3} stroke={color} strokeWidth={2} strokeLinecap="round" strokeDasharray={dashed ? '3 3' : undefined} />
+    </svg>
+  );
+}
+
+/**
+ * Who each line is, with their number. Pointing at a name brings its line forward. Ranked puts the
+ * highest first with its place, for a race; otherwise the series keep their own order.
+ */
+export function Legend({
+  series,
+  format = count,
+  ranked = false,
+  marks,
+  onHighlight
+}: {
+  series: Series[];
+  format?: (value: number) => string;
+  ranked?: boolean;
+  /** Extra words after a name, by series key: "(you)". */
+  marks?: Map<string, string>;
+  onHighlight?: (key: string | null) => void;
+}) {
+  if (series.length < 2) return null;
+  const shown = ranked ? [...series].sort((a, b) => (b.total ?? -1) - (a.total ?? -1) || a.name.localeCompare(b.name)) : series;
+  return (
+    <ul className="mt-1.5 flex flex-wrap gap-x-1 gap-y-0.5 text-[12px] text-ink-2" aria-label="Legend" onMouseLeave={() => onHighlight?.(null)}>
+      {shown.map((item, index) => (
+        <li key={item.key}>
+          <button
+            type="button"
+            className="inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 hover:bg-surface-2 focus-visible:bg-surface-2"
+            onMouseEnter={() => onHighlight?.(item.key)}
+            onFocus={() => onHighlight?.(item.key)}
+            onBlur={() => onHighlight?.(null)}
+            data-legend={item.key}
+          >
+            {ranked ? <span className="w-3.5 text-right tabular-nums text-ink-3">{index + 1}</span> : null}
+            <LineMark color={item.color} dashed={item.dashed} />
+            <span className="text-ink">
+              {item.name}
+              {marks?.get(item.key) ? <span className="text-ink-3"> {marks.get(item.key)}</span> : null}
+            </span>
+            {item.total !== null ? <span className="font-semibold tabular-nums text-ink">{format(item.total)}</span> : null}
+          </button>
         </li>
       ))}
     </ul>
   );
 }
 
-/** Rounded axis tops: 4, 10, 25, 60… */
-export function niceMax(value: number): number {
-  if (value <= 4) return Math.max(1, Math.ceil(value));
-  const magnitude = 10 ** Math.floor(Math.log10(value));
-  for (const step of [1, 2, 2.5, 5, 10]) if (value <= step * magnitude) return step * magnitude;
-  return 10 * magnitude;
+/** An axis that ends on a round number, with four or five round steps: whole ones for counts, finer ones for rates. */
+export function niceScale(max: number, integer: boolean): { top: number; ticks: number[] } {
+  const ceiling = max > 0 ? max : integer ? 4 : 1;
+  const rough = ceiling / 4;
+  const magnitude = 10 ** Math.floor(Math.log10(rough));
+  const steps = [1, 2, 2.5, 5, 10].map((step) => step * magnitude).filter((step) => !integer || (Number.isInteger(step) && step >= 1));
+  const step = steps.find((value) => value >= rough - 1e-9) ?? (integer ? Math.max(1, Math.ceil(rough)) : 10 * magnitude);
+  const count = Math.max(1, Math.ceil(ceiling / step - 1e-9));
+  return { top: count * step, ticks: Array.from({ length: count + 1 }, (_, index) => Number((index * step).toFixed(6))) };
 }
 
 function useWidth(): [React.RefObject<HTMLDivElement | null>, number] {
@@ -426,23 +441,47 @@ interface ChartProps {
   buckets: ActivityBucket[];
   group: ActivityGroup;
   series: Series[];
-  /** What is counted, for screen readers: "applications per day, by person". */
+  /** What is shown, for screen readers: "bids per day, by person". */
   description: string;
+  /** How a value reads: a count unless told otherwise. */
+  format?: (value: number) => string;
+  /** Whole steps on the axis, for counts. */
+  integer?: boolean;
+  footer?: ChartFooter;
+  /** The series pointed at in the legend, drawn on top while the others fade. */
+  highlighted?: string | null;
 }
 
-const CHART_HEIGHT = 240;
+const CHART_HEIGHT = 260;
 
-/** Axis, grid and the hover readout shared by the line and column charts. */
-function ChartFrame({ buckets, group, series, description, top, marginRight, hover, setHover, children, box, width }: ChartProps & { top: number; marginRight: number; hover: number | null; setHover: (index: number | null | ((current: number | null) => number | null)) => void; children: (scale: Scale) => React.ReactNode; box: React.RefObject<HTMLDivElement | null>; width: number }) {
-  const margin = { top: 12, right: marginRight, bottom: 26, left: 36 };
+/** The readout's last line: the footer given, or the series added up, or nothing. */
+function footerAt(series: Series[], footer: ChartFooter | undefined, index: number): { label: string; value: number | null } | null {
+  if (footer === null) return null;
+  if (footer) return { label: footer.label, value: footer.values[index] ?? null };
+  if (series.length < 2 || series.every((item) => item.values[index] === null)) return null;
+  return { label: 'Total', value: series.reduce((sum, item) => sum + (item.values[index] ?? 0), 0) };
+}
+
+/**
+ * One line per series over the range, for comparing people or periods: an axis that starts at
+ * zero, a crosshair with every value at the point under it, and, for four lines or fewer, names
+ * at the lines' ends. The arrow keys read it point by point.
+ */
+export function LineChart({ buckets, group, series, description, format = count, integer = true, footer, highlighted = null }: ChartProps) {
+  const [box, width] = useWidth();
+  const [hover, setHover] = useState<number | null>(null);
+  const values = series.flatMap((item) => item.values.filter((value): value is number => value !== null));
+  const { top, ticks } = niceScale(Math.max(0, ...values), integer);
+  const solid = series.filter((item) => !item.dashed);
+  const labelled = solid.length > 0 && solid.length <= 4;
+  // Room for the longest tick on the left and the line names on the right.
+  const margin = { top: 12, right: labelled ? 104 : 16, bottom: 26, left: Math.max(30, 10 + Math.max(...ticks.map((tick) => format(tick).length)) * 6.6) };
   const plotWidth = width - margin.left - margin.right;
   const plotHeight = CHART_HEIGHT - margin.top - margin.bottom;
   const total = buckets.length;
   const slot = total > 0 ? plotWidth / total : plotWidth;
-  // Columns sit in the middle of their slot, and so do the line's points, so the two read alike.
   const x = (index: number) => margin.left + slot * (index + 0.5);
   const y = (value: number) => margin.top + plotHeight - (value / top) * plotHeight;
-  const ticks = [0, top / 4, top / 2, (top * 3) / 4, top].filter((value, index, all) => Number.isInteger(value) && all.indexOf(value) === index);
   const every = Math.max(1, Math.ceil(total / Math.max(2, Math.floor(plotWidth / 58))));
   const manyYears = buckets[0]?.first.slice(0, 4) !== buckets[total - 1]?.last.slice(0, 4);
   const pointAt = (clientX: number) => {
@@ -450,6 +489,29 @@ function ChartFrame({ buckets, group, series, description, top, marginRight, hov
     if (!rect || total === 0) return null;
     return Math.min(total - 1, Math.max(0, Math.floor((clientX - rect.left - margin.left) / slot)));
   };
+  const path = (points: Array<number | null>) => {
+    let drawing = false;
+    return points
+      .map((value, index) => {
+        if (value === null) {
+          drawing = false;
+          return '';
+        }
+        const step = `${drawing ? 'L' : 'M'}${x(index).toFixed(1)},${y(value).toFixed(1)}`;
+        drawing = true;
+        return step;
+      })
+      .join(' ');
+  };
+  const lastShown = (item: Series) => item.values.reduce<number>((last, value, index) => (value === null ? last : index), -1);
+  const ends = solid.map((item) => ({ item, index: lastShown(item) })).filter((end) => end.index >= 0);
+  const endYs = ends.map((end) => y(end.item.values[end.index] ?? 0)).sort((a, b) => a - b);
+  const endsFit = labelled && endYs.every((value, index) => index === 0 || value - endYs[index - 1] >= 13);
+  // The period before goes underneath, and the line pointed at on top.
+  const order = [...series].sort((a, b) => Number(!a.dashed) - Number(!b.dashed) || Number(a.key === highlighted) - Number(b.key === highlighted));
+  const faded = (item: Series) => highlighted !== null && item.key !== highlighted;
+  const readout = hover !== null && buckets[hover] ? footerAt(series, footer, hover) : null;
+
   return (
     <div ref={box} className="relative" onMouseLeave={() => setHover(null)}>
       <svg
@@ -472,7 +534,7 @@ function ChartFrame({ buckets, group, series, description, top, marginRight, hov
           <g key={tick}>
             <line x1={margin.left} x2={margin.left + plotWidth} y1={y(tick)} y2={y(tick)} stroke="var(--border)" strokeWidth={1} />
             <text x={margin.left - 6} y={y(tick)} textAnchor="end" dominantBaseline="middle" fontSize={11} fill="var(--ink-3)" className="tabular-nums">
-              {tick.toLocaleString()}
+              {format(tick)}
             </text>
           </g>
         ))}
@@ -483,25 +545,43 @@ function ChartFrame({ buckets, group, series, description, top, marginRight, hov
             </text>
           ) : null
         )}
-        {hover !== null ? <rect x={x(hover) - slot / 2} y={margin.top} width={slot} height={plotHeight} fill="var(--ink)" opacity={0.04} /> : null}
-        {children({ x, y, slot, plotHeight, baseline: margin.top + plotHeight })}
+        {hover !== null ? <line x1={x(hover)} x2={x(hover)} y1={margin.top} y2={margin.top + plotHeight} stroke="var(--ink-3)" strokeWidth={1} strokeDasharray="2 3" /> : null}
+        {order.map((item) => (
+          <g key={item.key} opacity={faded(item) ? 0.18 : 1} data-series={item.key}>
+            <path d={path(item.values)} fill="none" stroke={item.color} strokeWidth={item.key === highlighted ? 2.5 : 2} strokeDasharray={item.dashed ? '5 4' : undefined} strokeLinejoin="round" strokeLinecap="round" />
+            {!item.dashed && buckets.length <= 16
+              ? item.values.map((value, index) => (value === null ? null : <circle key={index} cx={x(index)} cy={y(value)} r={3} fill={item.color} stroke="var(--surface)" strokeWidth={1.5} />))
+              : null}
+            {hover !== null && item.values[hover] !== null ? <circle cx={x(hover)} cy={y(item.values[hover] ?? 0)} r={4.5} fill={item.color} stroke="var(--surface)" strokeWidth={2} /> : null}
+          </g>
+        ))}
+        {endsFit
+          ? ends.map(({ item, index }) => (
+              <text key={item.key} x={x(index) + 8} y={y(item.values[index] ?? 0)} dominantBaseline="middle" fontSize={11.5} fill="var(--ink-2)" opacity={faded(item) ? 0.3 : 1}>
+                {item.name.length > 11 ? `${item.name.slice(0, 10)}…` : item.name} <tspan fontWeight={600}>{format(item.values[index] ?? 0)}</tspan>
+              </text>
+            ))
+          : null}
       </svg>
       {hover !== null && buckets[hover] ? (
-        <div className="pointer-events-none absolute top-1 z-10 min-w-40 rounded-md border border-border bg-surface px-2.5 py-2 text-[12px] shadow-lg" style={{ left: Math.min(Math.max(0, x(hover) + 12), width - 190) }} role="status">
+        <div className="pointer-events-none absolute top-1 z-10 min-w-44 rounded-md border border-border bg-surface px-2.5 py-2 text-[12px] shadow-lg" style={{ left: Math.min(Math.max(0, x(hover) + 12), width - 220) }} role="status">
           <p className="mb-1 font-medium text-ink">{bucketLabel(buckets[hover], group)}</p>
           {[...series]
             .sort((a, b) => (b.values[hover] ?? -1) - (a.values[hover] ?? -1))
             .map((item) => (
               <p key={item.key} className="flex items-center gap-1.5 text-ink-2">
-                <span className="h-0.5 w-3 rounded-full" style={{ backgroundColor: item.color }} aria-hidden />
-                <span className="flex-1 truncate">{item.name}</span>
-                <span className="font-semibold tabular-nums text-ink">{item.values[hover] === null ? '–' : count(item.values[hover] ?? 0)}</span>
+                <LineMark color={item.color} dashed={item.dashed} />
+                <span className="min-w-0 flex-1 truncate">
+                  {item.name}
+                  {item.pointLabels?.[hover] ? <span className="text-ink-3"> · {item.pointLabels[hover]}</span> : null}
+                </span>
+                <span className="font-semibold tabular-nums text-ink">{item.values[hover] === null ? '–' : format(item.values[hover] ?? 0)}</span>
               </p>
             ))}
-          {series.length > 1 && series.some((item) => item.values[hover] !== null) ? (
-            <p className="mt-1 flex justify-between border-t border-border pt-1 text-ink-2">
-              <span>Total</span>
-              <span className="font-semibold tabular-nums text-ink">{count(series.reduce((sum, item) => sum + (item.values[hover] ?? 0), 0))}</span>
+          {readout ? (
+            <p className="mt-1 flex justify-between gap-3 border-t border-border pt-1 text-ink-2">
+              <span>{readout.label}</span>
+              <span className="font-semibold tabular-nums text-ink">{readout.value === null ? '–' : format(readout.value)}</span>
             </p>
           ) : null}
           {series.every((item) => item.values[hover] === null) ? <p className="text-ink-3">Not yet begun</p> : null}
@@ -511,119 +591,11 @@ function ChartFrame({ buckets, group, series, description, top, marginRight, hov
   );
 }
 
-interface Scale {
-  x: (index: number) => number;
-  y: (value: number) => number;
-  slot: number;
-  plotHeight: number;
-  baseline: number;
-}
-
-/** One line per series, for comparing people over time. Four or fewer are also named at their ends. */
-export function LineChart(props: ChartProps) {
-  const [box, width] = useWidth();
-  const [hover, setHover] = useState<number | null>(null);
-  const { series, buckets } = props;
-  const lastShown = (item: Series) => item.values.reduce<number>((last, value, index) => (value === null ? last : index), -1);
-  const labelled = series.length <= 4;
-  const top = niceMax(Math.max(0, ...series.flatMap((item) => item.values.filter((value): value is number => value !== null))));
-  const path = (values: Array<number | null>, scale: Scale) => {
-    let drawing = false;
-    return values
-      .map((value, index) => {
-        if (value === null) {
-          drawing = false;
-          return '';
-        }
-        const step = `${drawing ? 'L' : 'M'}${scale.x(index)},${scale.y(value)}`;
-        drawing = true;
-        return step;
-      })
-      .join(' ');
-  };
+/** The chart's numbers as a table, one column per series, with the footer's line at the end of each row. */
+export function SeriesTable({ buckets, group, series, format = count, footer }: { buckets: ActivityBucket[]; group: ActivityGroup; series: Series[]; format?: (value: number) => string; footer?: ChartFooter }) {
+  const footerName = footer === null ? null : (footer?.label ?? (series.length > 1 ? 'Total' : null));
   return (
-    <ChartFrame {...props} top={top} marginRight={labelled ? 92 : 14} hover={hover} setHover={setHover} box={box} width={width}>
-      {(scale) => {
-        const ends = series.map((item) => ({ item, index: lastShown(item) })).filter((end) => end.index >= 0);
-        const endYs = ends.map((end) => scale.y(end.item.values[end.index] ?? 0)).sort((a, b) => a - b);
-        const endsFit = labelled && endYs.every((value, index) => index === 0 || value - endYs[index - 1] >= 13);
-        return (
-          <>
-            {/* The emphasized line is drawn last, so it is never hidden under another. */}
-            {[...series]
-              .sort((a, b) => Number(!!a.emphasis) - Number(!!b.emphasis))
-              .map((item) => (
-                <g key={item.key}>
-                  <path d={path(item.values, scale)} fill="none" stroke={item.color} strokeWidth={item.emphasis ? 2.5 : 2} strokeLinejoin="round" strokeLinecap="round" />
-                  {buckets.length <= 16
-                    ? item.values.map((value, index) => (value === null ? null : <circle key={index} cx={scale.x(index)} cy={scale.y(value)} r={3} fill={item.color} stroke="var(--surface)" strokeWidth={1.5} />))
-                    : null}
-                  {hover !== null && item.values[hover] !== null ? <circle cx={scale.x(hover)} cy={scale.y(item.values[hover] ?? 0)} r={4.5} fill={item.color} stroke="var(--surface)" strokeWidth={2} /> : null}
-                </g>
-              ))}
-            {endsFit
-              ? ends.map(({ item, index }) => (
-                  <text key={item.key} x={scale.x(index) + 8} y={scale.y(item.values[index] ?? 0)} dominantBaseline="middle" fontSize={11.5} fill="var(--ink-2)" fontWeight={item.emphasis ? 600 : 400}>
-                    {item.name.length > 12 ? `${item.name.slice(0, 11)}…` : item.name} {count(item.values[index] ?? 0)}
-                  </text>
-                ))
-              : null}
-          </>
-        );
-      }}
-    </ChartFrame>
-  );
-}
-
-/** Columns per period, stacked when there are several series. Rounded at the top, square at the baseline. */
-export function ColumnChart(props: ChartProps) {
-  const [box, width] = useWidth();
-  const [hover, setHover] = useState<number | null>(null);
-  const { series, buckets } = props;
-  const totals = buckets.map((_, index) => series.reduce((sum, item) => sum + (item.values[index] ?? 0), 0));
-  const top = niceMax(Math.max(0, ...totals));
-  return (
-    <ChartFrame {...props} top={top} marginRight={14} hover={hover} setHover={setHover} box={box} width={width}>
-      {(scale) => {
-        const barWidth = Math.max(1, Math.min(24, scale.slot * 0.7));
-        const gap = barWidth >= 6 ? 2 : 0;
-        return buckets.map((bucket, index) => {
-          let base = scale.baseline;
-          const parts = series.filter((item) => (item.values[index] ?? 0) > 0);
-          return (
-            <g key={bucket.key}>
-              {parts.map((item, position) => {
-                const height = ((item.values[index] ?? 0) / top) * scale.plotHeight;
-                const isTop = position === parts.length - 1;
-                const y = base - height;
-                const drawn = Math.max(0, height - (isTop ? 0 : gap));
-                base = y;
-                const radius = isTop ? Math.min(4, barWidth / 2, drawn) : 0;
-                const left = scale.x(index) - barWidth / 2;
-                return (
-                  <path
-                    key={item.key}
-                    d={
-                      radius > 0
-                        ? `M${left},${y + drawn} V${y + radius} Q${left},${y} ${left + radius},${y} H${left + barWidth - radius} Q${left + barWidth},${y} ${left + barWidth},${y + radius} V${y + drawn} Z`
-                        : `M${left},${y + (height - drawn)} V${y + height} H${left + barWidth} V${y + (height - drawn)} Z`
-                    }
-                    fill={item.color}
-                    opacity={hover === null || hover === index ? 1 : 0.75}
-                  />
-                );
-              })}
-            </g>
-          );
-        });
-      }}
-    </ChartFrame>
-  );
-}
-
-export function SeriesTable({ buckets, group, series }: { buckets: ActivityBucket[]; group: ActivityGroup; series: Series[] }) {
-  return (
-    <div className="max-h-[280px] overflow-auto">
+    <div className="max-h-[300px] overflow-auto">
       <table className="w-full text-[12.5px] tabular-nums">
         <thead className="sticky top-0 bg-surface text-ink-3">
           <tr className="border-b border-border">
@@ -633,36 +605,38 @@ export function SeriesTable({ buckets, group, series }: { buckets: ActivityBucke
                 {item.name}
               </th>
             ))}
-            {series.length > 1 ? <th className="py-1 pr-3 text-right font-normal">Total</th> : null}
+            {footerName ? <th className="py-1 pr-3 text-right font-normal">{footerName}</th> : null}
           </tr>
         </thead>
         <tbody className="divide-y divide-border">
           {buckets.map((bucket, index) => {
-            const started = series.some((item) => item.values[index] !== null);
+            const line = footerAt(series, footer, index);
             return (
               <tr key={bucket.key}>
                 <td className="py-1 pr-3">{bucketLabel(bucket, group)}</td>
                 {series.map((item) => (
                   <td key={item.key} className="py-1 pr-3 text-right">
-                    {item.values[index] === null ? <span className="text-ink-3">–</span> : count(item.values[index] ?? 0)}
+                    {item.values[index] === null ? <span className="text-ink-3">–</span> : format(item.values[index] ?? 0)}
                   </td>
                 ))}
-                {series.length > 1 ? <td className="py-1 pr-3 text-right font-medium">{started ? count(series.reduce((sum, item) => sum + (item.values[index] ?? 0), 0)) : <span className="text-ink-3">–</span>}</td> : null}
+                {footerName ? <td className="py-1 pr-3 text-right font-medium">{line && line.value !== null ? format(line.value) : <span className="text-ink-3">–</span>}</td> : null}
               </tr>
             );
           })}
         </tbody>
-        <tfoot>
-          <tr className="border-t border-border-strong font-semibold">
-            <td className="py-1 pr-3">Total</td>
-            {series.map((item) => (
-              <td key={item.key} className="py-1 pr-3 text-right">
-                {count(item.total)}
-              </td>
-            ))}
-            {series.length > 1 ? <td className="py-1 pr-3 text-right">{count(series.reduce((sum, item) => sum + item.total, 0))}</td> : null}
-          </tr>
-        </tfoot>
+        {series.some((item) => item.total !== null) ? (
+          <tfoot>
+            <tr className="border-t border-border-strong font-semibold">
+              <td className="py-1 pr-3">Total</td>
+              {series.map((item) => (
+                <td key={item.key} className="py-1 pr-3 text-right">
+                  {item.total === null ? '' : format(item.total)}
+                </td>
+              ))}
+              {footerName ? <td /> : null}
+            </tr>
+          </tfoot>
+        ) : null}
       </table>
     </div>
   );

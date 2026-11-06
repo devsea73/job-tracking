@@ -139,7 +139,7 @@ function Shell({ state, user }: { state: BridgeState; user: CurrentUser }) {
           {page === 'dashboard' ? <DashboardPage onOpenJob={setOpenJob} onNavigate={navigate} onAddJob={addJob} /> : null}
           {page === 'mine' || page === 'all' || page === 'highlighted' ? <JobsPage view={page} user={user} onOpenJob={setOpenJob} onAddJob={addJob} focusSearchSignal={focusSearch} /> : null}
           {page === 'interviews' ? <InterviewsPage onOpenJob={setOpenJob} /> : null}
-          {page === 'team' ? <TeamPage user={user} /> : null}
+          {page === 'team' ? <TeamPage user={user} onOpenJob={setOpenJob} /> : null}
           {page === 'duplicates' ? <DuplicatesPage onOpenJob={setOpenJob} /> : null}
           {page === 'users' && user.role === 'admin' ? <UsersPage currentUser={user} /> : null}
           {page === 'settings' ? <SettingsPage state={state} user={user} /> : null}

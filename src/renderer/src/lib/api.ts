@@ -20,6 +20,8 @@ import type {
   JobListQuery,
   JobListResponse,
   MyProfilesResponse,
+  TeamApplicationsQuery,
+  TeamApplicationsResponse,
   TeamMember,
   UpdateApplicationRequest
 } from '@shared/api';
@@ -86,7 +88,7 @@ export function useLiveUpdates(): void {
   }, [queryClient]);
 }
 
-function toSearchParams(query: JobListQuery): string {
+function toSearchParams(query: JobListQuery | TeamApplicationsQuery): string {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(query)) {
     if (value === undefined || value === null || value === '' || value === false) continue;
@@ -159,6 +161,15 @@ export function useProfiles(): UseQueryResult<MyProfilesResponse> {
 
 export function useTeam(): UseQueryResult<TeamMember[]> {
   return useQuery({ queryKey: ['team'], queryFn: () => call<TeamMember[]>('GET', '/api/team') });
+}
+
+/** Everyone's applications, a page at a time, with the board of where each person's stand. */
+export function useTeamApplications(query: TeamApplicationsQuery): UseQueryResult<TeamApplicationsResponse> {
+  return useQuery({
+    queryKey: ['team-applications', query],
+    queryFn: () => call<TeamApplicationsResponse>('GET', `/api/team/applications${toSearchParams(query)}`),
+    placeholderData: keepPreviousData
+  });
 }
 
 /**

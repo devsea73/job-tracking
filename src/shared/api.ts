@@ -92,6 +92,14 @@ export interface ApplicationSummary {
   interviewCount: number;
   appliedAt: string;
   updatedAt: string;
+  /** The link this application was added with, when it was added with one. */
+  link: ApplicationLink | null;
+}
+
+export interface ApplicationLink {
+  /** The job link's id, one of JobDetail.urls. */
+  id: number;
+  url: string;
 }
 
 export interface JobListItem {
@@ -435,6 +443,26 @@ export interface ActivityCounts {
   scheduledToday: number;
 }
 
+/** The trend charts' measures, in the order an application goes: sent, an interview, technical, final, an offer; then the share that ended in an offer. */
+export const TREND_METRICS = ['bids', 'interviews', 'technical', 'final', 'offers', 'success'] as const;
+export type TrendMetric = (typeof TREND_METRICS)[number];
+
+/**
+ * Each measure per bucket. The counts are of what happened in that bucket: applications sent, and
+ * applications getting an interview (Recruiter Screen or later, or one booked) or reaching
+ * Technical, Final or Offer, on the day that happened. Success is a percentage as it stood at the
+ * end of each bucket: offers out of every application up to then, all time; null before the first.
+ */
+export type TrendSeries = Record<TrendMetric, Array<number | null>>;
+
+/** A measure over the part of the range that has begun, and over as long a stretch from the start of the period before. Null when the range has not begun. */
+export interface TrendTotal {
+  current: number | null;
+  previous: number | null;
+}
+
+export type TrendTotals = Record<TrendMetric, TrendTotal>;
+
 export interface ActivityProfile {
   id: number;
   name: string;
@@ -448,6 +476,8 @@ export interface ActivityProfile {
   allTimeInterviewRate: number | null;
   /** Applications in each of the response's buckets. */
   series: number[];
+  trends: TrendSeries;
+  trendTotals: TrendTotals;
 }
 
 export interface ActivityPerson extends ActivityCounts {
@@ -459,13 +489,15 @@ export interface ActivityPerson extends ActivityCounts {
   allTimeInterviewRate: number | null;
   /** Applications in each of the response's buckets. */
   series: number[];
-  /** Interviews dated in each of the response's buckets. */
-  interviewSeries: number[];
   /** The person's profiles in use or with history: most applications in the range first. */
   profiles: ActivityProfile[];
   /** By applications in the range, then today's, this week's, this month's, then name; 1 is the leader. */
   rank: number;
   behindLeader: number;
+  trends: TrendSeries;
+  /** The same over the period before, bucket for bucket (see ActivityResponse.previous). */
+  previousTrends: TrendSeries;
+  trendTotals: TrendTotals;
 }
 
 export interface ActivityResponse {
@@ -474,10 +506,61 @@ export interface ActivityResponse {
   /** The days each number covers, in the viewer's calendar. */
   periods: { today: DaySpan; yesterday: DaySpan; week: DaySpan; month: DaySpan; range: DaySpan };
   buckets: ActivityBucket[];
+  /**
+   * What the trends are compared with: the month or year before a whole month or year, otherwise
+   * as many days just before the range. Its buckets line up with the range's, one for one. The
+   * totals compare the range as far as today with as many days from the start of this period.
+   */
+  previous: { range: DaySpan; buckets: ActivityBucket[]; compared: { current: DaySpan; previous: DaySpan } | null };
   /** The viewer first, then everyone else by rank. */
   people: ActivityPerson[];
   /** Everyone listed, added together. */
   team: ActivityCounts;
+  teamTrends: TrendSeries;
+  teamTrendTotals: TrendTotals;
+}
+
+export const TEAM_APPLICATION_SORTS = ['applied', 'stage', 'updated', 'company'] as const;
+export type TeamApplicationSort = (typeof TEAM_APPLICATION_SORTS)[number];
+
+/** Everyone's applications, one row each. Days are in the viewer's calendar; without them, all time. */
+export interface TeamApplicationsQuery {
+  tz?: string;
+  from?: string;
+  to?: string;
+  /** One member's user id. Left out: everyone. */
+  person?: number;
+  status?: ApplicationStatus;
+  q?: string;
+  sort?: TeamApplicationSort;
+  limit?: number;
+  offset?: number;
+}
+
+export interface TeamApplication extends ApplicationSummary {
+  job: { id: number; title: string; company: string; location: string | null; facts: JobFacts };
+}
+
+/** One member's applications in the range, by where each one is now. */
+export interface TeamBoardRow {
+  user: UserRef;
+  isMe: boolean;
+  isActive: boolean;
+  total: number;
+  statuses: Record<ApplicationStatus, number>;
+  /** Got an interview: Recruiter Screen or later, or one booked. */
+  interviews: number;
+  interviewRate: number | null;
+}
+
+export interface TeamApplicationsResponse {
+  /** The days covered, or null for all time. */
+  range: DaySpan | null;
+  /** Every member, the viewer first, then by applications. Counts the range only, not the other filters. */
+  board: TeamBoardRow[];
+  /** Applications matching every filter, and the page of them asked for. */
+  total: number;
+  items: TeamApplication[];
 }
 
 export interface DashboardResponse {
@@ -517,7 +600,12 @@ export interface JobBrief {
   title: string;
   company: string;
   location: string | null;
+  /** The link the person in the notice applied with. Without one: the first link anyone applied with, then the job's first link. */
   url: string | null;
+  /** That link's id, sent back when applying from the notice so the new application keeps it too. */
+  urlId: number | null;
+  /** Administrators look after accounts and data; they are not offered jobs. */
+  viewerIsAdmin: boolean;
   /** Who applied, and under which of their profiles. */
   owner: string | null;
   profile: string | null;

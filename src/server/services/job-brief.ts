@@ -1,4 +1,5 @@
-import type { JobBrief } from '../../shared/api';
+import type { ApplicationDetail, ApplicationLink, JobBrief, JobDetail } from '../../shared/api';
+import type { UserRole } from '../../shared/constants';
 import { isUnreadableNote } from '../../shared/unreadable';
 import type { AppContext } from '../context';
 import { getJobDetail } from './job-queries';
@@ -103,17 +104,31 @@ export function deriveIndustry(company: string, description: string): string | n
   return best && best.hits >= 3 ? best.name : null;
 }
 
-export function getJobBrief(ctx: AppContext, viewerId: number, jobId: number, applicationId?: number): JobBrief {
-  const job = getJobDetail(ctx, viewerId, jobId);
+/**
+ * The link to offer: the one the person in the notice applied with, since it is the posting they
+ * mean. Someone who joined without a link: the first link anyone applied with, then the first saved.
+ */
+function linkToOffer(job: JobDetail, source: ApplicationDetail | null): ApplicationLink | null {
+  if (source?.link) return source.link;
+  const used = job.applications.find((application) => application.link)?.link;
+  if (used) return used;
+  const saved = job.urls.find((url) => url.kind === 'original') ?? job.urls[0];
+  return saved ? { id: saved.id, url: saved.originalUrl } : null;
+}
+
+export function getJobBrief(ctx: AppContext, viewer: { id: number; role: UserRole }, jobId: number, applicationId?: number): JobBrief {
+  const job = getJobDetail(ctx, viewer.id, jobId);
   const source = job.applications.find((application) => application.id === applicationId) ?? job.applications[job.applications.length - 1] ?? null;
   const description = isUnreadableNote(job.description) ? '' : job.description;
-  const link = job.urls.find((url) => url.kind === 'original') ?? job.urls[0];
+  const link = linkToOffer(job, source);
   return {
     jobId: job.id,
     title: job.title,
     company: job.company,
     location: job.location,
-    url: link?.originalUrl ?? null,
+    url: link?.url ?? null,
+    urlId: link?.id ?? null,
+    viewerIsAdmin: viewer.role === 'admin',
     owner: source ? (source.owner.displayName ?? source.owner.username) : null,
     profile: source?.profile.name ?? null,
     addedByMe: source?.isMine ?? false,

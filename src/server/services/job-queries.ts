@@ -9,6 +9,11 @@ import type {
   JobListItem,
   JobListQuery,
   JobListResponse,
+  TeamApplication,
+  TeamApplicationSort,
+  TeamApplicationsQuery,
+  TeamApplicationsResponse,
+  TeamBoardRow,
   TeamMember
 } from '../../shared/api';
 import { APPLICATION_STATUSES, CLOSED_STATUSES, type ApplicationStatus, type InterviewStage } from '../../shared/constants';
@@ -223,6 +228,8 @@ interface ApplicationRow {
   profile_avatar: string | null;
   next_interview: string | null;
   interview_count: number;
+  link_id: number | null;
+  link_url: string | null;
 }
 
 const APPLICATION_COLUMNS = `
@@ -230,14 +237,16 @@ const APPLICATION_COLUMNS = `
   u.id AS user_id, u.username, u.display_name, ua.updated_at AS user_avatar,
   p.id AS profile_id, p.name AS profile_name, p.is_archived, pa.updated_at AS profile_avatar,
   (SELECT MIN(n.scheduled_at) FROM interviews n WHERE n.application_id = a.id AND n.scheduled_at >= @now) AS next_interview,
-  (SELECT COUNT(*) FROM interviews c WHERE c.application_id = a.id) AS interview_count`;
+  (SELECT COUNT(*) FROM interviews c WHERE c.application_id = a.id) AS interview_count,
+  l.id AS link_id, l.original_url AS link_url`;
 
 const APPLICATION_JOINS = `
   FROM applications a
   JOIN users u ON u.id = a.user_id
   JOIN profiles p ON p.id = a.profile_id
   LEFT JOIN user_avatars ua ON ua.user_id = u.id
-  LEFT JOIN profile_avatars pa ON pa.profile_id = p.id`;
+  LEFT JOIN profile_avatars pa ON pa.profile_id = p.id
+  LEFT JOIN job_urls l ON l.id = a.job_url_id`;
 
 function toApplicationSummary(row: ApplicationRow, viewerId: number): ApplicationSummary {
   return {
@@ -251,7 +260,8 @@ function toApplicationSummary(row: ApplicationRow, viewerId: number): Applicatio
     nextInterviewAt: row.next_interview,
     interviewCount: row.interview_count,
     appliedAt: row.applied_at,
-    updatedAt: row.updated_at
+    updatedAt: row.updated_at,
+    link: row.link_id !== null && row.link_url !== null ? { id: row.link_id, url: row.link_url } : null
   };
 }
 
@@ -437,6 +447,96 @@ export function getDashboard(db: Db, userId: number): DashboardResponse {
     nextInterviews: listInterviews(db, userId, { from: now }, 5),
     recentApplications: listJobs(db, userId, { scope: 'mine', sort: 'applied', limit: 6 }).items,
     highlightedJobs: listJobs(db, userId, { highlighted: true, sort: 'recent', limit: 6 }).items
+  };
+}
+
+const TEAM_APPLICATION_ORDER: Record<TeamApplicationSort, string> = {
+  applied: 'a.applied_at DESC, a.id DESC',
+  // Furthest along first; of those, the ones still going before the turned down.
+  stage: "a.furthest_rank DESC, a.status = 'Rejected' ASC, a.applied_at DESC, a.id DESC",
+  updated: 'a.updated_at DESC, a.id DESC',
+  company: 'j.company_name COLLATE NOCASE ASC, j.title COLLATE NOCASE ASC, a.applied_at DESC, a.id DESC'
+};
+
+interface TeamApplicationRow extends ApplicationRow, FactsRow {
+  title: string;
+  company_name: string;
+  location: string | null;
+}
+
+/**
+ * Everyone's applications, one row per profile's application, with where each one is now, and a
+ * board of every member's applications by current status. The board counts the range only, so it
+ * stays put while the list below it is narrowed to a person, a status or a search.
+ * Administrators are not members, so neither appears.
+ */
+export function listTeamApplications(db: Db, viewerId: number, query: TeamApplicationsQuery, span: { from: string; to: string } | null): Omit<TeamApplicationsResponse, 'range'> {
+  const sqlite = db.$client;
+  const inRange = span ? 'a.applied_at >= @from AND a.applied_at < @to' : '1';
+  const params: Record<string, unknown> = { now: new Date().toISOString(), from: span?.from ?? null, to: span?.to ?? null };
+
+  const people = prepared(
+    sqlite,
+    `SELECT u.id, u.username, u.display_name, u.is_active, ua.updated_at AS avatar FROM users u LEFT JOIN user_avatars ua ON ua.user_id = u.id WHERE u.role <> 'admin'`
+  ).all() as Array<{ id: number; username: string; display_name: string | null; is_active: number; avatar: string | null }>;
+  const counted = prepared(
+    sqlite,
+    `SELECT a.user_id, a.status, COUNT(*) AS total,
+            SUM(a.furthest_rank >= 1 OR EXISTS (SELECT 1 FROM interviews iv WHERE iv.application_id = a.id)) AS interviews
+     FROM applications a WHERE ${inRange} GROUP BY a.user_id, a.status`
+  ).all(params) as Array<{ user_id: number; status: ApplicationStatus; total: number; interviews: number }>;
+  const board = people
+    .map((person): TeamBoardRow => {
+      const statuses = Object.fromEntries(APPLICATION_STATUSES.map((status) => [status, 0])) as Record<ApplicationStatus, number>;
+      let total = 0;
+      let interviewed = 0;
+      for (const row of counted) {
+        if (row.user_id !== person.id) continue;
+        statuses[row.status] += row.total;
+        total += row.total;
+        interviewed += row.interviews;
+      }
+      return {
+        user: toUserRef({ id: person.id, username: person.username, displayName: person.display_name, avatarVersion: person.avatar }),
+        isMe: person.id === viewerId,
+        isActive: person.is_active === 1,
+        total,
+        statuses,
+        interviews: interviewed,
+        interviewRate: total > 0 ? Math.round((interviewed / total) * 1000) / 10 : null
+      };
+    })
+    .sort((a, b) => Number(b.isMe) - Number(a.isMe) || b.total - a.total || a.user.username.localeCompare(b.user.username));
+
+  const where = ["u.role <> 'admin'", inRange];
+  if (query.person) {
+    where.push('a.user_id = @person');
+    params.person = query.person;
+  }
+  if (query.status) {
+    where.push('a.status = @status');
+    params.status = query.status;
+  }
+  searchTokens(query.q ?? '').forEach((token, index) => {
+    where.push(`(j.title LIKE @q${index} ESCAPE '\\' OR j.company_name LIKE @q${index} ESCAPE '\\' OR p.name LIKE @q${index} ESCAPE '\\')`);
+    params[`q${index}`] = `%${escapeLike(token)}%`;
+  });
+  const filter = `WHERE ${where.join(' AND ')}`;
+  const joins = `${APPLICATION_JOINS} JOIN jobs j ON j.id = a.job_id LEFT JOIN job_facts f ON f.job_id = j.id`;
+  const total = (prepared(sqlite, `SELECT COUNT(*) AS total ${joins} ${filter}`).get(params) as { total: number }).total;
+  const rows = prepared(
+    sqlite,
+    `SELECT ${APPLICATION_COLUMNS}, j.title, j.company_name, j.location, ${FACTS_COLUMNS} ${joins} ${filter}
+     ORDER BY ${TEAM_APPLICATION_ORDER[query.sort ?? 'applied']} LIMIT @limit OFFSET @offset`
+  ).all({ ...params, limit: query.limit ?? 50, offset: query.offset ?? 0 }) as TeamApplicationRow[];
+
+  return {
+    board,
+    total,
+    items: rows.map((row): TeamApplication => ({
+      ...toApplicationSummary(row, viewerId),
+      job: { id: row.job_id, title: row.title, company: row.company_name, location: row.location, facts: toJobFacts(row) }
+    }))
   };
 }
 

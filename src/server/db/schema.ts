@@ -175,6 +175,8 @@ export const applications = sqliteTable(
     memo: text('memo').notNull().default(''),
     /** The highest pipeline stage ever reached, as an index into PIPELINE_STAGES. Kept up to date by a trigger. */
     furthestRank: integer('furthest_rank').notNull().default(0),
+    /** The link this application was added with. Empty when someone joined the job without one. */
+    jobUrlId: integer('job_url_id').references(() => jobUrls.id, { onDelete: 'set null' }),
     appliedAt: text('applied_at').notNull().default(nowIso),
     updatedAt: text('updated_at').notNull().default(nowIso)
   },
@@ -185,6 +187,7 @@ export const applications = sqliteTable(
     index('applications_user_job_idx').on(t.userId, t.jobId),
     index('applications_status_idx').on(t.status),
     index('applications_user_status_idx').on(t.userId, t.status),
+    index('applications_job_url_idx').on(t.jobUrlId),
     check(
       'applications_status_check',
       sql`${t.status} in ('Applied', 'Recruiter Screen', 'Technical Interview', 'Final Interview', 'Rejected', 'Offer')`
