@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
-import { keepPreviousData, useMutation, useQueries, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
+import { keepPreviousData, useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import type {
+  ActivityQuery,
+  ActivityResponse,
   AdminUser,
   ApplicationDetail,
   AvatarSubject,
@@ -9,12 +11,12 @@ import type {
   CreateApplicationResponse,
   CurrentUser,
   DashboardResponse,
+  DuplicatesResponse,
   Interview,
   InterviewInput,
   InterviewListItem,
   InterviewQuery,
   JobDetail,
-  JobListItem,
   JobListQuery,
   JobListResponse,
   MyProfilesResponse,
@@ -98,43 +100,20 @@ export function useCurrentUser(enabled: boolean): UseQueryResult<CurrentUser> {
   return useQuery({ queryKey: ['me'], queryFn: () => call<CurrentUser>('GET', '/api/auth/me'), enabled });
 }
 
-export const JOB_PAGE_SIZE = 50;
-
-export interface JobWindow {
-  /** The job at a position in the whole list, or null until its page arrives. */
-  rowAt: (index: number) => JobListItem | null;
-  total: number | undefined;
-  error: unknown;
-}
+export const PAGE_SIZES = [50, 100, 200] as const;
+export type PageSize = (typeof PAGE_SIZES)[number];
 
 /**
- * The part of a long list around what is on screen. Pages load as they scroll into view and are
- * forgotten soon after, and a refresh only asks again for the pages being looked at, so the cost
- * stays the same however many of the 10,000 jobs someone has scrolled past.
+ * One page of the job list. Search, filters and sorting all run on the host over every job, so a
+ * page is always the right slice of the full result. While the next page loads, the current one
+ * stays on screen instead of flashing empty.
  */
-export function useJobWindow(query: JobListQuery, firstPage: number, lastPage: number): JobWindow {
-  const pages: number[] = [];
-  for (let page = firstPage; page <= lastPage; page += 1) pages.push(page);
-  const results = useQueries({
-    queries: pages.map((page) => ({
-      queryKey: ['jobs', query, page],
-      queryFn: () => call<JobListResponse>('GET', `/api/jobs${toSearchParams({ ...query, limit: JOB_PAGE_SIZE, offset: page * JOB_PAGE_SIZE })}`),
-      gcTime: 60_000,
-      // While new filters load, the same page keeps showing what it had. Another page never does.
-      placeholderData: (previous: JobListResponse | undefined, previousQuery: { queryKey: readonly unknown[] } | undefined) => (previousQuery?.queryKey[2] === page ? previous : undefined)
-    }))
+export function useJobPage(query: JobListQuery, page: number, size: PageSize): UseQueryResult<JobListResponse> {
+  return useQuery({
+    queryKey: ['jobs', query, page, size],
+    queryFn: () => call<JobListResponse>('GET', `/api/jobs${toSearchParams({ ...query, limit: size, offset: page * size })}`),
+    placeholderData: keepPreviousData
   });
-  const lastTotal = useRef<number | undefined>(undefined);
-  const known = results.find((result) => result.data)?.data?.total;
-  if (known !== undefined) lastTotal.current = known;
-  return {
-    rowAt: (index) => {
-      const position = pages.indexOf(Math.floor(index / JOB_PAGE_SIZE));
-      return position < 0 ? null : (results[position]?.data?.items[index % JOB_PAGE_SIZE] ?? null);
-    },
-    total: lastTotal.current,
-    error: results.find((result) => result.isError && !result.data)?.error ?? null
-  };
 }
 
 export function useCompanies(): UseQueryResult<string[]> {
@@ -143,6 +122,14 @@ export function useCompanies(): UseQueryResult<string[]> {
 
 export function useJob(id: number | null): UseQueryResult<JobDetail> {
   return useQuery({ queryKey: ['job', id], queryFn: () => call<JobDetail>('GET', `/api/jobs/${id}`), enabled: id !== null });
+}
+
+export function useActivity(query: ActivityQuery): UseQueryResult<ActivityResponse> {
+  return useQuery({
+    queryKey: ['activity', query],
+    queryFn: () => call<ActivityResponse>('GET', `/api/activity?${new URLSearchParams(Object.entries(query).map(([key, value]) => [key, String(value)])).toString()}`),
+    placeholderData: keepPreviousData
+  });
 }
 
 export function useDashboard(): UseQueryResult<DashboardResponse> {
@@ -260,3 +247,15 @@ export const useSaveInterview = () =>
   );
 
 export const useDeleteInterview = () => useRefreshingMutation((id: number) => call('DELETE', `/api/interviews/${id}`));
+
+export function useDuplicates(): UseQueryResult<DuplicatesResponse> {
+  return useQuery({ queryKey: ['duplicates'], queryFn: () => call<DuplicatesResponse>('GET', '/api/duplicates') });
+}
+
+export function useDuplicateCount(): UseQueryResult<{ total: number }> {
+  return useQuery({ queryKey: ['duplicates-count'], queryFn: () => call<{ total: number }>('GET', '/api/duplicates/count') });
+}
+
+export const useMergeDuplicate = () => useRefreshingMutation((body: { jobIdA: number; jobIdB: number }) => call('POST', '/api/duplicates/merge', body));
+
+export const useDismissDuplicate = () => useRefreshingMutation((body: { jobIdA: number; jobIdB: number }) => call('POST', '/api/duplicates/dismiss', body));

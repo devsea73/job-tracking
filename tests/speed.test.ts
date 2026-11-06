@@ -50,7 +50,7 @@ describe('counters kept by the database', () => {
     expect(counters(server, first.jobId).last_activity_at > before).toBe(true);
   });
 
-  it('remember the furthest stage through a rejection and a step back', async () => {
+  it('remember the furthest stage through a rejection, and correct it on a step back', async () => {
     const server = await createTestServer();
     const { users } = await createUsers(server.app, 'tyler');
     const { applicationId }: any = await users.tyler.addJob(serveJob(server, 'acme'));
@@ -58,7 +58,8 @@ describe('counters kept by the database', () => {
     await users.tyler.patch(`/api/applications/${applicationId}`, { status: 'Technical Interview' });
     expect(furthest(server, applicationId)).toBe(2);
     await users.tyler.patch(`/api/applications/${applicationId}`, { status: 'Recruiter Screen' });
-    expect(furthest(server, applicationId)).toBe(2);
+    expect(furthest(server, applicationId)).toBe(1);
+    await users.tyler.patch(`/api/applications/${applicationId}`, { status: 'Technical Interview' });
     await users.tyler.patch(`/api/applications/${applicationId}`, { status: 'Rejected' });
     expect(furthest(server, applicationId)).toBe(2);
     await users.tyler.patch(`/api/applications/${applicationId}`, { status: 'Offer' });
@@ -261,7 +262,7 @@ describe('with a large data set', () => {
 
   it('pages through every job exactly once', async () => {
     const { tyler } = await loaded();
-    for (const sort of ['recent', 'updated', 'company', 'interview', 'status', 'applicants']) {
+    for (const sort of ['recent', 'applied', 'updated', 'company', 'interview', 'status', 'applicants']) {
       const seen = new Set<number>();
       for (let offset = 0; offset < 400; offset += 50) {
         const { items, total } = (await tyler.get(`/api/jobs?sort=${sort}&limit=50&offset=${offset}`)).json;

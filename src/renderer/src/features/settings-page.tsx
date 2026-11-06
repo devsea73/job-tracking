@@ -1,15 +1,16 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { Copy, Database, Download, FolderOpen, Moon, RotateCcw, Save, Sun, SunMoon, Trash2, Upload } from 'lucide-react';
+import { Bell, Copy, Database, Download, FolderOpen, Moon, RotateCcw, Save, Send, Sun, SunMoon, Timer, Trash2, Upload } from 'lucide-react';
 import type { BackupInfo, CurrentUser } from '@shared/api';
-import type { BridgeState, ThemeChoice } from '@shared/bridge';
+import { NOTIFICATION_HIDE_CHOICES, type BridgeState, type ThemeChoice } from '@shared/bridge';
 import { HelpTip } from '@/components/symbols';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog, Dialog } from '@/components/ui/dialog';
 import { Field, Input } from '@/components/ui/field';
 import { Card, Notice, Skeleton, Tooltip } from '@/components/ui/misc';
 import { useToast } from '@/components/ui/toast';
-import { call, errorMessage, useBackups } from '@/lib/api';
+import { ANY, Select } from '@/components/ui/select';
+import { call, errorMessage, useBackups, useProfiles } from '@/lib/api';
 import { formatBytes, formatDateTime } from '@/lib/utils';
 import { ChangePasswordForm } from './auth';
 import { PhotoCard, ProfilesCard } from './profiles-card';
@@ -26,6 +27,59 @@ function SettingsCard({ title, description, children }: { title: string; descrip
       </h2>
       {children}
     </Card>
+  );
+}
+
+/** Set on this computer: whether jobs others find pop up in the corner, for how long, and who applies. */
+function NotificationsCard({ state }: { state: BridgeState }) {
+  const profiles = useProfiles();
+  const settings = state.notifications;
+  const active = (profiles.data?.profiles ?? []).filter((profile) => !profile.isArchived);
+  const row = 'flex items-center gap-3';
+  return (
+    <SettingsCard title="Notifications" description="When someone else applies to a job none of your profiles has, it pops up in the corner of the screen, even while the app sits in the tray.">
+      <div className="space-y-3">
+        <label className={row}>
+          <Bell className="size-4 text-ink-3" aria-hidden />
+          <span className="flex-1">New jobs found by others</span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={settings.enabled}
+            aria-label="Notifications"
+            onClick={() => void bridge.setNotifications({ enabled: !settings.enabled })}
+            className={`relative h-5 w-9 rounded-full transition-colors ${settings.enabled ? 'bg-accent' : 'bg-border-strong'}`}
+          >
+            <span className={`absolute top-0.5 size-4 rounded-full bg-white transition-all ${settings.enabled ? 'left-[18px]' : 'left-0.5'}`} />
+          </button>
+        </label>
+        <div className={row}>
+          <Timer className="size-4 text-ink-3" aria-hidden />
+          <span className="flex-1">Hide after</span>
+          <Select
+            ariaLabel="Hide notifications after"
+            className="w-[110px]"
+            disabled={!settings.enabled}
+            value={String(settings.hideSeconds)}
+            onChange={(value) => void bridge.setNotifications({ hideSeconds: Number(value) })}
+            options={NOTIFICATION_HIDE_CHOICES.map((seconds) => ({ value: String(seconds), label: `${seconds} seconds` }))}
+          />
+        </div>
+        <div className={row}>
+          <Send className="size-4 text-ink-3" aria-hidden />
+          <span className="flex-1">Apply as</span>
+          <Select
+            ariaLabel="Profile the Apply button uses"
+            className="w-[200px]"
+            disabled={!settings.enabled}
+            value={settings.applyProfileId !== null && active.some((profile) => profile.id === settings.applyProfileId) ? String(settings.applyProfileId) : ANY}
+            onChange={(value) => void bridge.setNotifications({ applyProfileId: value === ANY ? null : Number(value) })}
+            options={[{ value: ANY, label: 'Profile used last' }, ...active.map((profile) => ({ value: String(profile.id), label: profile.name }))]}
+          />
+        </div>
+        <p className="text-[12px] text-ink-3">Apply copies the job link and adds the job to your applications. These settings are for this computer.</p>
+      </div>
+    </SettingsCard>
   );
 }
 
@@ -272,6 +326,7 @@ export function SettingsPage({ state, user }: { state: BridgeState; user: Curren
         <div className="space-y-4">
           <PhotoCard user={user} />
           <ProfilesCard />
+          <NotificationsCard state={state} />
           <SettingsCard title="Appearance">
             <div className="inline-flex rounded-md border border-border-strong p-0.5" role="group" aria-label="Theme">
               {THEMES.map(({ value, label, icon: Icon }) => (

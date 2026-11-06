@@ -295,7 +295,7 @@ const RULES: Rule[] = [
     id: `${h[1].toLowerCase().replace(/^www\./, '')}/${m[1]}`
   })),
   // Job boards and aggregators: their ids identify a listing on that site.
-  pathRule('linkedin', /(^|\.)linkedin\.com$/, /\/jobs\/view\/(?:[^/]*-)?(\d+)/, (m) => ({ id: m[1] })),
+  pathRule('linkedin', /(^|\.)linkedin\.com$/, /\/jobs\/view\/(?:externalApply\/)?(?:[^/]*-)?(\d+)/i, (m) => ({ id: m[1] })),
   {
     provider: 'linkedin',
     host: /(^|\.)linkedin\.com$/,
@@ -313,8 +313,8 @@ const RULES: Rule[] = [
     }
   },
   pathRule('builtin', /^(www\.)?builtin[a-z]*\.com$/, /\/job\/(?:[^/]+\/)*(\d+)\/?$/, (m) => ({ id: m[1] })),
-  pathRule('jobright', /^(www\.)?jobright\.ai$/, /\/jobs\/info\/([^/?#]+)/, (m) => ({ id: m[1] })),
-  pathRule('jobright', /^(www\.)?jobright\.ai$/, /\/jobs\/([0-9a-f]{16,})/i, (m) => ({ id: m[1] })),
+  pathRule('jobright', /^(www\.)?jobright\.ai$/, /\/jobs\/info\/([^/?#]+)/, (m) => ({ id: m[1].toLowerCase() })),
+  pathRule('jobright', /^(www\.)?jobright\.ai$/, /\/jobs\/([0-9a-f]{16,})/i, (m) => ({ id: m[1].toLowerCase() })),
   {
     provider: 'glassdoor',
     host: /(^|\.)glassdoor\.[a-z.]+$/,
@@ -375,6 +375,111 @@ export function identifyAts(input: string | URL): AtsIdentity | null {
       return { provider: rule.provider, externalId: result.id, board: result.board };
     }
   }
+  return fromJobParams(url);
+}
+
+/** Names that say "this value is the job", on sites with no rule of their own. */
+const JOB_ID_PARAMS = new Set([
+  'jobid',
+  'job_id',
+  'job-id',
+  'jobreq',
+  'reqid',
+  'req_id',
+  'requisitionid',
+  'requisition_id',
+  'postingid',
+  'posting_id',
+  'jobpostingid',
+  'opportunityid',
+  'positionid',
+  'position_id',
+  'jobseqno',
+  'jobnumber',
+  'job_number',
+  'jid'
+]);
+
+/** On one system these separate customers, so the same job number can mean different jobs. */
+const TENANT_PARAMS = new Set(['a', 'c', 'cid', 'client', 'clientid', 'company', 'companyid', 'org', 'orgid', 'tenant', 'account', 'partnerid', 'siteid', 'board', 'for', 'token', 'domain']);
+
+/**
+ * An id in a parameter, on a site without its own rule. It only counts within one page of one
+ * site and one customer, because a wrong merge is worse than asking: "?jobId=5" on two
+ * different paths or for two different customers can be two different jobs.
+ */
+function fromJobParams(url: URL): AtsIdentity | null {
+  let jobId: string | null = null;
+  const tenant: string[] = [];
+  for (const [name, value] of url.searchParams) {
+    const lower = name.toLowerCase();
+    if (!jobId && JOB_ID_PARAMS.has(lower) && value.length >= 3 && /\d/.test(value)) jobId = value;
+    else if (TENANT_PARAMS.has(lower)) tenant.push(`${lower}=${value}`);
+  }
+  if (!jobId) return null;
+  const host = url.hostname.toLowerCase().replace(/^www\./, '');
+  const page = url.pathname.replace(/\/+$/, '').replace(/\/(apply|application|details?|jobdetails?|view)$/i, '');
+  return { provider: 'site', externalId: [`${host}${page}`, ...tenant.sort(), jobId].join('|') };
+}
+
+const JOBRIGHT_ID = /^[0-9a-f]{16,40}$/i;
+
+function safeDecode(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * Other listings a link names in its parameters, on top of what it points at. Jobright adds
+ * jr_id=<its own id> to every link it sends people to, so a Greenhouse link carrying one is the
+ * same job as that Jobright page. Links can also wrap the real one, like LinkedIn's externalApply.
+ */
+export function referencedIdentities(input: string | URL, depth = 0): AtsIdentity[] {
+  let url: URL;
+  try {
+    url = typeof input === 'string' ? new URL(input) : input;
+  } catch {
+    return [];
+  }
+  const found: AtsIdentity[] = [];
+  const jobright = url.searchParams.get('jr_id');
+  if (jobright && JOBRIGHT_ID.test(jobright)) found.push({ provider: 'jobright', externalId: jobright.toLowerCase() });
+  if (depth < 2) {
+    for (const value of url.searchParams.values()) {
+      const nested = /^https?%3A/i.test(value) ? safeDecode(value) : value;
+      if (!/^https?:\/\//i.test(nested)) continue;
+      const identity = identifyAts(nested);
+      if (identity && identity.provider !== 'site') found.push(identity);
+      found.push(...referencedIdentities(nested, depth + 1));
+    }
+  }
+  const own = identifyAts(url);
+  const seen = new Set(own ? [`${own.provider}\n${own.externalId}`] : []);
+  return found.filter((identity) => {
+    const key = `${identity.provider}\n${identity.externalId}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+const TITLE_PARAMS = new Set(['jobtitle', 'job_title', 'job-title', 'businesstitle', 'positiontitle', 'position_title', 'jobname', 'job_name', 'title']);
+
+/** A job title some links carry in a parameter, useful when the page itself cannot be read. */
+export function titleFromUrl(input: string | URL): string | null {
+  try {
+    const url = typeof input === 'string' ? new URL(input) : input;
+    for (const [name, value] of url.searchParams) {
+      const text = value.replace(/\s+/g, ' ').trim();
+      // Letters, a sensible length, and not a link or an id.
+      if (TITLE_PARAMS.has(name.toLowerCase()) && text.length >= 3 && text.length <= 200 && /[a-z]{2}/i.test(text) && !/^https?:/i.test(text)) return text;
+    }
+  } catch {
+    // Not a link, so no title in it.
+  }
   return null;
 }
 
@@ -404,7 +509,7 @@ export function sourcePlatform(input: string | URL): string {
     return 'other';
   }
   const identity = identifyAts(url);
-  if (identity) return identity.provider;
+  if (identity && identity.provider !== 'site') return identity.provider;
   const host = url.hostname.toLowerCase();
   for (const [pattern, name] of PLATFORM_HOSTS) {
     if (pattern.test(host)) return name;
@@ -413,18 +518,10 @@ export function sourcePlatform(input: string | URL): string {
 }
 
 /** Aggregators only list a job: an ATS id found on their page is the job's real identity. */
-const AGGREGATOR_PROVIDERS = new Set([
-  'linkedin',
-  'indeed',
-  'builtin',
-  'jobright',
-  'glassdoor',
-  'ziprecruiter',
-  'workable-board'
-]);
+export const AGGREGATOR_PROVIDERS = ['linkedin', 'indeed', 'builtin', 'jobright', 'glassdoor', 'ziprecruiter', 'workable-board'];
 
 export function isAggregator(provider: string | null | undefined): boolean {
-  return !!provider && AGGREGATOR_PROVIDERS.has(provider);
+  return !!provider && AGGREGATOR_PROVIDERS.includes(provider);
 }
 
 /**
@@ -433,7 +530,12 @@ export function isAggregator(provider: string | null | undefined): boolean {
  */
 export function discoverAtsLinks(html: string, ownIdentity: AtsIdentity | null): Array<{ url: string; identity: AtsIdentity }> {
   const found = new Map<string, { url: string; identity: AtsIdentity }>();
-  const unescaped = html.replace(/\\u002[fF]/g, '/').replace(/\\\//g, '/').replace(/&amp;/g, '&');
+  const unescaped = html
+    .replace(/\\u002[fF]/g, '/')
+    .replace(/\\\//g, '/')
+    .replace(/&amp;/g, '&')
+    // A link wrapped inside another one, like a "url=https%3A%2F%2F..." on an apply button.
+    .replace(/https?%3A%2F%2F[^\s"'<>&]+/gi, (encoded) => ` ${safeDecode(encoded)} `);
   const pattern = /https?:\/\/[a-z0-9.-]+\.[a-z]{2,}[^\s"'<>\\)]*/gi;
   for (const match of unescaped.matchAll(pattern)) {
     const raw = match[0];

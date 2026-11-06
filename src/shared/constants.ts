@@ -25,7 +25,7 @@ export type InterviewStage = (typeof INTERVIEW_STAGES)[number];
 export const USER_ROLES = ['admin', 'user'] as const;
 export type UserRole = (typeof USER_ROLES)[number];
 
-export const JOB_SORTS = ['recent', 'updated', 'company', 'interview', 'status', 'applicants'] as const;
+export const JOB_SORTS = ['recent', 'applied', 'updated', 'company', 'interview', 'status', 'applicants'] as const;
 export type JobSort = (typeof JOB_SORTS)[number];
 
 export const JOB_SCOPES = ['all', 'mine', 'others'] as const;

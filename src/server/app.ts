@@ -11,7 +11,11 @@ import { isLanAddress } from './network';
 import * as applicationsService from './services/applications';
 import * as avatarsService from './services/avatars';
 import * as backupsService from './services/backups';
-import { applyToExistingJob, createApplication } from './services/intake';
+import * as duplicatesService from './services/duplicates';
+import { getActivity } from './services/activity';
+import { getJobBrief } from './services/job-brief';
+import { applyToExistingJob, checkLink, createApplication } from './services/intake';
+import { refreshJobFacts } from './services/job-facts-store';
 import { getDashboard, getJobDetail, getTeam, listCompanies, listInterviews, listJobs } from './services/job-queries';
 import * as profilesService from './services/profiles';
 import * as usersService from './services/users';
@@ -224,6 +228,11 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
 
   app.get('/api/jobs/:id', async (request) => getJobDetail(ctx, requireSession(request).user.id, v.parse(v.idParam, request.params).id));
 
+  app.get('/api/jobs/:id/brief', async (request) => {
+    const { application } = v.parse(v.briefQuery, request.query);
+    return getJobBrief(ctx, requireSession(request).user.id, v.parse(v.idParam, request.params).id, application);
+  });
+
   app.post('/api/jobs/:id/highlight', async (request) => {
     const { id } = v.parse(v.idParam, request.params);
     applicationsService.setHighlight(ctx, requireSession(request).user.id, id, v.parse(v.highlightBody, request.body).highlighted);
@@ -253,6 +262,7 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
       .where(eq(jobs.id, id))
       .run();
     if (result.changes === 0) throw notFound('That job no longer exists.');
+    refreshJobFacts(ctx.handle.sqlite, id);
     ctx.events.publish('jobs_changed', id);
     return getJobDetail(ctx, requireSession(request).user.id, id);
   });
@@ -262,11 +272,30 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
     return { ok: true };
   });
 
+  // ---- Possible duplicates, for anyone to settle ------------------------------------
+  app.get('/api/duplicates', async () => duplicatesService.listDuplicates(ctx));
+
+  app.get('/api/duplicates/count', async () => ({ total: duplicatesService.countDuplicates(ctx) }));
+
+  app.post('/api/duplicates/merge', async (request) => {
+    const { jobIdA, jobIdB } = v.parse(v.duplicatePairBody, request.body);
+    return duplicatesService.mergeDuplicatePair(ctx, jobIdA, jobIdB);
+  });
+
+  app.post('/api/duplicates/dismiss', async (request) => {
+    const { jobIdA, jobIdB } = v.parse(v.duplicatePairBody, request.body);
+    duplicatesService.dismissDuplicatePair(ctx, jobIdA, jobIdB);
+    return { ok: true };
+  });
+
   // ---- Applications: readable by everyone, changed only by their owner -------------------------------------------
   app.post('/api/applications', async (request) => {
     const body = v.parse(v.createApplicationBody, request.body) as CreateApplicationRequest;
     return createApplication(ctx, requireSession(request).user.id, body);
   });
+
+  // Reads a pasted link and says whether it is a new job or a duplicate, saving nothing.
+  app.post('/api/applications/check', async (request) => checkLink(ctx, requireSession(request).user.id, v.parse(v.checkLinkBody, request.body).url));
 
   app.patch('/api/applications/:id', async (request) => {
     const { id } = v.parse(v.idParam, request.params);
@@ -302,6 +331,12 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
     const { id } = v.parse(v.idParam, request.params);
     applicationsService.deleteInterview(ctx, requireSession(request).user.id, id);
     return { ok: true };
+  });
+
+  app.get('/api/activity', async (request, reply) => {
+    const userId = requireSession(request).user.id;
+    const query = v.parse(v.activityQuery, request.query);
+    return cachedJson(reply, `activity:${userId}:${request.url}`, () => getActivity(ctx.handle.sqlite, userId, query));
   });
 
   app.get('/api/dashboard', async (request, reply) => {

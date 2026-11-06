@@ -2,6 +2,8 @@ import { statSync, writeFileSync } from 'node:fs';
 import { test } from 'vitest';
 // @ts-expect-error A plain script, shared with the command line and the desktop-app speed test.
 import { LOAD_PASSWORD, seedLoadData } from '../../scripts/seed-load.mjs';
+import { sweepDuplicates } from '../../src/server/services/duplicates';
+import { backfillJobFacts } from '../../src/server/services/job-facts-store';
 import { ApiClient, createTestServer, jobPage, signInAdmin, type TestServer } from '../helpers';
 
 /**
@@ -64,6 +66,11 @@ test('speed with 10,000 jobs', async () => {
   const rows: Row[] = [];
   const me = (await user.get('/api/auth/me')).json;
   const profileId = await user.defaultProfileId();
+
+  // What the first start after an upgrade does: give every saved job its tags and fingerprints.
+  let started = performance.now();
+  const backfilled = backfillJobFacts(server.ctx.handle.sqlite);
+  const backfillMs = performance.now() - started;
 
   const jobId = (await user.get('/api/jobs?limit=1')).json.items[0].id;
   const list = (query: string) => () => user.get(`/api/jobs${query}`);
@@ -135,15 +142,39 @@ test('speed with 10,000 jobs', async () => {
     await Promise.all([client.get('/api/jobs?limit=100'), client.get('/api/dashboard'), client.get('/api/team'), client.get('/api/jobs/companies'), client.get('/api/profiles')]);
   });
 
+  // Last, because it merges whatever the generated data happens to repeat.
+  // Then every job is compared with the rest in the background, while people keep working.
+  const during: number[] = [];
+  let sweeping = true;
+  started = performance.now();
+  const sweep = sweepDuplicates(server.ctx).finally(() => {
+    sweeping = false;
+  });
+  for (let run = 0; sweeping; run += 1) {
+    const requested = performance.now();
+    // A different page each time, so that no answer comes from the cache.
+    await user.get(`/api/jobs?offset=${(run * 100) % 9900}&limit=100`);
+    during.push(performance.now() - requested);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const swept = await sweep;
+  const sweepMs = performance.now() - started;
+  during.sort((a, b) => a - b);
+  rows.push({ name: 'list while duplicates are checked', p50: round(percentile(during, 0.5)), p95: round(percentile(during, 0.95)), max: round(during[during.length - 1]), kb: 0, count: during.length });
+  await measure(rows, 'duplicates to review', () => user.get('/api/duplicates'));
+  await measure(rows, 'duplicates count', () => user.get('/api/duplicates/count'));
+
   const width = Math.max(...rows.map((row) => row.name.length));
   const lines = [
     `Data: ${JSON.stringify(counts)}`,
     `Seeded in ${(seedMs / 1000).toFixed(1)}s. Database: ${dbMb.toFixed(0)} MB.`,
+    `Tags and fingerprints for ${backfilled} saved jobs: ${(backfillMs / 1000).toFixed(1)}s, once, on the first start after upgrading.`,
+    `Background duplicate check of ${swept.checked} jobs: ${(sweepMs / 1000).toFixed(1)}s; merged ${swept.merged}, waiting for review ${swept.pending}.`,
     '',
     `${'request'.padEnd(width)}    p50 ms    p95 ms    max ms   size KB   results`,
     ...rows.map((row) => `${row.name.padEnd(width)}  ${String(row.p50).padStart(8)}  ${String(row.p95).padStart(8)}  ${String(row.max).padStart(8)}  ${String(row.kb).padStart(8)}  ${String(row.count ?? '').padStart(8)}`)
   ];
   console.log(lines.join('\n'));
   const label = process.env.SURVEY_ARGS?.match(/--label (\S+)/)?.[1];
-  writeFileSync(`load-report${label ? `.${label}` : ''}.json`, JSON.stringify({ counts, seedMs, dbMb, rows }, null, 2));
+  writeFileSync(`load-report${label ? `.${label}` : ''}.json`, JSON.stringify({ counts, seedMs, dbMb, backfilled, backfillMs, swept, sweepMs, rows }, null, 2));
 }, 600_000);

@@ -5,6 +5,7 @@ import type { BackupInfo } from '../../shared/api';
 import type { AppContext } from '../context';
 import { closeDatabase, openDatabase } from '../db/client';
 import { ApiError, notFound } from '../errors';
+import { reconcileJobIdentities } from './job-merge';
 
 function stamp(): string {
   return new Date().toISOString().replace(/[:.]/g, '-');
@@ -83,6 +84,8 @@ export async function restoreBackup(ctx: AppContext, name: string): Promise<Back
     ctx.logger.error({ err: error }, 'Restored database failed to open, kept the previous one');
     throw new ApiError(400, 'invalid_backup', 'This backup could not be opened, so nothing was changed.');
   }
+  // An older backup can hold links saved before today's rules. A safety copy was made above.
+  await reconcileJobIdentities(ctx);
   ctx.logger.info({ name }, 'Restored database from backup');
   ctx.events.publish('database_restored');
   return safety;

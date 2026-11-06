@@ -5,6 +5,8 @@
 //   npm run build && node tests/live/e2e-app.mjs [folder-for-screenshots]
 //
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -65,6 +67,24 @@ async function signIn(page, username, password) {
   await page.getByRole('button', { name: 'Sign in' }).click();
 }
 const nav = (page, label) => page.getByRole('navigation', { name: 'Main' }).getByRole('button', { name: label }).click();
+
+/** Types a link into the add bar and waits for its check: what the alert says, and its tone. */
+async function checkViaBar(page, url, memo = '') {
+  const bar = page.locator('[data-add-bar]');
+  await bar.getByRole('textbox', { name: 'Job URL' }).fill(url);
+  await page.waitForFunction(() => {
+    const alert = document.querySelector('[data-add-bar] [data-add-check]');
+    return !!alert && alert.getAttribute('data-add-check') !== 'checking';
+  }, null, { timeout: 150_000 });
+  if (memo) await bar.getByRole('textbox', { name: 'Memo' }).fill(memo);
+  return { bar, text: (await bar.locator('[data-add-check]').innerText()).replace(/\s+/g, ' ') };
+}
+
+/** ✓, then waits for the bar to clear, which is what a save looks like. */
+async function saveViaBar(page) {
+  await page.locator('[data-add-bar]').getByRole('button', { name: 'Save job' }).click();
+  await page.waitForFunction(() => document.querySelector('[data-add-bar] input[aria-label="Job URL"]')?.value === '', null, { timeout: 60_000 });
+}
 
 async function addUser(page, username, password, displayName) {
   await page.getByRole('button', { name: 'Add user' }).first().click();
@@ -144,11 +164,13 @@ try {
   check('John signed in from "computer C"', true);
 
   console.log('\nTyler adds a Built In link');
-  await tyler.page.getByRole('button', { name: 'Add job' }).first().click();
+  check('the job link box has the cursor after signing in', (await tyler.page.evaluate(() => document.activeElement?.getAttribute('aria-label'))) === 'Job URL');
+  const builtIn = await checkViaBar(tyler.page, BUILT_IN_URL, MEMO);
   await shot(tyler.page, '06-add-job');
-  await tyler.page.getByLabel('Job URL').fill(BUILT_IN_URL);
-  await tyler.page.getByLabel('Memo (optional)').fill(MEMO);
-  await tyler.page.getByRole('button', { name: 'Save Application' }).click();
+  console.log(`  check: ${builtIn.text}`);
+  check('a link is checked as soon as it is entered', /Fresh job|Duplicate|read the page/.test(builtIn.text), builtIn.text);
+  await saveViaBar(tyler.page);
+  await tyler.page.locator('[data-job-row]').first().click();
   await tyler.page.getByRole('heading', { level: 2 }).filter({ hasText: /Engineer/ }).waitFor({ timeout: 120_000 });
   const title = await tyler.page.getByRole('heading', { level: 2 }).filter({ hasText: /Engineer/ }).innerText();
   await tyler.page.getByText(/About|Responsibilities|experience/i).first().waitFor();
@@ -159,19 +181,16 @@ try {
   await tyler.page.getByRole('button', { name: 'Close', exact: true }).click();
 
   console.log('\nJohn adds the equivalent Jobright link');
-  await john.page.getByRole('button', { name: 'Add job' }).first().click();
-  await john.page.getByLabel('Job URL').fill(JOBRIGHT_URL);
-  await john.page.getByRole('button', { name: 'Save Application' }).click();
-  const outcome = await Promise.race([
-    john.page.getByRole('heading', { name: 'Is this one of these jobs?' }).waitFor({ timeout: 120_000 }).then(() => 'dialog'),
-    john.page.getByRole('heading', { level: 2 }).filter({ hasText: /Engineer/ }).waitFor({ timeout: 120_000 }).then(() => 'merged')
-  ]);
-  console.log(`  outcome: ${outcome}`);
-  if (outcome === 'dialog') {
+  const jobright = await checkViaBar(john.page, JOBRIGHT_URL);
+  console.log(`  check: ${jobright.text}`);
+  if (/Maybe a duplicate/.test(jobright.text)) {
     await shot(john.page, '08-possible-duplicate');
-    await john.page.getByRole('button', { name: 'Same job' }).first().click();
-    await john.page.getByRole('heading', { level: 2 }).filter({ hasText: /Engineer/ }).waitFor({ timeout: 30_000 });
+    await jobright.bar.getByRole('button', { name: 'Same job' }).click();
   }
+  check('the Jobright link is recognized as the job already saved', /Duplicate|Maybe a duplicate/.test(jobright.text), jobright.text);
+  await saveViaBar(john.page);
+  await john.page.locator('[data-job-row]').first().click();
+  await john.page.getByRole('heading', { level: 2 }).filter({ hasText: /Engineer/ }).waitFor({ timeout: 30_000 });
   await john.page.getByRole('img', { name: /Tyler Morgan/ }).first().waitFor();
   await john.page.getByRole('img', { name: /John Doe/ }).first().waitFor();
   await shot(john.page, '09-two-avatars-on-one-job');
@@ -349,6 +368,21 @@ try {
   const hostDatabases = filesMatching(join(work, 'computer-a'), /\.sqlite$/);
   check('the host has its database in application data', hostDatabases.length === 1 && hostDatabases[0].startsWith('host-data'), JSON.stringify(hostDatabases));
 
+  // What an older version could have left: the same posting saved again under a staffing
+  // company's name, before saved jobs were checked for duplicates. Written while the host is
+  // stopped, with Electron's own Node, which is what the database driver is built for.
+  const planter = join(work, 'plant-duplicate.cjs');
+  writeFileSync(
+    planter,
+    `const Database = require(${JSON.stringify(join(root, 'node_modules', 'better-sqlite3'))});
+const db = new Database(process.argv[2]);
+const job = db.prepare('SELECT * FROM jobs ORDER BY id LIMIT 1').get();
+db.prepare("INSERT INTO jobs (company_name, company_key, title, title_key, description, description_hash, location, created_by, extraction_method) VALUES ('Talent Bridge Staffing', 'talent bridge staffing', ?, ?, ?, ?, ?, ?, 'manual')").run(job.title, job.title_key, job.description, job.description_hash, job.location, job.created_by);
+db.close();`
+  );
+  const planted = spawnSync(electronPath, [planter, join(work, 'computer-a', hostDatabases[0])], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8' });
+  check('a duplicate from an older version was planted', planted.status === 0, planted.stderr);
+
   console.log('\nEverything comes back after restarting');
   await close(tyler);
   await close(john);
@@ -358,65 +392,82 @@ try {
   const tylerAgain = await launch('computer-b');
   await tylerAgain.page.getByRole('heading', { name: 'All Jobs' }).waitFor({ timeout: 20_000 });
   check('client reconnected by itself and remembered the session', true);
-  const after = await tylerAgain.page.evaluate(async () => {
-    const list = (await window.jobTracker.api('GET', '/api/jobs')).data;
-    const detail = (await window.jobTracker.api('GET', `/api/jobs/${list.items[0].id}`)).data;
-    const first = detail.applications.find((application) => application.isMine);
-    return { total: list.total, applications: detail.applications.length, highlighted: detail.isHighlighted, status: first.status, memo: first.memo, interviews: first.interviews.length, urls: detail.urls.length };
-  });
+  const persisted = () =>
+    tylerAgain.page.evaluate(async () => {
+      const list = (await window.jobTracker.api('GET', '/api/jobs')).data;
+      const applied = list.items.find((item) => item.applications.length > 0);
+      const detail = (await window.jobTracker.api('GET', `/api/jobs/${applied.id}`)).data;
+      const first = detail.applications.find((application) => application.isMine);
+      return { total: list.total, applications: detail.applications.length, highlighted: detail.isHighlighted, status: first.status, memo: first.memo, interviews: first.interviews.length, urls: detail.urls.length };
+    });
+  const after = await persisted();
   console.log(`  after restart: ${JSON.stringify(after)}`);
-  check('job, applications, highlight, status, memo and interview all persisted', after.total === 1 && after.applications === 3 && after.highlighted && after.status === 'Technical Interview' && after.memo === MEMO && after.interviews === 1 && after.urls >= 2);
+  check('job, applications, highlight, status, memo and interview all persisted', after.applications === 3 && after.highlighted && after.status === 'Technical Interview' && after.memo === MEMO && after.interviews === 1 && after.urls >= 2);
+
+  console.log('\nA saved duplicate waits for review');
+  const badge = tylerAgain.page.locator('[data-duplicate-count]');
+  await badge.waitFor({ timeout: 30_000 });
+  check('the rail counts the pair waiting for review', (await badge.innerText()) === '1', await badge.innerText());
+  await nav(tylerAgain.page, 'Possible duplicates');
+  const pair = tylerAgain.page.locator('[data-duplicate-pair]');
+  await pair.waitFor();
+  await pair.getByText('Talent Bridge Staffing').waitFor();
+  await shot(tylerAgain.page, '17-review-duplicates');
+  check('the review page shows both jobs and why they look alike', (await pair.getByText('Identical description').count()) === 1);
+  await pair.getByRole('button', { name: 'Same job' }).click();
+  await tylerAgain.page.getByText('No duplicates to check').waitFor({ timeout: 15_000 });
+  const merged = await persisted();
+  check('merging leaves one job that kept every application', merged.total === 1 && merged.applications === 3 && merged.memo === MEMO, JSON.stringify(merged));
+  check('...and the count is gone from the rail', (await badge.count()) === 0);
 
   console.log('\nThe other ways adding a job can go');
-  const addJob = async (url) => {
-    await tylerAgain.page.getByRole('button', { name: 'Add job' }).first().click();
-    await tylerAgain.page.getByLabel('Job URL').fill(url);
-    await tylerAgain.page.getByRole('button', { name: 'Save Application' }).click();
-  };
   const closeDetail = () => tylerAgain.page.getByRole('button', { name: 'Close', exact: true }).click();
+  const clearBar = () => tylerAgain.page.locator('[data-add-bar]').getByRole('textbox', { name: 'Job URL' }).fill('');
 
-  await addJob(BUILT_IN_URL);
-  await tylerAgain.page.getByRole('heading', { name: 'This profile already applied to this job' }).waitFor({ timeout: 30_000 });
+  const again = await checkViaBar(tylerAgain.page, BUILT_IN_URL);
   await shot(tylerAgain.page, '18-already-applied');
-  check('adding a job twice under one profile shows the existing application', true);
-  await tylerAgain.page.getByRole('button', { name: 'Open the job' }).click();
-  await tylerAgain.page.locator('textarea[aria-label="Memo"]').first().waitFor();
-  check('...and offers to open it', (await tylerAgain.page.locator('textarea[aria-label="Memo"]').first().inputValue()) === MEMO);
-  await closeDetail();
+  check('a job this profile applied to already says so before saving', /Already applied as/.test(again.text), again.text);
+  check('...and ✓ is off for that profile', await again.bar.getByRole('button', { name: 'Save job' }).isDisabled());
+  await clearBar();
 
   const JOBDIVA_URL = 'https://www1.jobdiva.com/portal/?a=9xjdnw687b7a7nvvdyut936kpjlgy0023blrozaecads0pdnwppcswnaaku8ji2g#/jobs/29382464';
-  await addJob(JOBDIVA_URL);
-  await tylerAgain.page.getByRole('heading', { name: 'Add the job details' }).waitFor({ timeout: 120_000 });
-  await tylerAgain.page.getByText(/bot check|could not find|closed or removed/i).first().waitFor();
+  const diva = await checkViaBar(tylerAgain.page, JOBDIVA_URL);
   await shot(tylerAgain.page, '19-manual-entry');
-  check('an unreadable page explains why and asks for the details', true);
-  const manualForm = tylerAgain.page.getByRole('dialog');
-  await manualForm.getByLabel('Job title').fill('Data Engineer');
-  await manualForm.getByLabel('Company', { exact: true }).fill('Typed By Hand Inc');
-  await manualForm.getByLabel('Job description').fill('The description, pasted in by hand because the site showed a bot check.');
-  await tylerAgain.page.getByRole('button', { name: 'Save application' }).click();
+  check('an unreadable page says why and asks for a title and company in the bar', /Can't read the page/.test(diva.text), diva.text);
+  await diva.bar.getByRole('textbox', { name: 'Job title' }).fill('Data Engineer');
+  await diva.bar.getByRole('textbox', { name: 'Company' }).fill('Typed By Hand Inc');
+  await saveViaBar(tylerAgain.page);
+  await nav(tylerAgain.page, 'All Jobs');
+  await tylerAgain.page.getByLabel('Search').fill('Typed');
+  await tylerAgain.page.locator('[data-job-row]', { hasText: 'Typed By Hand' }).first().click();
   await tylerAgain.page.getByRole('heading', { level: 2, name: 'Data Engineer' }).waitFor({ timeout: 30_000 });
   await tylerAgain.page.getByLabel('Details entered by hand.').waitFor();
   check('...and saves what was typed', true);
   await closeDetail();
+  await tylerAgain.page.getByLabel('Search').fill('');
 
-  await addJob('https://jobs.ashbyhq.com/gravie/ae035962-5696-43fe-9eb9-fa891860c8a3');
-  await tylerAgain.page.getByRole('heading', { level: 2, name: /Senior Data Engineer/ }).waitFor({ timeout: 120_000 });
-  await closeDetail();
-  await addJob('https://jobright.ai/jobs/info/6a9888ca83fc633357632091');
-  await tylerAgain.page.getByRole('heading', { name: 'Is this one of these jobs?' }).waitFor({ timeout: 120_000 });
-  await tylerAgain.page.getByText('Same company').first().waitFor();
-  await shot(tylerAgain.page, '20-possible-duplicate');
-  check('an uncertain match asks, and says why', true);
-  await tylerAgain.page.getByRole('button', { name: 'Same job' }).first().click();
-  await tylerAgain.page.getByRole('heading', { name: 'This profile already applied to this job' }).waitFor({ timeout: 30_000 });
-  await tylerAgain.page.getByRole('button', { name: 'Close', exact: true }).last().click();
-  const gravie = await tylerAgain.page.evaluate(async () => {
-    const list = (await window.jobTracker.api('GET', '/api/jobs?q=gravie')).data;
-    const detail = (await window.jobTracker.api('GET', `/api/jobs/${list.items[0].id}`)).data;
-    return { total: list.total, platforms: detail.urls.map((url) => url.sourcePlatform) };
-  });
-  check('confirming keeps one job and saves the new link for it', gravie.total === 1 && gravie.platforms.includes('jobright') && gravie.platforms.includes('ashby'), JSON.stringify(gravie));
+  const ashby = await checkViaBar(tylerAgain.page, 'https://jobs.ashbyhq.com/gravie/ae035962-5696-43fe-9eb9-fa891860c8a3');
+  console.log(`  Ashby: ${ashby.text}`);
+  await saveViaBar(tylerAgain.page);
+  const listing = await checkViaBar(tylerAgain.page, 'https://jobright.ai/jobs/info/6a9888ca83fc633357632091');
+  // Jobright rewrites the posting. With the same title, salary and terms it is recognized; a
+  // posting that has changed since is offered as a possible duplicate instead.
+  console.log(`  the Jobright copy of the Ashby posting: ${listing.text}`);
+  if (/Maybe a duplicate/.test(listing.text)) await shot(tylerAgain.page, '20-possible-duplicate');
+  check('a listing site rewrite of a saved posting is caught before saving', /Already applied|Duplicate|Maybe a duplicate/.test(listing.text), listing.text);
+  await clearBar();
+  const gravie = await tylerAgain.page.evaluate(async () => (await window.jobTracker.api('GET', '/api/jobs?q=gravie')).data.total);
+  check('one job remains', gravie === 1, String(gravie));
+
+  await nav(tylerAgain.page, 'All Jobs');
+  await tylerAgain.page.getByLabel('Search').fill('gravie');
+  const gravieRow = tylerAgain.page.locator('[data-job-row]', { hasText: 'Senior Data Engineer' }).first();
+  await gravieRow.waitFor();
+  const tags = await gravieRow.locator('[data-job-tags] > span').allInnerTexts();
+  console.log(`  tags above the title: ${JSON.stringify(tags)}`);
+  await shot(tylerAgain.page, '21-tags');
+  check('tags show above the job title', tags.some((tag) => /Remote|Hybrid|On-site/.test(tag)), JSON.stringify(tags));
+  await tylerAgain.page.getByLabel('Search').fill('');
 
   console.log('\nDeleting a job');
   const typed = await tylerAgain.page.evaluate(async () => (await window.jobTracker.api('GET', '/api/jobs?q=Typed')).data.items[0]);

@@ -33,9 +33,17 @@ const BLOCK_TAGS = new Set([
 
 const SKIP_TAGS = new Set(['script', 'style', 'noscript', 'template', 'iframe', 'svg', 'canvas', 'form', 'button', 'input', 'select', 'textarea', 'nav', 'img', 'video', 'audio']);
 
-export function htmlToText(html: string): string {
-  // Some sources double-encode their HTML (&lt;p&gt;...).
-  const source = /&lt;\/?[a-z]+[^&]*&gt;/i.test(html) && !/<\/?(p|div|ul|li|br|h\d)\b/i.test(html) ? decodeEntities(html) : html;
+const HTML_TAG = /<\/?(?:p|div|span|ul|ol|li|br|strong|em|b|i|u|h[1-6]|table|thead|tbody|tr|td|th|a|section|article|header|footer|blockquote|pre|code|font|hr)\b[^>]*>/i;
+const ENCODED_TAG = /&lt;\/?[a-z][a-z0-9]*\b[^&]{0,200}?&gt;/i;
+
+/** True for markup that would show as tags if displayed as text: "<p>…</p>", or "&lt;p&gt;". */
+export function looksLikeHtml(text: string): boolean {
+  return HTML_TAG.test(text) || ENCODED_TAG.test(text);
+}
+
+export function htmlToText(html: string, depth = 0): string {
+  // Some sources encode their HTML once or twice (&lt;p&gt;...), sometimes inside real tags.
+  const source = ENCODED_TAG.test(html) ? decodeEntities(html) : html;
   const $ = cheerio.load(source, null, false);
   const out: string[] = [];
 
@@ -73,7 +81,9 @@ export function htmlToText(html: string): string {
   };
 
   for (const node of $.root().contents().toArray()) walk(node, 0);
-  return tidyText(out.join(''));
+  const text = tidyText(out.join(''));
+  // Still tags: it was encoded more than once.
+  return depth < 2 && looksLikeHtml(text) ? htmlToText(text, depth + 1) : text;
 }
 
 export function tidyText(text: string): string {

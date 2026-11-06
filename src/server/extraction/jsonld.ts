@@ -1,4 +1,5 @@
 import type { CheerioAPI } from 'cheerio';
+import type { JobHints } from '../dedupe/job-facts';
 import { cleanInline, htmlToText } from './text';
 import type { PartialJob } from './types';
 
@@ -78,6 +79,26 @@ function postingLocation(posting: Json): string | null {
   return location;
 }
 
+/** schema.org's baseSalary, in the several shapes sites use for it. */
+function salaryHint(posting: Json): JobHints['salary'] {
+  const base = (Array.isArray(posting.baseSalary) ? posting.baseSalary[0] : posting.baseSalary) as Json | number | string | undefined;
+  if (base === undefined || base === null) return null;
+  if (typeof base !== 'object') return { min: Number(base) || null, max: Number(base) || null, currency: posting.salaryCurrency as string };
+  const value = base.value as Json | number | string | undefined;
+  const nested = value && typeof value === 'object' ? value : null;
+  const single = nested ? (nested.value as unknown) : value;
+  const number = (raw: unknown) => {
+    const parsed = typeof raw === 'string' ? Number(raw.replace(/[^\d.]/g, '')) : (raw as number);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  };
+  return {
+    min: number(nested?.minValue ?? base.minValue ?? single),
+    max: number(nested?.maxValue ?? base.maxValue ?? single),
+    currency: (base.currency ?? posting.salaryCurrency) as string | null,
+    period: (nested?.unitText ?? base.unitText) as string | null
+  };
+}
+
 function toPartial(posting: Json): PartialJob {
   const description = typeof posting.description === 'string' ? htmlToText(posting.description) : null;
   const identifier = posting.identifier;
@@ -92,7 +113,13 @@ function toPartial(posting: Json): PartialJob {
     company: organizationName(posting.hiringOrganization),
     description: description || null,
     location: postingLocation(posting),
-    requisitionId: requisition
+    requisitionId: requisition,
+    hints: {
+      postedAt: posting.datePosted,
+      salary: salaryHint(posting),
+      employmentType: (Array.isArray(posting.employmentType) ? posting.employmentType.join(' ') : posting.employmentType) as string | null,
+      workArrangement: (posting.jobLocationType ?? posting.workplaceType) as string | null
+    }
   };
 }
 

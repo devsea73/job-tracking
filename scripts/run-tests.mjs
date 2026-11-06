@@ -17,8 +17,11 @@ let env = { ...process.env, ELECTRON_RUN_AS_NODE: '1', VITE_CONFIG_NATIVE_IGNORE
 if (args[0] === '--survey') {
   // Live extraction checks against real URLs. Opt-in only: never part of `npm test`.
   const crossPlatform = args.includes('--cross-platform');
+  const dedupe = args.includes('--dedupe');
+  const intake = args.includes('--intake');
   env = { ...env, JOB_TRACKER_SURVEY: '1', SURVEY_ARGS: args.slice(1).join(' ') };
-  commandArgs = [entry, 'run', '--config', 'vitest.survey.config.ts', crossPlatform ? 'tests/live/cross-platform.test.ts' : 'tests/live/survey.test.ts'];
+  const file = intake ? 'tests/live/intake-run.test.ts' : dedupe ? 'tests/live/dedupe-accuracy.test.ts' : crossPlatform ? 'tests/live/cross-platform.test.ts' : 'tests/live/survey.test.ts';
+  commandArgs = [entry, 'run', '--config', 'vitest.survey.config.ts', file];
 } else if (args[0] === '--load') {
   // Speed with 10,000 jobs. Opt-in: it takes a while and proves nothing unless someone reads it.
   env = { ...env, JOB_TRACKER_SURVEY: '1', SURVEY_ARGS: args.slice(1).join(' ') };

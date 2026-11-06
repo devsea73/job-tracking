@@ -455,10 +455,11 @@ describe('live updates', () => {
     seen.length = 0;
 
     const first: any = await users.tyler.addJob('https://company.com/jobs/1');
-    expect(seen).toEqual(['jobs_changed']);
+    // Each new application is also announced, so others' apps can offer the job to them.
+    expect(seen).toEqual(['jobs_changed', 'application_added']);
     await users.john.addJob('https://company.com/jobs/1');
-    expect(seen).toEqual(['jobs_changed', 'applications_changed']);
+    expect(seen).toEqual(['jobs_changed', 'application_added', 'applications_changed', 'application_added']);
     await users.john.post(`/api/jobs/${first.jobId}/highlight`, { highlighted: true });
-    expect(seen).toEqual(['jobs_changed', 'applications_changed', 'jobs_changed']);
+    expect(seen).toEqual(['jobs_changed', 'application_added', 'applications_changed', 'application_added', 'jobs_changed']);
   });
 });

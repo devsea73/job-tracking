@@ -23,16 +23,41 @@ const COMPANY_SUFFIXES = new Set([
   'bv',
   'pty',
   'pvt',
+  'pte',
+  'pllc',
+  'pc',
+  'srl',
+  'sarl',
+  'spa',
+  'nv',
+  'oy',
+  'ab',
+  'kk',
+  'bhd',
+  'sdn',
   'holdings',
-  'holding'
+  'holding',
+  'group',
+  // A country after the name is the local office of one employer: "Siemens USA". Not "Us":
+  // "Unite Us" is a name of its own.
+  'usa',
+  'america'
 ]);
 
-/** "Stripe, Inc." and "STRIPE" both become "stripe". */
+/**
+ * "Stripe, Inc.", "STRIPE" and "The Stripe Company" all become "stripe"; "C.H. Robinson" and
+ * "C.H.Robinson" become one. Workday prefixes names with cost-center codes ("880 Cigna"),
+ * which say nothing about the company and are dropped.
+ */
 export function normalizeCompany(name: string): string {
-  const words = stripDiacritics(name)
-    .toLowerCase()
-    .replace(/&/g, ' and ')
-    .replace(/\b([a-z])\.(?=[a-z]\.)/g, '$1')
+  let text = stripDiacritics(name).toLowerCase();
+  // "Acme Corp (formerly Widgets)", "ARKANCE USA LLC (USA)": the brackets are about the name, not it.
+  text = text.replace(/\([^)]*\)/g, ' ').replace(/\[[^\]]*\]/g, ' ');
+  // "Smith Holdings dba Acme": the name people know is the one after "doing business as".
+  text = text.replace(/^.*\b(?:dba|d\/b\/a|doing business as)\b/, ' ');
+  text = text.replace(/^\s*\d{2,}[a-z]?\s+(?=[a-z])/, ' ');
+  const words = text
+    .replace(/&|\+/g, ' and ')
     .replace(/[^a-z0-9]+/g, ' ')
     .trim()
     .split(' ')
@@ -42,35 +67,108 @@ export function normalizeCompany(name: string): string {
   return words.join('');
 }
 
-const TITLE_ABBREVIATIONS: Record<string, string> = {
-  sr: 'senior',
-  snr: 'senior',
-  jr: 'junior',
-  engr: 'engineer',
-  eng: 'engineer',
-  dev: 'developer',
-  mgr: 'manager',
-  mgmt: 'management',
-  ii: '2',
-  iii: '3',
-  iv: '4'
+const TITLE_ABBREVIATIONS: Record<string, string[]> = {
+  sr: ['senior'],
+  snr: ['senior'],
+  jr: ['junior'],
+  engr: ['engineer'],
+  eng: ['engineer'],
+  dev: ['developer'],
+  devs: ['developers'],
+  mgr: ['manager'],
+  mgmt: ['management'],
+  swe: ['software', 'engineer'],
+  sde: ['software', 'development', 'engineer'],
+  sre: ['site', 'reliability', 'engineer'],
+  ml: ['machine', 'learning'],
+  ii: ['2'],
+  iii: ['3'],
+  iv: ['4']
 };
+
+/** Words written as one or two: "Full-Stack", "Full Stack" and "Fullstack" are one word. */
+const COMPOUNDS: Array<[string, string, string]> = [
+  ['back', 'end', 'backend'],
+  ['front', 'end', 'frontend'],
+  ['full', 'stack', 'fullstack'],
+  ['dev', 'ops', 'devops'],
+  ['data', 'base', 'database'],
+  ['node', 'js', 'node'],
+  ['react', 'js', 'react'],
+  ['vue', 'js', 'vue'],
+  ['next', 'js', 'next']
+];
 
 /** Words that describe where or how, not which role. */
 const TITLE_NOISE = new Set(['remote', 'hybrid', 'onsite', 'usa', 'us', 'united', 'states', 'the', 'a', 'an']);
 
+/**
+ * A part of a title in brackets or after a dash that only says where, on what terms, or for which
+ * listing: "(Remote - US)", "- 100% Remote", "(Contract)", "(Company name withheld)", "| New York, NY".
+ * Inside the title proper the same words can matter: a "Contract Manager" is a role.
+ */
+const ASIDE =
+  /^(?:\d+%\s*)?(?:(?:fully|100%)\s+)?(?:remote|hybrid|on-?site|in-?office|usa?|united states|north america|anywhere|nationwide|worldwide|east coast|west coast|contract(?:or)?|contract to hire|c2c|w-?2|1099|full[- ]?time|part[- ]?time|permanent|temporary|all levels|multiple (?:levels|locations)|company name withheld|confidential|urgent(?:ly)? hiring|hiring now|immediate (?:start|hire)|[m|f|w|d|x](?:\s*\/\s*[m|f|w|d|x]){1,2}|[a-z .'-]+,\s*[a-z]{2}|[a-z]+ remote|remote[ ,-]+[a-z ,]+|[\s,/&-]|and|or)+$/i;
+
+function withoutAsides(title: string): string {
+  let text = title.replace(/\(([^)]*)\)|\[([^\]]*)\]/g, (_whole: string, round: string | undefined, square: string | undefined) => (ASIDE.test((round ?? square ?? '').trim()) ? ' ' : ` ${round ?? square} `));
+  // Trailing segments after a dash or bar, one at a time, from the end.
+  for (;;) {
+    const match = /^(.*\S)\s+[-–—|:]\s+([^-–—|:]+)$/.exec(text.trim());
+    if (!match || !ASIDE.test(match[2].trim())) break;
+    text = match[1];
+  }
+  // Requisition codes: "Job-ID 3301", "Req #12345", "R-102938", "(2024-1135)".
+  return text
+    .replace(/\b(?:job|req(?:uisition)?|posting|position)[\s-]*(?:id|no\.?|number|code)?[\s#:-]*[a-z]*\d[\w-]*/gi, ' ')
+    .replace(/(?:^|\s)#?[a-z]{0,3}-?\d{4,}[\w-]*/gi, ' ');
+}
+
 export function titleTokens(title: string): string[] {
-  const cleaned = stripDiacritics(title)
+  const cleaned = stripDiacritics(withoutAsides(title))
     .toLowerCase()
-    .replace(/\((?:[^)]*\b(?:remote|hybrid|onsite|on-site|usa?|united states)\b[^)]*)\)/g, ' ')
     .replace(/&/g, ' and ')
+    .replace(/\.net\b/g, ' dotnet ')
     .replace(/[^a-z0-9+#]+/g, ' ')
     .trim();
-  return cleaned
-    .split(' ')
-    .filter(Boolean)
-    .map((word) => TITLE_ABBREVIATIONS[word] ?? word)
-    .filter((word) => !TITLE_NOISE.has(word));
+  const words = cleaned.split(' ').filter(Boolean);
+  const expanded: string[] = [];
+  words.forEach((word, index) => {
+    // "Engineer I" and "Engineer V": the last word is a level, not a letter.
+    if ((word === 'i' || word === 'v') && index === words.length - 1 && index > 0) expanded.push(word === 'i' ? '1' : '5');
+    else expanded.push(...(TITLE_ABBREVIATIONS[word] ?? [word]));
+  });
+  const joined: string[] = [];
+  for (let i = 0; i < expanded.length; i += 1) {
+    const pair = COMPOUNDS.find(([first, second]) => expanded[i] === first && expanded[i + 1] === second);
+    if (pair) {
+      joined.push(pair[2]);
+      i += 1;
+    } else joined.push(expanded[i]);
+  }
+  return joined.filter((word) => !TITLE_NOISE.has(word));
+}
+
+const LEVEL_WORDS: Record<string, number> = { intern: 0, internship: 0, junior: 1, associate: 1, entry: 1, mid: 2, intermediate: 2, senior: 3, staff: 4, principal: 5, distinguished: 6, fellow: 6 };
+
+/**
+ * The seniority a title names, if any: a word ("Senior") and a number ("II") are separate, as
+ * titles use either or both. Different seniorities are different openings, however alike.
+ */
+export function titleLevel(title: string): { word: number | null; number: number | null } {
+  let word: number | null = null;
+  let number: number | null = null;
+  for (const token of titleTokens(title)) {
+    if (token in LEVEL_WORDS) word = Math.max(word ?? 0, LEVEL_WORDS[token]);
+    else if (/^[1-5]$/.test(token)) number = Number(token);
+  }
+  return { word, number };
+}
+
+export function levelsConflict(a: string, b: string): boolean {
+  const left = titleLevel(a);
+  const right = titleLevel(b);
+  return (left.word !== null && right.word !== null && left.word !== right.word) || (left.number !== null && right.number !== null && left.number !== right.number);
 }
 
 export function normalizeTitle(title: string): string {
@@ -133,6 +231,60 @@ export function descriptionSimilarity(a: string, b: string): DescriptionSimilari
     jaccard: shared / (sa.size + sb.size - shared),
     containment: shared / small.size
   };
+}
+
+/** Words every posting uses, which say nothing about which job this is. */
+const COMMON_WORDS = new Set(
+  (
+    'the and for with you your our are will that this have from all can has not but they their them who what when where how why was were been being its any more most other some such only own same than too very just into over under about after before between during out off down also each both few may might must shall should would could able across along among around because while within without work working works worked team teams role roles job jobs position positions company experience experienced years year skills skill ability strong knowledge including include includes required requirements preferred qualifications responsibilities responsible opportunity opportunities candidate candidates employee employees benefits benefit equal employment apply application applicants please join help make use using used need needs new one two three etc per well like based ensure provide providing support supporting develop developing development build building design designing maintain maintaining manage managing lead leading collaborate collaborating business technical technology technologies solutions systems system services service environment understanding excellent good great best high level time part full looking seeking ideal success successful'
+  ).split(' ')
+);
+
+/** The words that make a posting about this job and not any other. */
+export function distinctiveWords(text: string): Set<string> {
+  const words = new Set<string>();
+  for (const word of descriptionWords(text)) {
+    if (word.length >= 3 && !COMMON_WORDS.has(word) && !/^\d+$/.test(word)) words.add(word);
+  }
+  return words;
+}
+
+/**
+ * How much of the shorter text's vocabulary appears in the longer one. A listing site rewrites a
+ * posting's sentences, which defeats phrase comparison, but it keeps talking about the same things.
+ */
+export function vocabularyOverlap(a: string, b: string): number {
+  const left = distinctiveWords(a);
+  const right = distinctiveWords(b);
+  if (left.size < 15 || right.size < 15) return 0;
+  const [small, large] = left.size <= right.size ? [left, right] : [right, left];
+  let shared = 0;
+  for (const word of small) if (large.has(word)) shared += 1;
+  return shared / small.size;
+}
+
+/**
+ * A small sample of a text's phrases: always the same ones for the same text, and two texts share
+ * samples in proportion to how much of their wording they share. Comparing these in an index finds
+ * reposted text among thousands of postings without comparing against each one.
+ */
+export function textSketch(text: string, size = 8): string[] {
+  const words = descriptionWords(text);
+  if (words.length < 20) return [];
+  const hashes = new Set<number>();
+  for (let i = 0; i <= words.length - 4; i += 1) {
+    let hash = 0x811c9dc5;
+    for (let w = i; w < i + 4; w += 1) {
+      const word = words[w];
+      for (let c = 0; c < word.length; c += 1) hash = Math.imul(hash ^ word.charCodeAt(c), 0x01000193);
+      hash = Math.imul(hash ^ 32, 0x01000193);
+    }
+    hashes.add(hash >>> 0);
+  }
+  return [...hashes]
+    .sort((a, b) => a - b)
+    .slice(0, size)
+    .map((hash) => hash.toString(16));
 }
 
 const REQ_ID_PATTERN =

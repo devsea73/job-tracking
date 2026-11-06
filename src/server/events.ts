@@ -9,8 +9,8 @@ export class EventBus {
     this.emitter.setMaxListeners(0);
   }
 
-  publish(type: ServerEvent['type'], jobId?: number): void {
-    this.emitter.emit('event', { type, jobId, at: new Date().toISOString() } satisfies ServerEvent);
+  publish(type: ServerEvent['type'], jobId?: number, extra: Pick<ServerEvent, 'userId' | 'applicationId'> = {}): void {
+    this.emitter.emit('event', { type, jobId, ...extra, at: new Date().toISOString() } satisfies ServerEvent);
   }
 
   subscribe(listener: (event: ServerEvent) => void): () => void {

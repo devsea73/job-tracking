@@ -134,7 +134,8 @@ export class Connection {
       return { ok: false, status: 0, error: { code: 'invalid_path', message: 'Invalid request.' } };
     }
     try {
-      const timeout = method === 'POST' && path === '/api/applications' ? LONG_CALL_MS : undefined;
+      // Reading a job page can take a browser and a while.
+      const timeout = method === 'POST' && (path === '/api/applications' || path === '/api/applications/check') ? LONG_CALL_MS : undefined;
       const result = await client.call(method, path, body, this.token, timeout);
 
       if (path === '/api/auth/login' && result.ok) {

@@ -17,11 +17,15 @@ export const PIPELINE_SHORT_LABELS: Record<PipelineStage, string> = {
  * Technical Interview and was later rejected still reached it, and going straight from Applied
  * to Technical Interview also counts as having passed Recruiter Screen.
  */
+/**
+ * The furthest stage reached, from the statuses in the order they were set. A rejection keeps
+ * the furthest stage. Any other move back is a correction: a misclicked stage was never reached.
+ */
 export function furthestStage(statuses: Iterable<ApplicationStatus>): PipelineStage {
   let furthest = 0;
   for (const status of statuses) {
-    const index = PIPELINE_STAGES.indexOf(status as PipelineStage);
-    if (index > furthest) furthest = index;
+    if (status === 'Rejected') continue;
+    furthest = Math.max(0, PIPELINE_STAGES.indexOf(status as PipelineStage));
   }
   return PIPELINE_STAGES[furthest];
 }

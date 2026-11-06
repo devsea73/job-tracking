@@ -8,7 +8,10 @@ import type { HttpClient } from './extraction/safe-fetch';
 import type { PageRenderer } from './extraction/types';
 import type { Logger } from './logger';
 import { ReadCache } from './read-cache';
+import { createBackup } from './services/backups';
 import { DraftStore } from './services/drafts';
+import { cleanSavedLinks, reindexJobs, repairHtmlDescriptions } from './services/job-facts-store';
+import { reconcileJobIdentities } from './services/job-merge';
 import { ensureInitialAdmin } from './services/users';
 
 export interface ContextOptions {
@@ -39,5 +42,12 @@ export async function createContext(options: ContextOptions): Promise<AppContext
     new ReadCache()
   );
   await ensureInitialAdmin(ctx);
+  const repaired = repairHtmlDescriptions(handle.sqlite);
+  const cleanedLinks = cleanSavedLinks(handle.sqlite);
+  if (cleanedLinks > 0) options.logger.info({ cleanedLinks }, 'Removed visitor tracking from saved links');
+  const reindexed = reindexJobs(handle.sqlite);
+  if (reindexed > 0) options.logger.info({ reindexed }, 'Indexed saved jobs for duplicate detection');
+  if (repaired > 0) options.logger.info({ repaired }, 'Turned descriptions saved as markup into text');
+  await reconcileJobIdentities(ctx, { backup: () => createBackup(ctx, 'before-merge') });
   return ctx;
 }

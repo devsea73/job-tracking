@@ -1,4 +1,3 @@
-import { useVirtualizer } from '@tanstack/react-virtual';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
@@ -7,10 +6,15 @@ import {
   ArrowUpToLine,
   Briefcase,
   Building2,
+  CalendarCheck,
   CalendarClock,
   CalendarDays,
+  ChevronLeft,
   ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
   ChevronsUpDown,
+  Rows3,
   Clock,
   Globe,
   Inbox,
@@ -31,6 +35,7 @@ import {
 import type { CurrentUser, JobListItem, JobListQuery } from '@shared/api';
 import { APPLICATION_STATUSES, INTERVIEW_STAGES, type ApplicationStatus, type InterviewStage, type JobScope, type JobSort } from '@shared/constants';
 import { AvatarStack, canDeleteJob, HighlightButton, ProcessLine, StatusSelect } from '@/components/job-bits';
+import { JobTags } from '@/components/job-tags';
 import { IconLabel, STAGE_ICONS, STATUS_ICONS, Symbol } from '@/components/symbols';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/dialog';
@@ -38,13 +43,14 @@ import { Input } from '@/components/ui/field';
 import { EmptyState, Notice, Skeleton, Tooltip } from '@/components/ui/misc';
 import { ANY, Select } from '@/components/ui/select';
 import { useToast } from '@/components/ui/toast';
-import { errorMessage, JOB_PAGE_SIZE, useCompanies, useDeleteJob, useJobWindow, useTeam } from '@/lib/api';
-import { cn, dayBoundary, formatDateTime, formatShortAgo } from '@/lib/utils';
+import { errorMessage, PAGE_SIZES, useCompanies, useDeleteJob, useJobPage, useTeam, type PageSize } from '@/lib/api';
+import { cn, dayBoundary, formatDate, formatDateTime, formatShortAgo, formatShortDate } from '@/lib/utils';
 
 export type JobsView = 'mine' | 'all' | 'highlighted';
 
 const SORT_OPTIONS: Array<{ value: JobSort; label: string; icon: LucideIcon }> = [
   { value: 'recent', label: 'Recently added', icon: Clock },
+  { value: 'applied', label: 'Applied date', icon: CalendarCheck },
   { value: 'updated', label: 'Recently updated', icon: RefreshCw },
   { value: 'company', label: 'Company name', icon: ArrowDownAZ },
   { value: 'interview', label: 'Interview date', icon: CalendarClock },
@@ -77,6 +83,12 @@ interface Filters {
 
 const DEFAULT_FILTERS: Filters = { q: '', company: '', status: ANY, stage: ANY, from: '', to: '', scope: 'all', person: ANY, profile: ANY, highlightedOnly: false, highlightFirst: false, sort: 'recent' };
 
+/** My Applications is about when I applied; the shared lists about when jobs arrived. */
+const defaultsFor = (view: JobsView): Filters => (view === 'mine' ? { ...DEFAULT_FILTERS, sort: 'applied' } : DEFAULT_FILTERS);
+
+/** Applied date only makes sense for my own applications, and there it replaces "recently added". */
+const sortsFor = (view: JobsView) => SORT_OPTIONS.filter(({ value }) => (view === 'mine' ? value !== 'recent' : value !== 'applied'));
+
 function useDebounced<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -105,29 +117,26 @@ function ToolButton({ active, onClick, icon: Icon, label, badge }: { active?: bo
 
 interface RowProps {
   job: JobListItem;
-  index: number;
   view: JobsView;
   columnCount: number;
   expanded: boolean;
   canDelete: boolean;
-  measure: (element: Element | null) => void;
   onToggle: (id: number) => void;
   onOpen: (id: number) => void;
   onDelete: (job: JobListItem) => void;
 }
 
-/**
- * Only rows near the viewport exist, and each redraws only when its own job changes. Each is
- * its own table body, which is what lets the list measure a row together with its details.
- */
-const Row = memo(function Row({ job, index, view, columnCount, expanded, canDelete, measure, onToggle, onOpen, onDelete }: RowProps) {
+/** Each row redraws only when its own job changes, and keeps its details in its own table body. */
+const Row = memo(function Row({ job, view, columnCount, expanded, canDelete, onToggle, onOpen, onDelete }: RowProps) {
   const mine = job.applications.filter((application) => application.isMine);
   const updated = job.applications.reduce<string>((newest, application) => (application.updatedAt > newest ? application.updatedAt : newest), job.updatedAt);
   const upcoming = mine.map((application) => application.nextInterviewAt).filter((value): value is string => !!value).sort()[0];
   const memoText = mine.find((application) => application.memoPreview)?.memoPreview;
+  // My Applications shows when I applied; with several of my profiles, the first time.
+  const applied = mine.map((application) => application.appliedAt).sort()[0];
   const canExpand = job.applications.length > 0;
   return (
-    <tbody data-index={index} ref={measure}>
+    <tbody>
       <tr
         data-job-row
         tabIndex={0}
@@ -156,8 +165,9 @@ const Row = memo(function Row({ job, index, view, columnCount, expanded, canDele
         <td className="truncate py-1.5 pr-3 font-medium" title={job.company}>
           {job.company}
         </td>
-        <td className="truncate py-1.5 pr-3" title={job.location ? `${job.title} · ${job.location}` : job.title}>
-          {job.title}
+        <td className="py-1.5 pr-3" title={job.location ? `${job.title} · ${job.location}` : job.title}>
+          <JobTags facts={job.facts} reserve className="mb-0.5" />
+          <div className="truncate">{job.title}</div>
         </td>
         <td className="py-1.5 pr-3">
           {mine.length === 1 ? (
@@ -184,7 +194,9 @@ const Row = memo(function Row({ job, index, view, columnCount, expanded, canDele
         {view === 'mine' ? (
           <>
             <td className="truncate py-1.5 pr-3 text-[12.5px] text-ink-2">{upcoming ? formatDateTime(upcoming) : <span className="text-ink-3">—</span>}</td>
-            <td className="py-1.5 pr-3 text-center">{memoText ? <Symbol icon={StickyNote} label={memoText} className="text-ink-3" size="size-3.5" /> : <span className="text-ink-3">—</span>}</td>
+            <td className="truncate py-1.5 pr-3 text-[12.5px] text-ink-2" title={memoText} data-memo>
+              {memoText ?? <span className="text-ink-3">—</span>}
+            </td>
           </>
         ) : null}
         <td className="py-1.5 pr-3">
@@ -209,9 +221,15 @@ const Row = memo(function Row({ job, index, view, columnCount, expanded, canDele
             </button>
           ) : null}
         </td>
-        <td className="whitespace-nowrap py-1.5 pl-1 pr-4 text-right text-[12px] tabular-nums text-ink-3" title={formatDateTime(updated)}>
-          {formatShortAgo(updated)}
-        </td>
+        {view === 'mine' ? (
+          <td className="whitespace-nowrap py-1.5 pl-1 pr-4 text-right text-[12px] tabular-nums text-ink-2" title={applied ? `Applied ${formatDate(applied)}` : undefined} data-applied>
+            {applied ? formatShortDate(applied) : <span className="text-ink-3">—</span>}
+          </td>
+        ) : (
+          <td className="whitespace-nowrap py-1.5 pl-1 pr-4 text-right text-[12px] tabular-nums text-ink-3" title={formatDateTime(updated)}>
+            {formatShortAgo(updated)}
+          </td>
+        )}
       </tr>
       {expanded && canExpand ? (
         <tr className="border-b border-border bg-surface-2/40">
@@ -229,27 +247,88 @@ const Row = memo(function Row({ job, index, view, columnCount, expanded, canDele
   );
 });
 
-function LoadingRow({ index, columnCount, measure }: { index: number; columnCount: number; measure: (element: Element | null) => void }) {
+const PAGE_SIZE_KEY = 'jobTracker.pageSize';
+
+function savedPageSize(): PageSize {
+  const saved = Number(localStorage.getItem(PAGE_SIZE_KEY));
+  return (PAGE_SIZES as readonly number[]).includes(saved) ? (saved as PageSize) : 50;
+}
+
+function PagerButton({ label, icon: Icon, disabled, onClick }: { label: string; icon: LucideIcon; disabled: boolean; onClick: () => void }) {
   return (
-    <tbody data-index={index} ref={measure}>
-      <tr className="border-b border-border">
-        <td colSpan={columnCount} className="px-4 py-2.5">
-          <Skeleton className="h-5 w-full" />
-        </td>
-      </tr>
-    </tbody>
+    <Tooltip content={label}>
+      <button type="button" aria-label={label} disabled={disabled} onClick={onClick} className="inline-flex size-7 items-center justify-center rounded-md text-ink-2 hover:bg-surface-2 hover:text-ink disabled:pointer-events-none disabled:opacity-35">
+        <Icon className="size-4" aria-hidden />
+      </button>
+    </Tooltip>
   );
 }
 
-const ROW_HEIGHT = 41;
+/** Page numbers around the current one, with the first and last always in reach. */
+function pageNumbers(current: number, count: number): Array<number | 'gap'> {
+  const shown = new Set([0, count - 1, current - 2, current - 1, current, current + 1, current + 2].filter((page) => page >= 0 && page < count));
+  const sorted = [...shown].sort((a, b) => a - b);
+  const result: Array<number | 'gap'> = [];
+  sorted.forEach((page, index) => {
+    if (index > 0 && page - sorted[index - 1] > 1) result.push('gap');
+    result.push(page);
+  });
+  return result;
+}
+
+function Pager({ page, size, total, onPage, onSize }: { page: number; size: PageSize; total: number; onPage: (page: number) => void; onSize: (size: PageSize) => void }) {
+  const count = Math.max(1, Math.ceil(total / size));
+  const first = total === 0 ? 0 : page * size + 1;
+  const last = Math.min(total, (page + 1) * size);
+  return (
+    <nav aria-label="Pages" className="flex shrink-0 items-center gap-1 border-t border-border bg-surface px-4 py-1.5">
+      <Select
+        ariaLabel="Jobs per page"
+        className="h-7 w-[84px]"
+        leading={<Rows3 className="size-3.5 text-ink-3" aria-hidden />}
+        value={String(size)}
+        onChange={(value) => onSize(Number(value) as PageSize)}
+        options={PAGE_SIZES.map((value) => ({ value: String(value), label: String(value) }))}
+      />
+      <span className="ml-2 text-[12px] tabular-nums text-ink-3" data-page-range>
+        {first.toLocaleString()}–{last.toLocaleString()} / {total.toLocaleString()}
+      </span>
+      <div className="ml-auto flex items-center gap-0.5">
+        <PagerButton label="First page" icon={ChevronsLeft} disabled={page === 0} onClick={() => onPage(0)} />
+        <PagerButton label="Previous page" icon={ChevronLeft} disabled={page === 0} onClick={() => onPage(page - 1)} />
+        {pageNumbers(page, count).map((item, index) =>
+          item === 'gap' ? (
+            <span key={`gap-${index}`} className="px-1 text-ink-3" aria-hidden>
+              …
+            </span>
+          ) : (
+            <button
+              key={item}
+              type="button"
+              aria-label={`Page ${item + 1}`}
+              aria-current={item === page ? 'page' : undefined}
+              onClick={() => onPage(item)}
+              className={cn('h-7 min-w-7 rounded-md px-1.5 text-[12px] tabular-nums', item === page ? 'bg-accent-soft font-semibold text-accent-soft-ink' : 'text-ink-2 hover:bg-surface-2 hover:text-ink')}
+            >
+              {item + 1}
+            </button>
+          )
+        )}
+        <PagerButton label="Next page" icon={ChevronRight} disabled={page >= count - 1} onClick={() => onPage(page + 1)} />
+        <PagerButton label="Last page" icon={ChevronsRight} disabled={page >= count - 1} onClick={() => onPage(count - 1)} />
+      </div>
+    </nav>
+  );
+}
 
 export function JobsPage({ view, user, onOpenJob, onAddJob, focusSearchSignal }: { view: JobsView; user: CurrentUser; onOpenJob: (id: number) => void; onAddJob: () => void; focusSearchSignal: number }) {
-  const [filters, setFilters] = useState<Filters>(DEFAULT_FILTERS);
+  const [filters, setFilters] = useState<Filters>(() => defaultsFor(view));
   const [showFilters, setShowFilters] = useState(false);
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set());
   const [expandAll, setExpandAll] = useState(false);
   const [deleting, setDeleting] = useState<JobListItem | null>(null);
-  const [count, setCount] = useState(0);
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState<PageSize>(savedPageSize);
   const team = useTeam();
   const remove = useDeleteJob();
   const toast = useToast();
@@ -258,7 +337,7 @@ export function JobsPage({ view, user, onOpenJob, onAddJob, focusSearchSignal }:
   const set = (patch: Partial<Filters>) => setFilters((current) => ({ ...current, ...patch }));
 
   useEffect(() => {
-    setFilters(DEFAULT_FILTERS);
+    setFilters(defaultsFor(view));
     setShowFilters(false);
     setExpanded(new Set());
     setExpandAll(false);
@@ -267,8 +346,9 @@ export function JobsPage({ view, user, onOpenJob, onAddJob, focusSearchSignal }:
     if (focusSearchSignal > 0) searchInput.current?.focus();
   }, [focusSearchSignal]);
 
-  const typedSearch = useDebounced(filters.q, 120);
-  const typedCompany = useDebounced(filters.company, 120);
+  // Searching costs the host a few milliseconds, so the list follows typing almost at once.
+  const typedSearch = useDebounced(filters.q, 50);
+  const typedCompany = useDebounced(filters.company, 50);
 
   const query = useMemo<JobListQuery>(() => {
     const scope: JobScope = view === 'mine' ? 'mine' : filters.scope;
@@ -288,26 +368,26 @@ export function JobsPage({ view, user, onOpenJob, onAddJob, focusSearchSignal }:
     };
   }, [view, typedSearch, typedCompany, filters.status, filters.stage, filters.from, filters.to, filters.scope, filters.person, filters.profile, filters.highlightedOnly, filters.highlightFirst, filters.sort]);
 
-  const virtualizer = useVirtualizer({
-    count,
-    getScrollElement: () => scroller.current,
-    estimateSize: () => ROW_HEIGHT,
-    overscan: 12,
-    getItemKey: (index) => index
-  });
-  const virtualItems = virtualizer.getVirtualItems();
-  const firstPage = Math.floor((virtualItems[0]?.index ?? 0) / JOB_PAGE_SIZE);
-  const lastPage = Math.floor((virtualItems[virtualItems.length - 1]?.index ?? 0) / JOB_PAGE_SIZE);
-  const jobs = useJobWindow(query, firstPage, lastPage);
-
-  useEffect(() => {
-    if (jobs.total !== undefined) setCount(jobs.total);
-  }, [jobs.total]);
+  // A new search, filter or sort starts again from the first page.
   const queryKey = JSON.stringify(query);
   useEffect(() => {
-    virtualizer.scrollToOffset(0);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    setPage(0);
   }, [queryKey]);
+  const jobs = useJobPage(query, page, pageSize);
+  const total = jobs.data?.total;
+  // When jobs disappear (deleted, merged), a page past the end moves back to the last one.
+  useEffect(() => {
+    if (total !== undefined && page > 0 && page * pageSize >= total) setPage(Math.max(0, Math.ceil(total / pageSize) - 1));
+  }, [total, page, pageSize]);
+  useEffect(() => {
+    scroller.current?.scrollTo({ top: 0 });
+  }, [page, pageSize, queryKey]);
+  const changeSize = (size: PageSize) => {
+    // Keeps the first job on screen in view.
+    setPage(Math.floor((page * pageSize) / size));
+    setPageSize(size);
+    localStorage.setItem(PAGE_SIZE_KEY, String(size));
+  };
 
   const companies = useCompanies();
   const members = team.data ?? [];
@@ -329,19 +409,17 @@ export function JobsPage({ view, user, onOpenJob, onAddJob, focusSearchSignal }:
     });
   }, []);
 
-  const total = jobs.total ?? 0;
-  const paddingTop = virtualItems[0]?.start ?? 0;
-  const paddingBottom = virtualizer.getTotalSize() - (virtualItems[virtualItems.length - 1]?.end ?? 0);
-  const showList = total > 0 && count > 0;
+  const items = jobs.data?.items ?? [];
+  const showList = (total ?? 0) > 0;
 
   return (
     <div className="flex h-full flex-col">
       <header className="px-5 pb-2.5 pt-4">
         <div className="flex items-center gap-2">
           <h1 className="mr-1 whitespace-nowrap text-[17px] font-semibold leading-tight">{VIEW_TITLES[view]}</h1>
-          <span className="inline-flex items-center gap-1 text-[12.5px] tabular-nums text-ink-3" role="status" title={`${total.toLocaleString()} jobs`}>
+          <span className="inline-flex items-center gap-1 text-[12.5px] tabular-nums text-ink-3" role="status" title={`${(total ?? 0).toLocaleString()} jobs`}>
             <Briefcase className="size-3.5" aria-hidden />
-            {jobs.total !== undefined ? total.toLocaleString() : ''}
+            {total !== undefined ? total.toLocaleString() : ''}
           </span>
           <div className="relative ml-1 min-w-[160px] flex-1">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-ink-3" aria-hidden />
@@ -371,17 +449,12 @@ export function JobsPage({ view, user, onOpenJob, onAddJob, focusSearchSignal }:
             leading={<ArrowDownWideNarrow className="size-4 text-ink-2" aria-hidden />}
             value={filters.sort}
             onChange={(value) => set({ sort: value as JobSort })}
-            options={SORT_OPTIONS.map(({ value, label, icon }) => ({ value, label: <IconLabel icon={icon}>{label}</IconLabel> }))}
+            options={sortsFor(view).map(({ value, label, icon }) => ({ value, label: <IconLabel icon={icon}>{label}</IconLabel> }))}
           />
           {view !== 'highlighted' ? <ToolButton active={filters.highlightedOnly} onClick={() => set({ highlightedOnly: !filters.highlightedOnly })} icon={Star} label="Highlighted only" /> : null}
           <ToolButton active={filters.highlightFirst} onClick={() => set({ highlightFirst: !filters.highlightFirst })} icon={ArrowUpToLine} label="Starred first" />
           <ToolButton active={expandAll} onClick={() => setExpandAll(!expandAll)} icon={ChevronsUpDown} label="Show every process" />
           <ToolButton active={showFilters} onClick={() => setShowFilters(!showFilters)} icon={SlidersHorizontal} label="Filters" badge={filterCount} />
-          <Tooltip content="Add job">
-            <Button variant="primary" size="icon" aria-label="Add job" className="size-8.5 shrink-0" onClick={onAddJob}>
-              <Plus />
-            </Button>
-          </Tooltip>
         </div>
 
         {showFilters ? (
@@ -432,13 +505,13 @@ export function JobsPage({ view, user, onOpenJob, onAddJob, focusSearchSignal }:
       </header>
 
       <div ref={scroller} data-scroller className="min-h-0 flex-1 overflow-auto border-t border-border bg-surface">
-        {jobs.error ? (
+        {jobs.error && !jobs.data ? (
           <div className="p-5">
             <Notice kind="error" title="Could not load jobs">
               {errorMessage(jobs.error)}
             </Notice>
           </div>
-        ) : jobs.total === undefined ? (
+        ) : total === undefined ? (
           <div className="space-y-3 p-5">
             {Array.from({ length: 8 }, (_, index) => (
               <Skeleton key={index} className="h-7 w-full" />
@@ -480,13 +553,13 @@ export function JobsPage({ view, user, onOpenJob, onAddJob, focusSearchSignal }:
               {view === 'mine' ? (
                 <>
                   <col className="w-[150px]" />
-                  <col className="w-[44px]" />
+                  <col className="w-[190px]" />
                 </>
               ) : null}
               <col className="w-[132px]" />
               <col className="w-[36px]" />
               <col className="w-[36px]" />
-              <col className="w-[58px]" />
+              <col className={view === 'mine' ? 'w-[96px]' : 'w-[58px]'} />
             </colgroup>
             <thead className="sticky top-0 z-10 bg-surface">
               <tr className="border-b border-border text-left text-ink-3 [&>th]:font-normal">
@@ -505,7 +578,7 @@ export function JobsPage({ view, user, onOpenJob, onAddJob, focusSearchSignal }:
                     <th className="py-1.5 pr-3">
                       <Symbol icon={CalendarClock} label="Next interview" />
                     </th>
-                    <th className="py-1.5 pr-3 text-center">
+                    <th className="py-1.5 pr-3">
                       <Symbol icon={StickyNote} label="Memo" />
                     </th>
                   </>
@@ -517,48 +590,26 @@ export function JobsPage({ view, user, onOpenJob, onAddJob, focusSearchSignal }:
                   <Symbol icon={Star} label="Highlighted for everyone" />
                 </th>
                 <th aria-label="Delete" />
-                <th className="py-1.5 pl-1 pr-4 text-right">
-                  <Symbol icon={Clock} label="Updated" />
-                </th>
+                <th className="py-1.5 pl-1 pr-4 text-right">{view === 'mine' ? <Symbol icon={CalendarCheck} label="Applied" /> : <Symbol icon={Clock} label="Updated" />}</th>
               </tr>
             </thead>
-            {paddingTop > 0 ? (
-              <tbody aria-hidden>
-                <tr style={{ height: paddingTop }}>
-                  <td colSpan={columnCount} />
-                </tr>
-              </tbody>
-            ) : null}
-            {virtualItems.map((item) => {
-              const job = jobs.rowAt(item.index);
-              return job ? (
-                <Row
-                  key={job.id}
-                  job={job}
-                  index={item.index}
-                  view={view}
-                  columnCount={columnCount}
-                  expanded={expandAll || expanded.has(job.id)}
-                  canDelete={canDeleteJob(job.applications, user)}
-                  measure={virtualizer.measureElement}
-                  onToggle={toggle}
-                  onOpen={onOpenJob}
-                  onDelete={setDeleting}
-                />
-              ) : (
-                <LoadingRow key={`loading-${item.index}`} index={item.index} columnCount={columnCount} measure={virtualizer.measureElement} />
-              );
-            })}
-            {paddingBottom > 0 ? (
-              <tbody aria-hidden>
-                <tr style={{ height: paddingBottom }}>
-                  <td colSpan={columnCount} />
-                </tr>
-              </tbody>
-            ) : null}
+            {items.map((job) => (
+              <Row
+                key={job.id}
+                job={job}
+                view={view}
+                columnCount={columnCount}
+                expanded={expandAll || expanded.has(job.id)}
+                canDelete={canDeleteJob(job.applications, user)}
+                onToggle={toggle}
+                onOpen={onOpenJob}
+                onDelete={setDeleting}
+              />
+            ))}
           </table>
         )}
       </div>
+      {showList ? <Pager page={page} size={pageSize} total={total ?? 0} onPage={setPage} onSize={changeSize} /> : null}
 
       <ConfirmDialog
         open={deleting !== null}

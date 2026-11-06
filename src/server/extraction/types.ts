@@ -1,4 +1,5 @@
-import type { ExtractionFailureReason } from '../../shared/api';
+import type { ExtractionFailureReason, JobFacts } from '../../shared/api';
+import type { JobHints } from '../dedupe/job-facts';
 
 export interface PartialJob {
   title: string | null;
@@ -7,6 +8,8 @@ export interface PartialJob {
   location: string | null;
   requisitionId?: string | null;
   canonicalUrl?: string | null;
+  /** What the site states as data: posting date, salary, arrangement, employment type. */
+  hints?: JobHints | null;
 }
 
 export type ExtractionMethod = 'api' | 'json-ld' | 'embedded-data' | 'site-html' | 'open-graph' | 'content' | 'browser' | 'manual';
@@ -18,6 +21,7 @@ export interface ExtractionSuccess {
   description: string;
   location: string | null;
   requisitionId: string | null;
+  facts: JobFacts;
   method: ExtractionMethod;
   usedBrowser: boolean;
   finalUrl: string;

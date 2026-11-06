@@ -3,6 +3,7 @@ import { CalendarClock, CalendarDays, History, Infinity as AllTime, Pencil, Stic
 import type { InterviewListItem } from '@shared/api';
 import { INTERVIEW_STAGES, type InterviewStage } from '@shared/constants';
 import { applicationLabel, Avatar } from '@/components/job-bits';
+import { JobTags } from '@/components/job-tags';
 import { IconLabel, STAGE_ICONS, Symbol } from '@/components/symbols';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/dialog';
@@ -141,6 +142,7 @@ export function InterviewsPage({ onOpenJob }: { onOpenJob: (id: number) => void 
                         </span>
                         <Avatar subject={interview.profile} label={applicationLabel(interview)} ring={false} />
                         <button type="button" className="min-w-0 flex-1 text-left" onClick={() => onOpenJob(interview.jobId)}>
+                          <JobTags facts={interview.facts} className="mb-0.5" />
                           <p className="truncate font-medium">{interview.title}</p>
                           <p className="truncate text-[12.5px] text-ink-2">{interview.company}</p>
                         </button>

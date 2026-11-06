@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
-import { blob, check, index, integer, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { blob, check, index, integer, primaryKey, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import type { EmploymentType, SalaryPeriod, WorkArrangement } from '../../shared/api';
 import type { ApplicationStatus, InterviewStage, UserRole } from '../../shared/constants';
 
 /** All instants are stored as ISO-8601 UTC strings so that they sort lexicographically. */
@@ -225,6 +226,83 @@ export const applicationStatusHistory = sqliteTable(
   (t) => [index('status_history_application_idx').on(t.applicationId, t.changedAt)]
 );
 
+/** What is known about a job wherever it is listed: the tags on it, and what duplicates are judged by. */
+export const jobFacts = sqliteTable(
+  'job_facts',
+  {
+    jobId: integer('job_id')
+      .primaryKey()
+      .references(() => jobs.id, { onDelete: 'cascade' }),
+    workArrangement: text('work_arrangement').$type<WorkArrangement>(),
+    employmentType: text('employment_type').$type<EmploymentType>(),
+    clearance: text('clearance'),
+    isFederal: integer('is_federal', { mode: 'boolean' }).notNull().default(false),
+    postedAt: text('posted_at'),
+    salaryMin: real('salary_min'),
+    salaryMax: real('salary_max'),
+    salaryCurrency: text('salary_currency'),
+    salaryPeriod: text('salary_period').$type<SalaryPeriod>(),
+    /** When this job was last compared with the others. Null means it still needs to be. */
+    checkedAt: text('checked_at'),
+    updatedAt: text('updated_at').notNull().default(nowIso)
+  },
+  (t) => [index('job_facts_checked_idx').on(t.checkedAt)]
+);
+
+/**
+ * Fingerprints for finding postings that may be one job, however their links or company names are
+ * written: a sample of each description's phrases (kind "text"). Shared values mark a candidate.
+ */
+export const jobSignatures = sqliteTable(
+  'job_signatures',
+  {
+    kind: text('kind').notNull(),
+    value: text('value').notNull(),
+    jobId: integer('job_id')
+      .notNull()
+      .references(() => jobs.id, { onDelete: 'cascade' })
+  },
+  (t) => [primaryKey({ columns: [t.kind, t.value, t.jobId] }), index('job_signatures_job_idx').on(t.jobId)]
+);
+
+/**
+ * What duplicate detection compares a job's text on: hashes of its phrases and distinctive words,
+ * its length and requisition numbers. Nothing here can be turned back into the posting's text.
+ */
+export const jobTextFeatures = sqliteTable(
+  'job_text_features',
+  {
+    jobId: integer('job_id')
+      .primaryKey()
+      .references(() => jobs.id, { onDelete: 'cascade' }),
+    version: integer('version').notNull(),
+    hash: text('hash'),
+    length: integer('length').notNull().default(0),
+    shingles: blob('shingles').notNull(),
+    words: blob('words').notNull(),
+    requisitions: text('requisitions').notNull().default('[]')
+  },
+  (t) => [index('job_text_features_hash_idx').on(t.hash)]
+);
+
+/** Pairs of jobs that look alike. Pending ones wait for someone to decide; distinct ones stay apart. */
+export const duplicateCandidates = sqliteTable(
+  'duplicate_candidates',
+  {
+    jobIdLow: integer('job_id_low')
+      .notNull()
+      .references(() => jobs.id, { onDelete: 'cascade' }),
+    jobIdHigh: integer('job_id_high')
+      .notNull()
+      .references(() => jobs.id, { onDelete: 'cascade' }),
+    status: text('status').$type<'pending' | 'distinct'>().notNull().default('pending'),
+    score: real('score').notNull().default(0),
+    reasons: text('reasons').notNull().default('[]'),
+    createdAt: text('created_at').notNull().default(nowIso)
+  },
+  (t) => [primaryKey({ columns: [t.jobIdLow, t.jobIdHigh] }), index('duplicate_candidates_status_idx').on(t.status, t.score), index('duplicate_candidates_high_idx').on(t.jobIdHigh)]
+);
+
 export const schema = {
   users,
   profiles,
@@ -236,5 +314,9 @@ export const schema = {
   jobIdentifiers,
   applications,
   interviews,
-  applicationStatusHistory
+  applicationStatusHistory,
+  jobFacts,
+  jobSignatures,
+  jobTextFeatures,
+  duplicateCandidates
 };

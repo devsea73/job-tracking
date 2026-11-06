@@ -43,10 +43,27 @@
   --status-offer-ink: #17703a;
   --status-rejected-bg: #f4e6e6;
   --status-rejected-ink: #9c3535;
+  /* Chart series, one per person, in a fixed order that stays apart for color-blind viewers too. */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #6250d6;
+  --series-8: #e34948;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
+    --series-7: #9085e9;
+    --series-8: #e66767;
     --background: #0f1115;
     --surface: #171a20;
     --surface-2: #1f232b;
@@ -195,5 +212,45 @@ input[type='date'] {
   .spin,
   .skeleton {
     animation-duration: 3s;
+  }
+}
+
+/* The notification card sits in its own transparent window in the corner of the screen. */
+html:has(body.notice-body),
+body.notice-body {
+  background: transparent;
+  height: auto;
+  overflow: hidden;
+}
+body.notice-body #root {
+  height: auto;
+}
+@keyframes notice-countdown {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+.notice-countdown {
+  transform-origin: left;
+  animation: notice-countdown linear forwards;
+}
+.notice-card:hover .notice-countdown {
+  animation-play-state: paused;
+}
+@keyframes notice-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+.notice-card {
+  animation: notice-in 160ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .notice-card {
+    animation: none;
   }
 }

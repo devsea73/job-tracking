@@ -63,9 +63,23 @@ If the connection fails, see [Network setup](#network-setup).
 
 ### 5. Add and track a job
 
-1. Choose **+** (or press Ctrl+N), paste the job's URL, pick the **profile** you applied with, optionally add a memo, then choose **✓**.
-2. The host reads the page and fills in the title, company, location and full description.
-3. Open the job to change your status, edit your memo, or schedule interviews. Changes save as you make them.
+1. The **add bar** at the top of every page has the job URL, the **profile** you applied with, and an optional memo, in one row. The cursor is in the URL box whenever you come to the app; **Ctrl+N** also takes you there.
+2. Paste a link and it is checked straight away, before anything is saved:
+
+   | Alert | Meaning |
+   | --- | --- |
+   | **Fresh job** | Not in the list yet |
+   | **Duplicate** | Already in the list; saving adds your profile to it |
+   | **Already applied as …** | That profile applied already, so ✓ is off. Choose another profile to apply with it |
+   | **Maybe a duplicate** | Looks like a job in the list. **Same job** saves it under that job; otherwise it is saved as a new one |
+   | **Can't read the page** | Says why (closed, bot check…). Type a title and company in the bar to save it |
+
+3. Choose **✓**, or press Enter. It saves without any more questions, the bar clears, and the cursor is back in the URL box for the next job. The host fills in the title, company, location and description, plus the tags, salary and posting date when the posting states them.
+4. Open the job to change your status, edit your memo, or schedule interviews. Changes save as you make them.
+
+Links in the app are **copied**, never opened: click a job's link (next to the number of applicants in the job panel), or a link anywhere else, and it is on your clipboard to paste where you like.
+
+While its window is open, Job Tracker has a taskbar button like any other window, so it stays on its own virtual desktop. Closing the window hides it to the tray.
 
 ### 6. Set up profiles and photos
 
@@ -97,7 +111,28 @@ Each profile can apply to a job once, so one person can apply to the same job un
 | You are shown the existing application | That profile already applied to this job. Choose another profile to apply under it too |
 | You are asked to type in the details | The page could not be read, for example behind a bot check, or the posting was removed |
 
-### 8. Delete a job
+### 8. Review possible duplicates
+
+The host compares saved jobs in the background, a few at a time between requests, so it never slows anyone down. Pairs it is sure about are merged automatically. Pairs it is not sure about wait under **Possible duplicates** in the left rail, which shows how many are waiting. Each pair shows both jobs side by side with their tags, salary, posting date, links and the reasons they look alike:
+
+- **Same** merges them into one job. Every application, memo, interview and link is kept.
+- **Different** keeps them apart, and that pair is never offered again.
+
+Anyone who can sign in can settle a pair.
+
+### 9. Get notified about jobs others find
+
+Job Tracker keeps running in the **tray** when you close its window, with no taskbar button. Click the tray icon to open it, or right-click it for **Open Job Tracker**, a **Notifications** switch, and **Quit** (on the host: **Stop server and quit**).
+
+When someone else applies to a job none of your profiles has applied to, a card pops up in the bottom-right corner. It shows who found it (*New job found by Tyler - Data Engineer*), the job and company, and what matters at a glance: work arrangement, employment type, clearance, federal, industry, salary and main stack.
+
+- **Apply** copies the job link to your clipboard and adds the job to your applications as **Applied**.
+- **Ignore**, or the ✕, hides it. Clicking the title opens the job in Job Tracker.
+- The card hides by itself after 10 seconds, and pauses while the pointer rests on it. Several jobs at once show one at a time, and a big burst becomes one summary card.
+
+Under **Settings > Notifications**, turn notifications on or off, choose how long a card stays (5–60 seconds), and choose which profile **Apply** uses (by default, the one you used last). These settings are kept on each computer.
+
+### 10. Delete a job
 
 You can delete a job when only your own profiles have applied to it: hover over its row, or open it, and choose the trash icon. This removes the job, its links and those applications. If anyone else has applied, it is not offered and the host refuses it, so nobody loses their data. An administrator can delete any job.
 
@@ -115,6 +150,17 @@ The app uses symbols instead of words. Hover over any of them to see its name.
 | ✕ | Rejected |
 
 In a process line, stages already passed are green, the current stage is outlined in its color, and stages still to come are grey.
+
+Tags above a job's title show what matters first about it. A tag only appears when the posting says so. Unknown is left blank rather than guessed.
+
+| Tag | Shown when |
+| --- | --- |
+| Remote, Hybrid, On-site | The site's data, the location or the posting says so. "Not remote" counts as on-site |
+| Contract, Permanent | The site's data or the posting says so. A "Contract Manager" title is not a contract job |
+| Clearance | A security clearance is **required**. The level (Secret, TS/SCI, Public Trust…) is in the tooltip. "Preferred" or "nice to have" does not count |
+| Federal | The work is for the U.S. government: a usajobs.gov or .mil link, a federal title or company, or a posting about federal or DoD customers or programs. Legal notices that every employer carries (E-Verify, "federal contractor", equal-opportunity text) do not count |
+
+Clearance and Federal are highlighted in amber.
 
 ## Network setup
 
@@ -165,7 +211,8 @@ Pages that need a browser use the computer's installed **Microsoft Edge or Googl
 - **ADP** does not publish the employer's name with its postings. The title and description are read, and you are asked for the company unless the posting opens with "About <company>".
 - **Sign-in walls** cannot be read, for the same reason.
 - **Closed postings** are reported as closed. You can still track them by typing the details in.
-- **Jobright** rewrites descriptions and does not reveal the original link, so it can only be matched to other sites by content. When the overlap is high it merges automatically, otherwise it asks.
+- **Jobright** rewrites descriptions and does not reveal the original link on its page. Links opened from Jobright carry `jr_id`, its own id for the job, so those match its page exactly. A link without `jr_id` can only be matched by content: when the overlap is high it merges automatically, otherwise it asks.
+- **LinkedIn and Built In** show the employer's real apply link only after signing in, so the app cannot read it from their pages and does not try to get around that. A LinkedIn `externalApply` link that wraps the real one is understood. Otherwise these are matched by content.
 - A posting entered by hand can only be matched by what you type, so paste the full description when you can.
 
 Run `npm run survey -- --file C:\path\links.txt` to test extraction against your own list of links, one per line. It writes `survey-report.json`. Keep such lists out of the repository: links copied from a browser can contain personal login tokens.
@@ -179,10 +226,33 @@ Each new link goes through these layers, stopping at the first conclusive one. A
 | A. URL | The link with tracking parameters, fragments and casing removed, keeping real IDs | Same job |
 | B. Canonical | The page's canonical link and where redirects end up | Same job, if the titles are related |
 | C. Posting ID | IDs from about 40 job systems (Greenhouse, Lever, Workday and so on), plus an ATS link inside an aggregator's page | Same job |
-| D. Content | Company, title, location, requisition numbers and description similarity | Same job only on strong agreement, otherwise it asks |
+| C. Parameters | IDs carried in a link's parameters: `gh_jid`, `ashby_jid`, Jobright's `jr_id`, a link wrapped inside `url=`, and names like `jobId` or `reqId` on other sites | Same job |
+| D. Content | Company, title, description, location, salary, posting date, work arrangement, employment type and requisition numbers | Same job only when they agree, otherwise it asks |
 | E. Aliases | Every link for a job is kept, in `job_urls` | The next person's link matches immediately |
 
-Layer D merges automatically only when the company and title match and either the description is at least 85% the same or a substantial description is at least 85% contained in the other, or when both quote the same requisition number. Different requisition numbers, different IDs on the same system, or different locations all block a merge. In those cases you are asked if the text is nearly identical, and otherwise they stay separate jobs.
+Links alone are not enough: the same job is posted on Greenhouse, Jobright, Built In and LinkedIn with different links and, on listing sites, rewritten text. Layer D therefore compares what the postings say:
+
+- **What each posting says is stored** in `job_facts`: work arrangement, employment type, clearance, federal, posting date and salary (yearly and hourly pay are compared on one scale). It is read from the site's own data where there is any (schema.org, Greenhouse, Lever, Ashby, Workday and others), and from the text otherwise.
+- **Candidates** are every job at the same or a similarly named company, plus jobs with the same wording under another company's name. The wording is found through a small sample of each description's phrases, stored in `job_signatures`, so thousands of jobs are not compared one by one. Sharing a title alone never makes a candidate, since thousands of unrelated jobs share one.
+- **A merge needs agreement:** the same company, the same or nearly the same title, and either near-identical text or text about the same things (listing sites reword sentences but keep the subject matter). Rewritten text also needs other facts to agree, such as the same salary, location or work arrangement, or a posting date within days, because one company's openings share its standard text.
+- **A merge is blocked by any contradiction:** a different location, separate salary ranges, remote against on-site, contract against permanent, a different seniority (*Engineer II* and *Engineer III*, *Senior* and *Staff*), different requisition numbers, or different IDs on the system hosting the job.
+- **Names are normalized before comparing.** Company names lose legal forms, cost-center codes and country words: *001 Stride, Inc.* is *Stride*, *ARKANCE USA LLC (USA)* is *Arkance*, *C.H. Robinson* is *C.H.Robinson*. Titles lose location, contract and listing notes and requisition codes, and read abbreviations and spellings as one: *Sr. SWE II (Remote)* is *Senior Software Engineer 2*, *Full-Stack* is *Fullstack*. Words that name the role stay: a *Contract Manager* is a role, not a contract.
+- **No posting text is kept for this.** Duplicate detection compares hashed phrases and hashed distinctive words, stored in `job_text_features` with the text's length and requisition numbers. None of it can be turned back into the text. When these rules change, saved jobs are indexed again once, at the next start, and compared again.
+- **A merge needs both sides to agree:** a posting merges only when it has exactly one confident match, and that job has no other confident match of its own. Otherwise someone is asked.
+- **A different company name** (a staffing or payroll company reposting a job) is only ever asked about, never merged automatically.
+
+Pairs the host is not sure about are listed under **Possible duplicates** (`duplicate_candidates`), along with pairs someone marked as different, so they never come back. When two jobs merge, everything moves to one: links, posting IDs, applications, and what each listing knew, such as a salary only one of them stated. If a profile applied to both, it keeps its furthest stage, both memos and all interviews. The employer's own wording is kept over a listing site's rewrite. A backup is taken before the first automatic merge of each check.
+
+**Measured on real postings** with `npm run survey -- --dedupe`. Links that carry `jr_id` give real pairs: a Jobright page and the employer's page for the same job.
+
+| Test | Result |
+| --- | --- |
+| Same job on Jobright and on the employer's site, 18 pairs | 16 merged automatically, 2 asked (a payroll company's name on one side; a posting with no salary, date or location to compare), 0 missed |
+| Different postings, 47,260 pairs | 1 merged: two copies of one posting under two IDs, with identical text, title, location and date |
+| Different openings at one company, 97 pairs, with their posting IDs | 0 merged, 1 asked |
+| The same 97 pairs with IDs hidden, as on a listing site | 2 merged (both had the same title, location, date and nearly identical text), 13 asked |
+
+These numbers are from a small set: most Jobright pages in the test list had closed or could not be read, and few openings at one company shared a title. Expect some questions about near-identical openings, such as one role at two seniority levels with the same text.
 
 These rules are backed by database constraints: one application per profile per job, one job per normalized link, one job per posting ID. So concurrent submissions cannot create duplicates.
 
@@ -207,7 +277,7 @@ Designed for a trusted local network, not for the internet.
 - **Sign-in** is rate limited per account and per address, with responses that do not reveal whether a username exists.
 - **Sessions** are random tokens stored only as hashes on the host, expiring after 7 idle days or 30 days in total, and ending when an account is disabled or its password is reset. On each client the token stays in Electron's main process, encrypted with Windows DPAPI, out of reach of page code.
 - **Traffic** uses TLS with a certificate generated on the host. Clients pin its exact fingerprint after you confirm it, so verification is on for every connection and is never turned off globally.
-- **Fetching postings** is protected against SSRF: private and local addresses are refused, DNS answers are checked at connection time, every redirect is re-checked, and timeouts and size limits apply. Personal tokens in pasted links are removed before anything is fetched or stored.
+- **Fetching postings** is protected against SSRF: private and local addresses are refused, DNS answers are checked at connection time, every redirect is re-checked, and timeouts and size limits apply. Personal tokens in pasted links are removed before anything is fetched or stored, and so is visitor tracking that can identify the person who clicked (`utm_*`, `ccuid`, `p_uid`, `gclid` and the like). Account activation links keep only the job page they lead to.
 - **Job pages** are parsed as text, or rendered in a throwaway profile of a sandboxed system browser. Nothing from them runs in the app.
 - **The desktop window** uses context isolation, a sandbox, no Node integration, a strict Content Security Policy, and a narrow preload API.
 
@@ -247,6 +317,7 @@ Measured on one Windows PC with 10,000 jobs, 10 users, 5 profiles each, about 22
 - **Search:** memos and job text use SQLite full-text indexes with prefix support. Search matches the beginning of words in memos and descriptions, and any part of a company or job title.
 - **Repeat requests:** finished responses are reused until something changes. Any write clears them, and none lives longer than 15 seconds, so nobody sees old data.
 - **Live updates:** a burst of changes refreshes once, and only what is on screen.
+- **Duplicate checks** run in the background one job at a time, letting requests go first. The first start after upgrading also tags every saved job once.
 
 ## Testing
 
@@ -257,6 +328,7 @@ npm run loadtest                         # server speed with 10,000 jobs, no int
 npm run build; npm run loadtest:ui       # desktop app speed with 10,000 jobs, no internet needed
 npm run survey -- --file links.txt       # live: extraction over your own links
 npm run survey -- --cross-platform       # live: one real job through several sites
+npm run survey -- --dedupe --file links.txt --siblings 400   # live: duplicate detection accuracy on real postings
 npm run build; npm run e2e               # live: drives the real app, one host and two clients
 ```
 

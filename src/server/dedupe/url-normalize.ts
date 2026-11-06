@@ -208,11 +208,82 @@ const PERSONAL_PARAMS = new Set([
   'user_id'
 ]);
 
+/**
+ * Marketing and visitor tracking: who clicked, from which campaign or email. None of it says which
+ * job, and some of it identifies the person who clicked ("ccuid", "p_uid", "mc_eid"), so it is
+ * not kept in saved links either. Parameters that name the job ("jr_id", "gh_jid", "token") stay.
+ */
+const VISITOR_TRACKING = new Set(
+  [
+    'ref',
+    'referer',
+    'referrer',
+    'ref_src',
+    'refid',
+    'source',
+    'src',
+    'sourceid',
+    'source_id',
+    'fbclid',
+    'gclid',
+    'gclsrc',
+    'gbraid',
+    'wbraid',
+    'dclid',
+    'msclkid',
+    'yclid',
+    'twclid',
+    'ttclid',
+    'li_fat_id',
+    'mc_cid',
+    'mc_eid',
+    'igshid',
+    'trk',
+    'trkinfo',
+    'gh_src',
+    'lever-source',
+    'lever-origin',
+    '_ccid',
+    'ccuid',
+    'p_uid',
+    'p_sid',
+    'mssc',
+    'extcmp',
+    'hsctaattrib',
+    'hsctatracking',
+    'dcr_ci',
+    '_hsenc',
+    '_hsmi',
+    '_ga',
+    '_gl',
+    'campaign',
+    'medium',
+    'publisher',
+    'iis',
+    'iisn',
+    'uid',
+    'user',
+    'email',
+    'e-mail',
+    'mail'
+  ].map((name) => name.toLowerCase())
+);
+const VISITOR_TRACKING_PREFIXES = ['utm_', 'lt_utm_', 'hsa_', 'pk_', 'mtm_', 'vero_', 'oly_', 'ga_', 'tm_'];
+
+/** Paths that carry a one-time token for one person: account activation, sign-in, password reset. */
+const PERSONAL_PATH = /\/(?:activate|activation|verify|confirm|reset-?password|magic-?link|login|signin|sign-in)\//i;
+
 /** A copy of the link that is safe to store and to show to other users. */
 export function stripPersonalParams(input: string | URL): string {
-  const url = new URL(input);
+  let url = new URL(input);
+  // "…/activate/<token>/?redirect=/job/…": keep the job page it leads to, without the token.
+  if (PERSONAL_PATH.test(url.pathname)) {
+    const target = url.searchParams.get('redirect') ?? url.searchParams.get('returnUrl') ?? url.searchParams.get('return_to') ?? url.searchParams.get('next');
+    if (target?.startsWith('/') && !target.startsWith('//')) url = new URL(target, url.origin);
+  }
   for (const name of [...url.searchParams.keys()]) {
-    if (PERSONAL_PARAMS.has(name.toLowerCase())) url.searchParams.delete(name);
+    const lower = name.toLowerCase();
+    if (PERSONAL_PARAMS.has(lower) || VISITOR_TRACKING.has(lower) || VISITOR_TRACKING_PREFIXES.some((prefix) => lower.startsWith(prefix))) url.searchParams.delete(name);
   }
   return url.toString();
 }

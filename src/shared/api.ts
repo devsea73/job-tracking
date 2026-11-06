@@ -37,6 +37,24 @@ export interface AdminUser {
   avatarVersion: string | null;
 }
 
+export type WorkArrangement = 'remote' | 'hybrid' | 'onsite';
+export type EmploymentType = 'permanent' | 'contract';
+export type SalaryPeriod = 'year' | 'hour';
+
+/** What is known about a posting wherever it is listed. Unknown stays null rather than guessed. */
+export interface JobFacts {
+  workArrangement: WorkArrangement | null;
+  employmentType: EmploymentType | null;
+  /** "TS/SCI", "Top Secret", "Secret", "Public Trust", or "Required" when no level is named. */
+  clearance: string | null;
+  isFederal: boolean;
+  postedAt: string | null;
+  salaryMin: number | null;
+  salaryMax: number | null;
+  salaryCurrency: string | null;
+  salaryPeriod: SalaryPeriod | null;
+}
+
 /** Enough to draw an avatar. The version changes when the image does, so it doubles as a cache key. */
 export interface AvatarSubject {
   kind: 'user' | 'profile';
@@ -83,6 +101,7 @@ export interface JobListItem {
   isHighlighted: boolean;
   createdAt: string;
   updatedAt: string;
+  facts: JobFacts;
   applications: ApplicationSummary[];
 }
 
@@ -159,6 +178,7 @@ export interface JobDetail {
   lastExtractedAt: string | null;
   extractionMethod: string | null;
   urls: JobUrl[];
+  facts: JobFacts;
   applications: ApplicationDetail[];
 }
 
@@ -171,7 +191,33 @@ export interface DuplicateCandidate {
   reasons: string[];
   descriptionPreview: string;
   urls: string[];
+  facts: JobFacts;
   applications: ApplicationSummary[];
+}
+
+/** One side of a pair of jobs that may be one, as shown on the review screen. */
+export interface DuplicateJobSummary {
+  id: number;
+  title: string;
+  company: string;
+  location: string | null;
+  descriptionPreview: string;
+  applicationCount: number;
+  createdAt: string;
+  urls: string[];
+  facts: JobFacts;
+}
+
+export interface DuplicatePair {
+  jobA: DuplicateJobSummary;
+  jobB: DuplicateJobSummary;
+  score: number;
+  reasons: string[];
+}
+
+export interface DuplicatesResponse {
+  pairs: DuplicatePair[];
+  total: number;
 }
 
 export interface ExtractedJobFields {
@@ -248,6 +294,35 @@ export type ExtractionFailureReason =
   | 'too_large'
   | 'incomplete';
 
+/** What a pasted link turns out to be, read and compared but not saved. */
+export interface CheckedJobSummary {
+  title: string | null;
+  company: string | null;
+  location: string | null;
+  facts: JobFacts | null;
+}
+
+export interface KnownJobSummary {
+  id: number;
+  title: string;
+  company: string;
+  location: string | null;
+  facts: JobFacts;
+  applicationCount: number;
+  /** The checking person's own profiles that applied already. */
+  myProfileIds: number[];
+}
+
+export type CheckLinkResponse =
+  /** Not in the list yet. */
+  | { status: 'fresh'; draftId: string; job: CheckedJobSummary }
+  /** Already in the list: saving adds the profile to it. */
+  | { status: 'known'; draftId: string | null; matchedBy: MatchedBy; job: KnownJobSummary }
+  /** Looks like jobs in the list, without being certain. */
+  | { status: 'possible'; draftId: string; job: CheckedJobSummary; candidates: DuplicateCandidate[] }
+  /** The page could not be read. Saving needs a title and company; the description says why. */
+  | { status: 'unreadable'; draftId: string; reason: ExtractionFailureReason; message: string; description: string; job: CheckedJobSummary };
+
 export interface UpdateApplicationRequest {
   status?: ApplicationStatus;
   memo?: string;
@@ -264,6 +339,7 @@ export interface InterviewListItem extends Interview {
   jobId: number;
   title: string;
   company: string;
+  facts: JobFacts;
   owner: UserRef;
   profile: ProfileRef;
   isMine: boolean;
@@ -303,6 +379,46 @@ export interface TeamMember {
   profiles: TeamProfile[];
 }
 
+/** Where the viewer's day, week, month and chosen range begin, as instants, and their time zone's offset. */
+export interface ActivityQuery {
+  from: string;
+  to: string;
+  day: string;
+  week: string;
+  month: string;
+}
+
+export interface ActivityPerson {
+  user: UserRef;
+  isMe: boolean;
+  isActive: boolean;
+  today: number;
+  week: number;
+  month: number;
+  inRange: number;
+  allTime: number;
+  /** Applications in the range that got an interview so far: Recruiter Screen or later, or one scheduled. */
+  interviews: number;
+  /** Percent, one decimal. Null when nothing was applied in the range. */
+  interviewRate: number | null;
+  /**
+   * Applications in the range per UTC hour ("2026-11-05T14"), only hours with any. The viewer's
+   * computer places them in its own hours and days, which also handles daylight saving time.
+   */
+  hours: Array<[string, number]>;
+  profiles: Array<{ name: string; count: number }>;
+  /** By applications in the range, then today's; 1 is the leader. */
+  rank?: number;
+  behindLeader?: number;
+}
+
+export interface ActivityResponse {
+  from: string;
+  to: string;
+  /** The viewer first, then everyone else by rank. */
+  people: ActivityPerson[];
+}
+
 export interface DashboardResponse {
   totalApplications: number;
   activeApplications: number;
@@ -326,7 +442,30 @@ export interface ServerInfo {
 }
 
 export interface ServerEvent {
-  type: 'jobs_changed' | 'applications_changed' | 'users_changed' | 'database_restored';
+  type: 'jobs_changed' | 'applications_changed' | 'users_changed' | 'database_restored' | 'application_added';
   jobId?: number;
+  /** application_added: who applied, and the new application. */
+  userId?: number;
+  applicationId?: number;
   at: string;
+}
+
+/** A job at a glance, for the notification another person's new application raises. */
+export interface JobBrief {
+  jobId: number;
+  title: string;
+  company: string;
+  location: string | null;
+  url: string | null;
+  /** Who applied, and under which of their profiles. */
+  owner: string | null;
+  profile: string | null;
+  addedByMe: boolean;
+  /** One of the viewer's own profiles has applied already. */
+  alreadyApplied: boolean;
+  facts: JobFacts;
+  /** The technologies the posting leans on most. */
+  stack: string[];
+  /** What the company does, when the posting says so clearly. */
+  industry: string | null;
 }

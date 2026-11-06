@@ -1,5 +1,6 @@
 import * as cheerio from 'cheerio';
 import { discoverAtsLinks, identifyAts, type AtsIdentity } from '../dedupe/ats';
+import { deriveJobFacts, type JobHints } from '../dedupe/job-facts';
 import { stripPersonalParams } from '../dedupe/url-normalize';
 import type { ExtractionFailureReason } from '../../shared/api';
 import { findAdapter, findEmbeddedBoard, humanizeSlug, type AdapterContext, type SiteAdapter } from './adapters';
@@ -131,6 +132,14 @@ function combine(attempts: Attempt[], identity: AtsIdentity | null, url: URL): C
     return null;
   };
   const title = first((job) => (usableTitle(job.title) ? cleanTitle(job.title) : null));
+  // Each hint from the most reliable source that has it. Data calls with no value leave it open.
+  const hints: JobHints = {};
+  for (const attempt of ranked) {
+    for (const [key, value] of Object.entries(attempt.job.hints ?? {})) {
+      const field = key as keyof JobHints;
+      if (hints[field] === undefined && value !== null && value !== undefined && value !== '') (hints as Record<string, unknown>)[field] = value;
+    }
+  }
   return {
     job: {
       title,
@@ -141,7 +150,8 @@ function combine(attempts: Attempt[], identity: AtsIdentity | null, url: URL): C
       location: first((job) => job.location),
       description: first((job) => job.description),
       requisitionId: first((job) => job.requisitionId),
-      canonicalUrl: first((job) => job.canonicalUrl)
+      canonicalUrl: first((job) => job.canonicalUrl),
+      hints
     },
     method: withDescription?.attempt.method ?? null,
     description: withDescription?.description ?? null
@@ -197,6 +207,7 @@ export async function extractJob(input: string, deps: PipelineDeps, depth = 0): 
       description,
       location: job.location,
       requisitionId: job.requisitionId ?? null,
+      facts: deriveJobFacts({ title: job.title, company: job.company, location: job.location, description, hints: job.hints, urls: [url.toString(), fetched?.finalUrl ?? ''] }),
       method: usedBrowser && method !== 'api' ? 'browser' : method,
       usedBrowser,
       finalUrl: fetched?.finalUrl ?? url.toString(),

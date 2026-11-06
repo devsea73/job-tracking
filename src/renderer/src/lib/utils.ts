@@ -9,10 +9,13 @@ const dateTime = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeS
 const dateOnly = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' });
 const timeOnly = new Intl.DateTimeFormat(undefined, { timeStyle: 'short' });
 const longDate = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+const monthDay = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
 
 /** All instants are stored in UTC. These show them in this computer's timezone. */
 export const formatDateTime = (iso: string): string => dateTime.format(new Date(iso));
 export const formatDate = (iso: string): string => dateOnly.format(new Date(iso));
+/** "Sep 9" this year, "Sep 9, 2025" otherwise: short enough for a table column. */
+export const formatShortDate = (iso: string, now = new Date()): string => (new Date(iso).getFullYear() === now.getFullYear() ? monthDay : dateOnly).format(new Date(iso));
 export const formatTime = (iso: string): string => timeOnly.format(new Date(iso));
 export const formatLongDate = (iso: string): string => longDate.format(new Date(iso));
 

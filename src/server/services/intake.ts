@@ -3,23 +3,33 @@ import type {
   CreateApplicationRequest,
   CreateApplicationResponse,
   DuplicateCandidate,
+  CheckedJobSummary,
+  CheckLinkResponse,
   ExtractedJobFields,
+  JobFacts,
+  KnownJobSummary,
   ManualJobFields,
   MatchedBy
 } from '../../shared/api';
 import { DEFAULT_STATUS } from '../../shared/constants';
+import { unreadableNote } from '../../shared/unreadable';
 import type { AppContext } from '../context';
 import { nowIso } from '../db/client';
 import { applications, applicationStatusHistory, jobIdentifiers, jobs, jobUrls } from '../db/schema';
-import { identifyAts, isAggregator } from '../dedupe/ats';
-import { buildEvidence, findContentMatches, findExactMatch, isSpecificPage, type UrlEvidence } from '../dedupe/matcher';
+import { identifyAts, isAggregator, titleFromUrl } from '../dedupe/ats';
+import { deriveJobFacts } from '../dedupe/job-facts';
+import { buildEvidence, findContentMatches, findExactMatch, identifiersFromEvidence, isSpecificPage, type UrlEvidence } from '../dedupe/matcher';
 import { hashDescription, normalizeCompany, normalizeTitle, descriptionSimilarity } from '../dedupe/text-normalize';
 import { InvalidUrlError, parseUserUrl } from '../dedupe/url-normalize';
 import { ApiError, notFound } from '../errors';
 import { assertSafeUrlShape, UnsafeUrlError } from '../extraction/ip-guard';
 import { extractJob } from '../extraction/pipeline';
+import { htmlToText, looksLikeHtml } from '../extraction/text';
 import { MIN_DESCRIPTION_LENGTH, type ExtractionResult, type ExtractionSuccess } from '../extraction/types';
 import { loggableUrl } from '../logger';
+import { markDistinct } from './duplicates';
+import { addFactsFromListing, readJobFacts, saveNewJobFacts, saveSignatures } from './job-facts-store';
+import { absorbDuplicates } from './job-merge';
 import { listApplicationsForJobs } from './job-queries';
 import { requireOwnActiveProfile } from './profiles';
 
@@ -83,17 +93,24 @@ interface JobFields {
   location: string | null;
   method: string;
   extractedAt: string | null;
+  facts: JobFacts;
 }
 
-function fieldsFrom(extraction: ExtractionResult | null, manual: ManualJobFields | undefined): JobFields | null {
+/** Text pasted from a page's source, or what a failed reading picked up, can still be markup. */
+const plainText = (text: string) => (looksLikeHtml(text) ? htmlToText(text) || text : text);
+
+function fieldsFrom(extraction: ExtractionResult | null, manual: ManualJobFields | undefined, urls: string[] = []): JobFields | null {
   if (manual) {
+    const description = plainText(manual.description);
     return {
       title: manual.title,
       company: manual.company,
-      description: manual.description,
+      description,
       location: manual.location?.trim() || null,
       method: 'manual',
-      extractedAt: null
+      extractedAt: null,
+      // What the site stated still counts when the person only had to type in what was missing.
+      facts: deriveJobFacts({ title: manual.title, company: manual.company, location: manual.location, description, urls })
     };
   }
   if (extraction?.ok) {
@@ -103,7 +120,8 @@ function fieldsFrom(extraction: ExtractionResult | null, manual: ManualJobFields
       description: extraction.description,
       location: extraction.location,
       method: extraction.method,
-      extractedAt: nowIso()
+      extractedAt: nowIso(),
+      facts: extraction.facts
     };
   }
   return null;
@@ -115,7 +133,7 @@ function extractedFields(extraction: ExtractionResult | null): ExtractedJobField
     return { title: extraction.title, company: extraction.company, description: extraction.description, location: extraction.location };
   }
   const { title, company, description, location } = extraction.partial;
-  return { title, company, description, location };
+  return { title, company, description: description ? plainText(description) : description, location };
 }
 
 /** Adds any links the job does not have yet. A link can belong to only one job, enforced by a unique index. */
@@ -143,6 +161,9 @@ function addAliases(ctx: AppContext, jobId: number, evidence: UrlEvidence[]): bo
         .onConflictDoNothing()
         .run();
     }
+    for (const reference of item.references) {
+      ctx.db.insert(jobIdentifiers).values({ jobId, provider: reference.provider, externalId: reference.externalId, isDiscovered: true }).onConflictDoNothing().run();
+    }
   }
   return added;
 }
@@ -166,12 +187,17 @@ function linkProfile(
   better: JobFields | null
 ): CreateApplicationResponse {
   const db = ctx.db;
+  let merged = false;
   const response = ctx.handle.sqlite
     .transaction((): CreateApplicationResponse => {
+      if (!db.select({ id: jobs.id }).from(jobs).where(eq(jobs.id, jobId)).get()) throw notFound('That job no longer exists.');
+      // This job's own ids go in first, so that merging can see when the hosting system says two jobs differ.
+      const aliasAdded = addAliases(ctx, jobId, evidence);
+      // Before reading the job: folding another one in can change its details.
+      merged = absorbDuplicates(ctx, jobId, evidence);
       const job = db.select().from(jobs).where(eq(jobs.id, jobId)).get();
       if (!job) throw notFound('That job no longer exists.');
 
-      const aliasAdded = addAliases(ctx, jobId, evidence);
       // An aggregator's excerpt is replaced when the employer's full posting comes along.
       if (better && better.description.length > job.description.length * 1.2) {
         const overlap = descriptionSimilarity(better.description, job.description);
@@ -180,8 +206,11 @@ function linkProfile(
             .set({ description: better.description, descriptionHash: hashDescription(better.description), extractionMethod: better.method, lastExtractedAt: better.extractedAt })
             .where(eq(jobs.id, jobId))
             .run();
+          saveSignatures(ctx.handle.sqlite, jobId, better.description);
         }
       }
+      // This listing may say what the first one did not: a salary, a date, a work arrangement.
+      if (better) addFactsFromListing(ctx.handle.sqlite, jobId, better.facts);
 
       const existing = db
         .select({ id: applications.id })
@@ -203,7 +232,11 @@ function linkProfile(
     })
     .immediate();
   if (response.outcome === 'created') {
-    ctx.events.publish(jobWasNew ? 'jobs_changed' : 'applications_changed', jobId);
+    ctx.events.publish(jobWasNew || merged ? 'jobs_changed' : 'applications_changed', jobId);
+    // Lets everyone else's app offer this job to them, if they have not applied to it.
+    ctx.events.publish('application_added', jobId, { userId: applicant.userId, applicationId: response.applicationId });
+  } else if (merged) {
+    ctx.events.publish('jobs_changed', jobId);
   }
   return response;
 }
@@ -225,6 +258,7 @@ function toCandidates(ctx: AppContext, userId: number, matches: Array<{ jobId: n
       score: Math.round(comparison.score * 100) / 100,
       reasons: comparison.reasons,
       descriptionPreview: job.description.slice(0, 400),
+      facts: readJobFacts(ctx.handle.sqlite, jobId),
       urls: ctx.db
         .select({ url: jobUrls.originalUrl })
         .from(jobUrls)
@@ -284,11 +318,12 @@ export async function createApplication(ctx: AppContext, userId: number, body: C
     throw new ApiError(400, 'unsafe_url', extraction.message);
   }
 
-  const fields = fieldsFrom(extraction, body.manual);
+  const fields = fieldsFrom(extraction, body.manual, [url.toString()]);
   const evidence = toEvidence(url, extraction);
 
   // Layers B and C again, now knowing where the link really leads.
-  const exact = findExactMatch(ctx.db, evidence, fields?.title ?? extractedFields(extraction).title);
+  const titleHint = titleFromUrl(url);
+  const exact = findExactMatch(ctx.db, evidence, fields?.title ?? extractedFields(extraction).title ?? titleHint);
   if (exact) {
     ctx.drafts.delete(body.draftId);
     return linkProfile(ctx, applicant, exact.jobId, memo, evidence, false, exact.matchedBy, fields);
@@ -297,6 +332,8 @@ export async function createApplication(ctx: AppContext, userId: number, body: C
   if (!fields) {
     const failed = extraction as Exclude<ExtractionResult, ExtractionSuccess>;
     const known = extractedFields(extraction);
+    // The page could not be read, but the link itself may say what the job is called.
+    known.title ??= titleHint;
     const missing: Array<keyof ManualJobFields> = [];
     if (!known.title) missing.push('title');
     if (!known.company) missing.push('company');
@@ -312,8 +349,15 @@ export async function createApplication(ctx: AppContext, userId: number, body: C
   }
 
   // Layer D: same posting under a URL we have never seen?
+  const content = findContentMatches(ctx.db, {
+    company: fields.company,
+    title: fields.title,
+    location: fields.location,
+    description: fields.description,
+    facts: fields.facts,
+    identifiers: identifiersFromEvidence(evidence)
+  });
   if (body.resolution?.action !== 'new') {
-    const content = findContentMatches(ctx.db, { company: fields.company, title: fields.title, location: fields.location, description: fields.description }, evidence);
     if (content.auto) {
       ctx.drafts.delete(body.draftId);
       return linkProfile(ctx, applicant, content.auto.jobId, memo, evidence, false, 'content', fields);
@@ -348,11 +392,74 @@ export async function createApplication(ctx: AppContext, userId: number, body: C
         })
         .returning({ id: jobs.id })
         .get();
+      saveNewJobFacts(ctx.handle.sqlite, job.id, fields.facts, fields.description);
+      // Someone looked at these and said this is a different job, so they are not offered again.
+      for (const candidate of content.auto ? [content.auto, ...content.possible] : content.possible) markDistinct(ctx.handle.sqlite, job.id, candidate.jobId);
       return linkProfile(ctx, applicant, job.id, memo, evidence, true, 'new', null);
     })
     .immediate();
   ctx.drafts.delete(body.draftId);
   return response;
+}
+
+/** Text an unreadable page shows in place of a job title: an error, a home page, a sign-in wall. */
+const NOT_A_TITLE_WORDS = /not found|could not be found|\berror\b|careers? (home|page)|opportunit|let'?s connect|isn'?t available|\bdomain\b|^home$|welcome|access denied|just a moment|attention required|sign ?in|log ?in|^jobs?$|^careers?$/i;
+
+function usableTitle(title: string | null | undefined, company: string | null | undefined): string | null {
+  if (!title?.trim()) return null;
+  const squash = (text: string) => text.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (NOT_A_TITLE_WORDS.test(title) || (company && squash(title) === squash(company))) return null;
+  return title.trim();
+}
+
+function knownJob(ctx: AppContext, userId: number, jobId: number): KnownJobSummary {
+  const sqlite = ctx.handle.sqlite;
+  const job = sqlite.prepare('SELECT id, title, company_name, location, application_count FROM jobs WHERE id = ?').get(jobId) as { id: number; title: string; company_name: string; location: string | null; application_count: number };
+  const mine = sqlite.prepare('SELECT profile_id FROM applications WHERE job_id = ? AND user_id = ?').all(jobId, userId) as Array<{ profile_id: number }>;
+  return { id: job.id, title: job.title, company: job.company_name, location: job.location, facts: readJobFacts(sqlite, jobId), applicationCount: job.application_count, myProfileIds: mine.map((row) => row.profile_id) };
+}
+
+/**
+ * Reads a pasted link and runs every duplicate check, saving nothing. The page read is kept as a
+ * draft, so that saving afterwards needs no second visit to the site and adds no wait.
+ */
+export async function checkLink(ctx: AppContext, userId: number, input: string): Promise<CheckLinkResponse> {
+  const url = validateUrl(input);
+  const original = buildEvidence(url, 'original');
+  if (!original) throw new ApiError(400, 'invalid_url', 'That does not look like a valid job URL.');
+
+  const early = findExactMatch(ctx.db, [original]);
+  if (early) return { status: 'known', draftId: null, matchedBy: early.matchedBy, job: knownJob(ctx, userId, early.jobId) };
+
+  const extraction = await extractOnce(ctx, original.normalized, original.raw);
+  if (!extraction.ok && extraction.reason === 'unsafe_url') throw new ApiError(400, 'unsafe_url', extraction.message);
+  const draftId = ctx.drafts.create(userId, original.normalized, extraction);
+  const fields = fieldsFrom(extraction, undefined, [url.toString()]);
+  const evidence = toEvidence(url, extraction);
+  const titleHint = titleFromUrl(url);
+  const exact = findExactMatch(ctx.db, evidence, fields?.title ?? extractedFields(extraction).title ?? titleHint);
+  if (exact) return { status: 'known', draftId, matchedBy: exact.matchedBy, job: knownJob(ctx, userId, exact.jobId) };
+
+  if (!fields) {
+    const failed = extraction as Exclude<ExtractionResult, ExtractionSuccess>;
+    const known = extractedFields(extraction);
+    const description = known.description && known.description.length >= MIN_DESCRIPTION_LENGTH ? known.description : unreadableNote(failed.reason, failed.message);
+    return {
+      status: 'unreadable',
+      draftId,
+      reason: failed.reason,
+      message: failed.message,
+      description,
+      // The link names the job reliably; an unreadable page's own text often does not.
+      job: { title: titleHint ?? usableTitle(known.title, known.company), company: known.company, location: known.location, facts: null }
+    };
+  }
+
+  const content = findContentMatches(ctx.db, { company: fields.company, title: fields.title, location: fields.location, description: fields.description, facts: fields.facts, identifiers: identifiersFromEvidence(evidence) });
+  const job: CheckedJobSummary = { title: fields.title, company: fields.company, location: fields.location, facts: fields.facts };
+  if (content.auto) return { status: 'known', draftId, matchedBy: 'content', job: knownJob(ctx, userId, content.auto.jobId) };
+  if (content.possible.length > 0) return { status: 'possible', draftId, job, candidates: toCandidates(ctx, userId, content.possible) };
+  return { status: 'fresh', draftId, job };
 }
 
 /** "I applied too": joins a job already in the shared catalog, no link needed. */

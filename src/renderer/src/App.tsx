@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Briefcase, CalendarDays, ChartBar, ClipboardList, LayoutDashboard, Loader2, LogOut, Plus, Settings as SettingsIcon, Star, Users, WifiOff } from 'lucide-react';
+import { Briefcase, CalendarDays, ChartBar, ClipboardList, CopyCheck, LayoutDashboard, Loader2, LogOut, Settings as SettingsIcon, Star, Users, WifiOff } from 'lucide-react';
 import { Tooltip as RadixTooltip } from 'radix-ui';
 import { useQueryClient } from '@tanstack/react-query';
 import type { CurrentUser } from '@shared/api';
@@ -7,11 +7,13 @@ import type { BridgeState } from '@shared/bridge';
 import { asUserSubject, Avatar, userLabel } from '@/components/job-bits';
 import { Button } from '@/components/ui/button';
 import { Notice, Tooltip } from '@/components/ui/misc';
-import { call, clearAvatarImages, errorMessage, useBridgeState, useCurrentUser, useLiveUpdates } from '@/lib/api';
+import { call, clearAvatarImages, errorMessage, useBridgeState, useCurrentUser, useDuplicateCount, useLiveUpdates } from '@/lib/api';
+import { focusAddBar } from '@/lib/add-bar-focus';
 import { cn } from '@/lib/utils';
-import { AddJobDialog } from './features/add-job';
+import { AddBar } from './features/add-bar';
 import { LoginPage, RequiredPasswordChange } from './features/auth';
 import { DashboardPage } from './features/dashboard';
+import { DuplicatesPage } from './features/duplicates-page';
 import { InterviewsPage } from './features/interviews-page';
 import { JobDetailSheet } from './features/job-detail';
 import { JobsPage } from './features/jobs-page';
@@ -20,7 +22,7 @@ import { CenteredPage, CertificateChanged, HostFailed, ModeSetup } from './featu
 import { TeamPage } from './features/team-page';
 import { UsersPage } from './features/users-page';
 
-export type Page = 'dashboard' | 'mine' | 'all' | 'highlighted' | 'interviews' | 'team' | 'users' | 'settings';
+export type Page = 'dashboard' | 'mine' | 'all' | 'highlighted' | 'interviews' | 'team' | 'duplicates' | 'users' | 'settings';
 
 const NAV: Array<{ page: Page; label: string; icon: typeof Star; adminOnly?: boolean }> = [
   { page: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -29,22 +31,17 @@ const NAV: Array<{ page: Page; label: string; icon: typeof Star; adminOnly?: boo
   { page: 'highlighted', label: 'Highlighted', icon: Star },
   { page: 'interviews', label: 'Interviews', icon: CalendarDays },
   { page: 'team', label: 'Team', icon: ChartBar },
+  { page: 'duplicates', label: 'Possible duplicates', icon: CopyCheck },
   { page: 'users', label: 'Users', icon: Users, adminOnly: true },
   { page: 'settings', label: 'Settings', icon: SettingsIcon }
 ];
 
-function Sidebar({ page, onNavigate, user, state, onAddJob }: { page: Page; onNavigate: (page: Page) => void; user: CurrentUser; state: BridgeState; onAddJob: () => void }) {
+function Sidebar({ page, onNavigate, user, state }: { page: Page; onNavigate: (page: Page) => void; user: CurrentUser; state: BridgeState }) {
   const queryClient = useQueryClient();
+  const duplicates = useDuplicateCount();
+  const waiting = duplicates.data?.total ?? 0;
   return (
     <aside className="flex w-14 shrink-0 flex-col items-center border-r border-border bg-sidebar py-3">
-      <span className="mb-3 flex size-8 items-center justify-center rounded-lg bg-accent text-accent-ink" title="Job Tracker">
-        <Briefcase className="size-4" aria-hidden />
-      </span>
-      <Tooltip content="Add job (Ctrl+N)" side="right">
-        <Button variant="primary" size="icon" className="mb-3" aria-label="Add job" onClick={onAddJob}>
-          <Plus />
-        </Button>
-      </Tooltip>
       <nav className="flex flex-1 flex-col items-center gap-1" aria-label="Main">
         {NAV.filter((item) => !item.adminOnly || user.role === 'admin').map(({ page: target, label, icon: Icon }) => (
           <Tooltip key={target} content={label} side="right">
@@ -53,9 +50,14 @@ function Sidebar({ page, onNavigate, user, state, onAddJob }: { page: Page; onNa
               aria-label={label}
               aria-current={page === target ? 'page' : undefined}
               onClick={() => onNavigate(target)}
-              className={cn('flex size-9 items-center justify-center rounded-md', page === target ? 'bg-accent-soft text-accent-soft-ink' : 'text-ink-2 hover:bg-surface-2 hover:text-ink')}
+              className={cn('relative flex size-9 items-center justify-center rounded-md', page === target ? 'bg-accent-soft text-accent-soft-ink' : 'text-ink-2 hover:bg-surface-2 hover:text-ink')}
             >
               <Icon className="size-[18px]" aria-hidden />
+              {target === 'duplicates' && waiting > 0 ? (
+                <span data-duplicate-count className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-semibold tabular-nums text-accent-ink">
+                  {waiting > 99 ? '99+' : waiting}
+                </span>
+              ) : null}
             </button>
           </Tooltip>
         ))}
@@ -99,9 +101,16 @@ function OfflineBanner({ state }: { state: BridgeState }) {
 function Shell({ state, user }: { state: BridgeState; user: CurrentUser }) {
   const [page, setPage] = useState<Page>('all');
   const [openJob, setOpenJob] = useState<number | null>(null);
-  const [adding, setAdding] = useState(false);
   const [focusSearch, setFocusSearch] = useState(0);
+  // Every page change through the rail leaves the cursor in the job link box.
+  const navigate = (next: Page) => {
+    setPage(next);
+    focusAddBar();
+  };
+  const addJob = () => focusAddBar({ force: true, select: true });
   useLiveUpdates();
+  // A notification's job was clicked.
+  useEffect(() => window.jobTracker.onOpenJob((jobId) => setOpenJob(jobId)), []);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -109,7 +118,7 @@ function Shell({ state, user }: { state: BridgeState; user: CurrentUser }) {
       const key = event.key.toLowerCase();
       if (key === 'n') {
         event.preventDefault();
-        setAdding(true);
+        focusAddBar({ force: true, select: true });
       } else if (key === 'k' || key === 'f') {
         event.preventDefault();
         setPage((current) => (current === 'mine' || current === 'all' || current === 'highlighted' ? current : 'all'));
@@ -122,20 +131,28 @@ function Shell({ state, user }: { state: BridgeState; user: CurrentUser }) {
 
   return (
     <div className="flex h-full">
-      <Sidebar page={page} onNavigate={setPage} user={user} state={state} onAddJob={() => setAdding(true)} />
+      <Sidebar page={page} onNavigate={navigate} user={user} state={state} />
       <main className="flex min-w-0 flex-1 flex-col">
         {state.connection === 'offline' ? <OfflineBanner state={state} /> : null}
+        <AddBar />
         <div className="min-h-0 flex-1">
-          {page === 'dashboard' ? <DashboardPage onOpenJob={setOpenJob} onNavigate={setPage} onAddJob={() => setAdding(true)} /> : null}
-          {page === 'mine' || page === 'all' || page === 'highlighted' ? <JobsPage view={page} user={user} onOpenJob={setOpenJob} onAddJob={() => setAdding(true)} focusSearchSignal={focusSearch} /> : null}
+          {page === 'dashboard' ? <DashboardPage onOpenJob={setOpenJob} onNavigate={navigate} onAddJob={addJob} /> : null}
+          {page === 'mine' || page === 'all' || page === 'highlighted' ? <JobsPage view={page} user={user} onOpenJob={setOpenJob} onAddJob={addJob} focusSearchSignal={focusSearch} /> : null}
           {page === 'interviews' ? <InterviewsPage onOpenJob={setOpenJob} /> : null}
           {page === 'team' ? <TeamPage user={user} /> : null}
+          {page === 'duplicates' ? <DuplicatesPage onOpenJob={setOpenJob} /> : null}
           {page === 'users' && user.role === 'admin' ? <UsersPage currentUser={user} /> : null}
           {page === 'settings' ? <SettingsPage state={state} user={user} /> : null}
         </div>
       </main>
-      <JobDetailSheet jobId={openJob} user={user} onClose={() => setOpenJob(null)} />
-      <AddJobDialog open={adding} onOpenChange={setAdding} onOpenJob={setOpenJob} />
+      <JobDetailSheet
+        jobId={openJob}
+        user={user}
+        onClose={() => {
+          setOpenJob(null);
+          focusAddBar();
+        }}
+      />
     </div>
   );
 }

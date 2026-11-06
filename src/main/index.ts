@@ -1,11 +1,12 @@
 import { copyFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, session, shell, Tray, type IpcMainInvokeEvent } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, session, shell, Tray, type IpcMainInvokeEvent } from 'electron';
 import type { ServerEvent } from '../shared/api';
-import { IPC, type ApiCallResult, type BridgeState, type ConnectionStatus, type ProbeResult, type ThemeChoice } from '../shared/bridge';
+import { IPC, NOTIFICATION_HIDE_CHOICES, type ApiCallResult, type BridgeState, type ConnectionStatus, type NoticeAction, type NotificationSettings, type ProbeResult, type ThemeChoice } from '../shared/bridge';
 import { Connection } from './connection';
 import { HostServer, type HostReady } from './host-server';
 import { probeServer } from './lan-client';
+import { NotificationCenter } from './notifications';
 import { loadSettings, loadStoredToken, saveSettings, storeToken, type Settings } from './settings';
 
 // A separate profile per instance lets several copies run side by side, for trying out
@@ -29,7 +30,8 @@ function currentState(): BridgeState {
     server: settings.server ? { address: settings.server.host, port: settings.server.port, fingerprint: settings.server.fingerprint } : null,
     host: hostInfo ? { port: hostInfo.port, addresses: hostInfo.addresses, fingerprint: hostInfo.fingerprint, dataDir: hostInfo.dataDir } : null,
     signedIn: connection.signedIn,
-    theme: settings.theme
+    theme: settings.theme,
+    notifications: settings.notifications
   };
 }
 
@@ -45,12 +47,41 @@ const connection = new Connection({
   },
   onEvent(event: ServerEvent) {
     window?.webContents.send(IPC.serverEvent, event);
+    void notifications.handleEvent(event).catch(() => undefined);
   },
   onSessionEnded() {
     storeToken(null);
     broadcastState();
   }
 });
+
+const notifications = new NotificationCenter({
+  api: <T,>(method: 'GET' | 'POST', path: string, body?: unknown) => connection.api(method, path, body, () => undefined) as Promise<ApiCallResult<T>>,
+  settings: () => settings.notifications,
+  signedIn: () => connection.signedIn,
+  open: (jobId) => {
+    showWindow();
+    if (jobId !== undefined) {
+      // A window opened just now loads first; the job opens once its page can listen.
+      const send = () => window?.webContents.send(IPC.openJob, jobId);
+      if (window?.webContents.isLoading()) window.webContents.once('did-finish-load', () => setTimeout(send, 400));
+      else send();
+    }
+  }
+});
+
+function setNotifications(changes: Partial<NotificationSettings>): NotificationSettings {
+  const next = { ...settings.notifications };
+  if (typeof changes.enabled === 'boolean') next.enabled = changes.enabled;
+  if (typeof changes.hideSeconds === 'number' && (NOTIFICATION_HIDE_CHOICES as readonly number[]).includes(changes.hideSeconds)) next.hideSeconds = changes.hideSeconds;
+  if (changes.applyProfileId === null || (typeof changes.applyProfileId === 'number' && Number.isInteger(changes.applyProfileId) && changes.applyProfileId > 0)) next.applyProfileId = changes.applyProfileId;
+  settings = { ...settings, notifications: next };
+  saveSettings(settings);
+  if (!next.enabled) notifications.clear();
+  updateTrayMenu();
+  broadcastState();
+  return next;
+}
 
 const hostServer = new HostServer((message) => {
   hostInfo = null;
@@ -81,7 +112,7 @@ async function startHost(port: number): Promise<void> {
     };
     saveSettings(settings);
     connection.connect(settings.server as NonNullable<Settings['server']>, loadStoredToken());
-    ensureTray();
+    updateTrayMenu();
   } catch (error) {
     hostInfo = null;
     settings = { ...settings, mode: 'host', hostPort: port };
@@ -96,17 +127,28 @@ function iconPath(): string {
   return app.isPackaged ? join(process.resourcesPath, 'icon.png') : join(app.getAppPath(), 'build', 'icon.png');
 }
 
-/** Closing the host's window must not cut everyone else off, so the server stays reachable from the tray. */
+/**
+ * The app lives in the tray, not the taskbar: closing the window keeps it running, so the host
+ * stays reachable and new jobs found by others can still pop up.
+ */
 function ensureTray(): void {
   if (tray) return;
   tray = new Tray(nativeImage.createFromPath(iconPath()).resize({ width: 16, height: 16 }));
-  tray.setToolTip('Job Tracker host');
+  tray.on('click', () => showWindow());
+  updateTrayMenu();
+}
+
+function updateTrayMenu(): void {
+  if (!tray) return;
+  const hosting = settings.mode === 'host';
+  tray.setToolTip(hosting ? 'Job Tracker host' : 'Job Tracker');
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: 'Open Job Tracker', click: () => showWindow() },
+      { label: 'Notifications', type: 'checkbox', checked: settings.notifications.enabled, click: (item) => setNotifications({ enabled: item.checked }) },
       { type: 'separator' },
       {
-        label: 'Stop server and quit',
+        label: hosting ? 'Stop server and quit' : 'Quit Job Tracker',
         click: () => {
           quitting = true;
           app.quit();
@@ -114,12 +156,6 @@ function ensureTray(): void {
       }
     ])
   );
-  tray.on('click', () => showWindow());
-}
-
-function removeTray(): void {
-  tray?.destroy();
-  tray = null;
 }
 
 function showWindow(): void {
@@ -130,6 +166,13 @@ function showWindow(): void {
   if (window.isMinimized()) window.restore();
   window.show();
   window.focus();
+}
+
+/** Links are copied for the person to paste where they like, never opened from the app. */
+async function copyLink(url: string): Promise<boolean> {
+  if (url.length > 4_000 || !isSafeExternalUrl(url)) return false;
+  await clipboard.writeText(url);
+  return true;
 }
 
 function isSafeExternalUrl(url: string): boolean {
@@ -152,6 +195,8 @@ function createWindow(): void {
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#0f1115' : '#f7f7f8',
     title: 'Job Tracker',
     icon: iconPath(),
+    // No skipTaskbar: Windows shows a window without a taskbar button on every virtual desktop.
+    // Closed, the window is hidden, so only the tray icon shows that the app is running.
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -170,26 +215,29 @@ function createWindow(): void {
     if (window === win) window = null;
   });
   win.on('close', (event) => {
-    if (quitting || settings.mode !== 'host' || !hostServer.running) return;
+    if (quitting) return;
     event.preventDefault();
     win.hide();
     if (!settings.trayHintShown) {
       settings = { ...settings, trayHintShown: true };
       saveSettings(settings);
-      tray?.displayBalloon({ title: 'Job Tracker is still running', content: 'The server stays available to the other computers. Right-click the tray icon to quit.' });
+      tray?.displayBalloon({
+        title: 'Job Tracker is still running',
+        content: settings.mode === 'host' ? 'The server stays available to the other computers. Right-click the tray icon to quit.' : 'New jobs found by others still pop up. Right-click the tray icon to quit.'
+      });
     }
   });
 
-  // This window only ever shows the app itself. Job posting links open in the default browser.
+  // This window only ever shows the app itself. A link that would leave it is copied instead.
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (isSafeExternalUrl(url)) void shell.openExternal(url);
+    void copyLink(url);
     return { action: 'deny' };
   });
   win.webContents.on('will-navigate', (event, url) => {
     const devServer = process.env.ELECTRON_RENDERER_URL;
     if (devServer && url.startsWith(devServer)) return;
     event.preventDefault();
-    if (isSafeExternalUrl(url)) void shell.openExternal(url);
+    void copyLink(url);
   });
 
   if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) void win.loadURL(process.env.ELECTRON_RENDERER_URL);
@@ -240,9 +288,9 @@ function registerIpc(): void {
       const sameServer = settings.server?.fingerprint === found.fingerprint;
       await hostServer.stop();
       hostInfo = null;
-      removeTray();
       settings = { ...settings, mode: 'client', server: { host: found.host, port: found.port, fingerprint: found.fingerprint, certPem: found.certPem } };
       saveSettings(settings);
+      updateTrayMenu();
       if (!sameServer) storeToken(null);
       connection.connect(settings.server as NonNullable<Settings['server']>, sameServer ? loadStoredToken() : null);
       return { ok: true, status: 200, data: currentState() };
@@ -255,10 +303,10 @@ function registerIpc(): void {
     connection.disconnect();
     await hostServer.stop();
     hostInfo = null;
-    removeTray();
     storeToken(null);
     settings = { ...settings, mode: null, server: null };
     saveSettings(settings);
+    updateTrayMenu();
     status = 'unconfigured';
     statusMessage = null;
     broadcastState();
@@ -287,9 +335,17 @@ function registerIpc(): void {
     broadcastState();
   });
 
-  handle(IPC.openExternal, async (url: string) => {
-    if (isSafeExternalUrl(String(url))) await shell.openExternal(String(url));
+  handle(IPC.setNotifications, (changes: Partial<NotificationSettings>) => setNotifications(changes && typeof changes === 'object' ? changes : {}));
+
+  handle(IPC.noticeAction, (id: number, action: NoticeAction) => notifications.act(Number(id), String(action)));
+  ipcMain.on(IPC.noticeReady, (event) => {
+    if (fromApp(event as unknown as IpcMainInvokeEvent)) notifications.markReady();
   });
+  ipcMain.on(IPC.noticeResize, (event, height: number) => {
+    if (fromApp(event as unknown as IpcMainInvokeEvent)) notifications.resize(Number(height));
+  });
+
+  handle(IPC.copyLink, async (url: string) => copyLink(String(url)));
 
   handle(IPC.exportBackup, async (name: string): Promise<ApiCallResult<{ path: string }>> => {
     if (!hostInfo || !/^[A-Za-z0-9._-]+\.sqlite$/.test(String(name))) return errorResult(new Error('Only available on the host computer.'));
@@ -338,6 +394,7 @@ function startUp(): void {
   Menu.setApplicationMenu(null);
   lockDownSession();
   registerIpc();
+  ensureTray();
   createWindow();
 
   if (settings.mode === 'host') {
@@ -354,8 +411,8 @@ if (!app.requestSingleInstanceLock()) {
   void app.whenReady().then(startUp);
 
   app.on('window-all-closed', () => {
-    // Host mode keeps serving from the tray; otherwise the app is done.
-    if (!(settings?.mode === 'host' && hostServer.running)) app.quit();
+    // The app keeps running from the tray until someone quits it there.
+    if (quitting) app.quit();
   });
 
   let stopped = false;
@@ -363,6 +420,7 @@ if (!app.requestSingleInstanceLock()) {
     quitting = true;
     if (stopped) return;
     event.preventDefault();
+    notifications.destroy();
     connection.disconnect();
     // The database is closed cleanly before the process goes away.
     void hostServer.stop().finally(() => {

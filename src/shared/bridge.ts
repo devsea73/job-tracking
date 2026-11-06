@@ -1,6 +1,30 @@
-import type { ServerEvent, ServerInfo } from './api';
+import type { JobBrief, ServerEvent, ServerInfo } from './api';
 
 export type AppMode = 'host' | 'client';
+
+/** Set on each computer: whether new jobs found by others pop up, for how long, and who applies. */
+export interface NotificationSettings {
+  enabled: boolean;
+  hideSeconds: number;
+  /** The profile the Apply button uses. Null: the one used last. */
+  applyProfileId: number | null;
+}
+
+export const NOTIFICATION_HIDE_CHOICES = [5, 10, 15, 30, 60] as const;
+
+export type NoticePayload =
+  | { id: number; kind: 'job'; brief: JobBrief; hideSeconds: number }
+  | { id: number; kind: 'summary'; count: number; owners: string[]; hideSeconds: number };
+
+export type NoticeAction = 'apply' | 'ignore' | 'timeout' | 'open' | 'link' | 'done';
+
+export interface NoticeActionResult {
+  ok: boolean;
+  message?: string;
+  profileName?: string;
+  already?: boolean;
+  copied?: boolean;
+}
 export type ThemeChoice = 'system' | 'light' | 'dark';
 
 export type ConnectionStatus =
@@ -27,6 +51,7 @@ export interface BridgeState {
   host: { port: number; addresses: string[]; fingerprint: string; dataDir: string } | null;
   signedIn: boolean;
   theme: ThemeChoice;
+  notifications: NotificationSettings;
 }
 
 export interface ApiCallResult<T = unknown> {
@@ -62,8 +87,17 @@ export interface JobTrackerBridge {
   api<T = unknown>(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<ApiCallResult<T>>;
 
   setTheme(theme: ThemeChoice): Promise<void>;
-  /** Opens a job posting in the default browser. Only http and https links are allowed. */
-  openExternal(url: string): Promise<void>;
+  setNotifications(changes: Partial<NotificationSettings>): Promise<NotificationSettings>;
+  /** The main window: a notification asked to show this job. */
+  onOpenJob(listener: (jobId: number) => void): () => void;
+
+  /** The notification card's own page. */
+  onNotice(listener: (notice: NoticePayload) => void): () => void;
+  noticeReady(): void;
+  noticeAction(id: number, action: NoticeAction): Promise<NoticeActionResult>;
+  noticeResize(height: number): void;
+  /** Copies a link to the clipboard: links in the app are copied, never opened. Only http and https links. */
+  copyLink(url: string): Promise<boolean>;
 
   /** Host only. Saves a backup to a file the person chooses. */
   exportBackup(name: string): Promise<ApiCallResult<{ path: string }>>;
@@ -83,7 +117,13 @@ export const IPC = {
   retryConnection: 'connection:retry',
   api: 'api:call',
   setTheme: 'theme:set',
-  openExternal: 'shell:open-external',
+  setNotifications: 'notifications:set',
+  openJob: 'window:open-job',
+  noticeShow: 'notice:show',
+  noticeReady: 'notice:ready',
+  noticeAction: 'notice:action',
+  noticeResize: 'notice:resize',
+  copyLink: 'clipboard:copy-link',
   exportBackup: 'backup:export',
   importBackup: 'backup:import',
   openDataFolder: 'host:open-data-folder'

@@ -1,9 +1,11 @@
-import { and, eq, inArray, or, sql } from 'drizzle-orm';
-import type { Db } from '../db/client';
+import { and, eq } from 'drizzle-orm';
+import { prepared, type Db } from '../db/client';
+import { FACTS_COLUMNS, FEATURE_COLUMNS, loadTextFeatures, toJobFacts, toTextFeatures, type FactsRow, type FeatureRow } from '../services/job-facts-store';
 import { jobIdentifiers, jobs, jobUrls } from '../db/schema';
-import { identifyAts, sourcePlatform, type AtsIdentity } from './ats';
-import { compareJobs, type ComparableJob, type ContentComparison } from './scoring';
-import { hashDescription, normalizeCompany, normalizeTitle, titleSimilarity } from './text-normalize';
+import { AGGREGATOR_PROVIDERS, identifyAts, isAggregator, referencedIdentities, sourcePlatform, type AtsIdentity } from './ats';
+import { compareJobs, featuresFor, THRESHOLDS, type ComparableJob, type ContentComparison } from './scoring';
+import { textSketchOf } from './text-features';
+import { normalizeCompany, normalizeTitle, titleSimilarity } from './text-normalize';
 import { normalizeUrl, stripPersonalParams } from './url-normalize';
 
 export type UrlKind = 'original' | 'canonical' | 'redirect' | 'discovered';
@@ -13,6 +15,8 @@ export interface UrlEvidence {
   raw: string;
   normalized: string;
   identity: AtsIdentity | null;
+  /** Other listings the link names in its parameters, such as the Jobright id in jr_id. */
+  references: AtsIdentity[];
   platform: string;
   kind: UrlKind;
 }
@@ -25,6 +29,7 @@ export function buildEvidence(raw: string | URL, kind: UrlKind): UrlEvidence | n
       raw: stripPersonalParams(url),
       normalized: normalizeUrl(url),
       identity: identifyAts(url),
+      references: referencedIdentities(url),
       platform: sourcePlatform(url),
       kind
     };
@@ -63,6 +68,10 @@ export function findExactMatch(db: Db, evidence: UrlEvidence[], incomingTitle?: 
     if (byUrl) return { jobId: byUrl.jobId, matchedBy: 'url' };
     const byIdentity = findByIdentity(db, item.identity);
     if (byIdentity !== null) return { jobId: byIdentity, matchedBy: 'identifier' };
+    for (const reference of item.references) {
+      const byReference = findByIdentity(db, reference);
+      if (byReference !== null && !contradictsJob(db, byReference, item.identity)) return { jobId: byReference, matchedBy: 'identifier' };
+    }
   }
 
   const titleFits = (jobId: number): boolean => {
@@ -75,8 +84,26 @@ export function findExactMatch(db: Db, evidence: UrlEvidence[], incomingTitle?: 
     if (byUrl && titleFits(byUrl.jobId)) return { jobId: byUrl.jobId, matchedBy: item.kind === 'discovered' ? 'identifier' : 'canonical' };
     const byIdentity = findByIdentity(db, item.identity);
     if (byIdentity !== null && titleFits(byIdentity)) return { jobId: byIdentity, matchedBy: 'identifier' };
+    for (const reference of item.references) {
+      const byReference = findByIdentity(db, reference);
+      if (byReference !== null && titleFits(byReference) && !contradictsJob(db, byReference, item.identity)) return { jobId: byReference, matchedBy: 'identifier' };
+    }
   }
   return null;
+}
+
+/**
+ * The system hosting a posting is the authority on what it is. If it gives a job a different id
+ * from this link's, a listing id tying the two together is not enough to call them one job.
+ */
+function contradictsJob(db: Db, jobId: number, identity: AtsIdentity | null): boolean {
+  if (!identity || isAggregator(identity.provider)) return false;
+  const others = db
+    .select({ externalId: jobIdentifiers.externalId })
+    .from(jobIdentifiers)
+    .where(and(eq(jobIdentifiers.jobId, jobId), eq(jobIdentifiers.provider, identity.provider), eq(jobIdentifiers.isDiscovered, false)))
+    .all();
+  return others.some((other) => other.externalId !== identity.externalId);
 }
 
 function findByIdentity(db: Db, identity: AtsIdentity | null): number | null {
@@ -100,67 +127,130 @@ export interface ContentMatches {
   possible: ContentCandidate[];
 }
 
-const MAX_CANDIDATES = 300;
+const MAX_SAME_COMPANY = 5000;
+const MAX_SAME_TITLE = 200;
+const MAX_COMPARED = 200;
 const MAX_POSSIBLE = 5;
+/** Shared samples needed before another company's posting counts as a repost worth comparing. */
+const MIN_SHARED_SAMPLES = 3;
 
-/** Layer D: compares the posting's content against jobs that could plausibly be the same one. */
-export function findContentMatches(db: Db, incoming: Omit<ComparableJob, 'identifiers'>, evidence: UrlEvidence[]): ContentMatches {
-  const companyKey = normalizeCompany(incoming.company);
-  const titleKey = normalizeTitle(incoming.title);
-  const hash = hashDescription(incoming.description);
-  const conditions = [eq(jobs.titleKey, titleKey)];
-  if (companyKey) {
-    conditions.push(eq(jobs.companyKey, companyKey));
-    if (companyKey.length >= 4) {
-      conditions.push(sql`${jobs.companyKey} like ${`${companyKey}%`}`);
-      conditions.push(sql`(length(${jobs.companyKey}) >= 4 and ${companyKey} like ${jobs.companyKey} || '%')`);
-    }
-  }
-  if (hash) conditions.push(eq(jobs.descriptionHash, hash));
-
-  const rows = db
-    .select({ id: jobs.id, company: jobs.companyName, title: jobs.title, location: jobs.location, description: jobs.description })
-    .from(jobs)
-    .where(or(...conditions))
-    .limit(MAX_CANDIDATES)
-    .all();
-  if (rows.length === 0) return { auto: null, possible: [] };
-
-  const identifiers = db
-    .select({ jobId: jobIdentifiers.jobId, provider: jobIdentifiers.provider, externalId: jobIdentifiers.externalId, isDiscovered: jobIdentifiers.isDiscovered })
-    .from(jobIdentifiers)
-    .where(
-      inArray(
-        jobIdentifiers.jobId,
-        rows.map((row) => row.id)
-      )
-    )
-    .all();
-
-  // A link found inside a page can be wrong, so only ids from a posting's own URL can
-  // show that "the same system calls these two different".
-  const incomingIdentifiers = evidence
+/** Only the hosting system's own ids can show that two postings differ. */
+export function identifiersFromEvidence(evidence: UrlEvidence[]): Array<{ provider: string; externalId: string }> {
+  return evidence
     .filter((item) => item.identity && item.kind !== 'discovered')
     .map((item) => ({ provider: (item.identity as AtsIdentity).provider, externalId: (item.identity as AtsIdentity).externalId }));
+}
 
-  const scored: ContentCandidate[] = [];
+/**
+ * The jobs worth comparing: everything at the same or a similarly named company, plus any posting
+ * with the same wording under another name. Title alone never brings a job in, since thousands
+ * of unrelated jobs share one and they would crowd out the real match.
+ */
+function findCandidateIds(db: Db, incoming: Pick<ComparableJob, 'company' | 'title' | 'description' | 'text'>, exclude: ReadonlySet<number>): number[] {
+  const sqlite = db.$client;
+  const companyKey = normalizeCompany(incoming.company);
+  const titleScores = new Map<number, number>();
+
+  if (companyKey) {
+    // "Devoted Health" finds "Devoted Health Services", and the other way around.
+    const shorter: string[] = [];
+    for (let length = Math.min(4, companyKey.length); length <= companyKey.length; length += 1) shorter.push(companyKey.slice(0, length));
+    const sameCompany = prepared(
+      sqlite,
+      `SELECT id, title FROM jobs WHERE company_key IN (SELECT value FROM json_each(?)) OR (company_key >= ? AND company_key < ?) ORDER BY id DESC LIMIT ${MAX_SAME_COMPANY}`
+    ).all(JSON.stringify(shorter), companyKey, `${companyKey}{`) as Array<{ id: number; title: string }>;
+    // The same title at the same company is always compared, however many jobs that company has.
+    const sameTitle = prepared(sqlite, `SELECT id, title FROM jobs WHERE company_key = ? AND title_key = ? ORDER BY id DESC LIMIT ${MAX_SAME_TITLE}`).all(companyKey, normalizeTitle(incoming.title)) as Array<{ id: number; title: string }>;
+    for (const row of [...sameTitle, ...sameCompany]) {
+      if (titleScores.has(row.id) || exclude.has(row.id)) continue;
+      const score = titleSimilarity(incoming.title, row.title);
+      if (score >= THRESHOLDS.possibleTitle) titleScores.set(row.id, score);
+    }
+  }
+
+  // Jobs found by their wording get places of their own, so a big company's many similar titles cannot push them out.
+  const byWording = new Set<number>();
+  const add = (ids: Array<{ id: number }>) => {
+    for (const { id } of ids) if (!exclude.has(id) && !titleScores.has(id)) byWording.add(id);
+  };
+  const features = featuresFor(incoming);
+  if (features.hash) add(prepared(sqlite, 'SELECT job_id AS id FROM job_text_features WHERE hash = ? LIMIT 50').all(features.hash) as Array<{ id: number }>);
+  const sketch = textSketchOf(features);
+  if (sketch.length > 0) {
+    add(
+      prepared(
+        sqlite,
+        `SELECT job_id AS id FROM job_signatures WHERE kind = 'text' AND value IN (SELECT value FROM json_each(?)) GROUP BY job_id HAVING COUNT(*) >= ${MIN_SHARED_SAMPLES} ORDER BY COUNT(*) DESC LIMIT 50`
+      ).all(JSON.stringify(sketch)) as Array<{ id: number }>
+    );
+  }
+
+  const byTitle = [...titleScores.entries()]
+    .sort(([idA, scoreA], [idB, scoreB]) => scoreB - scoreA || idB - idA)
+    .slice(0, MAX_COMPARED)
+    .map(([id]) => id);
+  return [...byTitle, ...byWording];
+}
+
+/** Scores every plausible job against the posting, best first, with what each was compared as. */
+function scoreCandidates(db: Db, incoming: ComparableJob, exclude: ReadonlySet<number>): Array<ContentCandidate & { job: ComparableJob }> {
+  const ids = findCandidateIds(db, incoming, exclude);
+  if (ids.length === 0) return [];
+  const sqlite = db.$client;
+  const idList = JSON.stringify(ids);
+
+  const rows = prepared(
+    sqlite,
+    `SELECT j.id, j.company_name AS company, j.title, j.location, ${FACTS_COLUMNS}, ${FEATURE_COLUMNS}
+     FROM jobs j LEFT JOIN job_facts f ON f.job_id = j.id LEFT JOIN job_text_features t ON t.job_id = j.id WHERE j.id IN (SELECT value FROM json_each(?))`
+  ).all(idList) as Array<FactsRow & FeatureRow & { id: number; company: string; title: string; location: string | null }>;
+
+  const identifiers = prepared(sqlite, `SELECT job_id AS jobId, provider, external_id AS externalId, is_discovered AS isDiscovered FROM job_identifiers WHERE job_id IN (SELECT value FROM json_each(?))`).all(idList) as Array<{
+    jobId: number;
+    provider: string;
+    externalId: string;
+    isDiscovered: number;
+  }>;
+  // A listing site can list one job under several ids, and a link found inside a page can be
+  // wrong, so only ids from the system hosting the posting can show that two jobs differ.
+  const counts = (item: { provider: string }) => !AGGREGATOR_PROVIDERS.includes(item.provider);
+  const hostingIds = incoming.identifiers.filter(counts);
+
+  const scored: Array<ContentCandidate & { job: ComparableJob }> = [];
   for (const row of rows) {
     const existing: ComparableJob = {
       company: row.company,
       title: row.title,
       location: row.location,
-      description: row.description,
-      identifiers: identifiers
-        .filter((item) => item.jobId === row.id && !item.isDiscovered)
-        .map(({ provider, externalId }) => ({ provider, externalId }))
+      // Compared on the stored features: no posting text is read back for this.
+      text: toTextFeatures(row) ?? loadTextFeatures(sqlite, row.id),
+      facts: toJobFacts(row),
+      identifiers: identifiers.filter((item) => item.jobId === row.id && !item.isDiscovered && counts(item)).map(({ provider, externalId }) => ({ provider, externalId }))
     };
-    const comparison = compareJobs({ ...incoming, identifiers: incomingIdentifiers }, existing);
-    if (comparison.decision !== 'none') scored.push({ jobId: row.id, comparison });
+    const comparison = compareJobs({ ...incoming, identifiers: hostingIds }, existing);
+    if (comparison.decision !== 'none') scored.push({ jobId: row.id, comparison, job: existing });
   }
-  scored.sort((a, b) => b.comparison.score - a.comparison.score);
+  return scored.sort((a, b) => b.comparison.score - a.comparison.score);
+}
 
+/**
+ * Layer D: compares the posting's content against jobs that could plausibly be the same one.
+ * A merge needs both sides to agree: the posting has exactly one confident match, and that job
+ * has no other confident match of its own. A listing site's copy of one of two near-identical
+ * openings is otherwise merged into whichever happens to be checked first.
+ */
+export function findContentMatches(db: Db, incoming: ComparableJob, exclude: ReadonlySet<number> = new Set()): ContentMatches {
+  const scored = scoreCandidates(db, incoming, exclude);
+  const toCandidate = ({ jobId, comparison }: ContentCandidate): ContentCandidate => ({ jobId, comparison });
   const autos = scored.filter((item) => item.comparison.decision === 'auto');
+  if (autos.length === 1) {
+    const [only] = autos;
+    const rivals = scoreCandidates(db, only.job, new Set([...exclude, only.jobId])).filter((item) => item.comparison.decision === 'auto');
+    if (rivals.length === 0) return { auto: toCandidate(only), possible: [] };
+    // The rival is worth showing too: it is the reason this needs a person.
+    const shown = new Set(scored.map((item) => item.jobId));
+    return { auto: null, possible: [...scored.map(toCandidate), ...rivals.filter((item) => !shown.has(item.jobId)).map(toCandidate)].slice(0, MAX_POSSIBLE) };
+  }
   // Two confident matches mean the data itself is ambiguous, so a person decides.
-  if (autos.length === 1) return { auto: autos[0], possible: [] };
-  return { auto: null, possible: scored.slice(0, MAX_POSSIBLE) };
+  return { auto: null, possible: scored.slice(0, MAX_POSSIBLE).map(toCandidate) };
 }

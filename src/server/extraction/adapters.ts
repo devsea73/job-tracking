@@ -112,7 +112,8 @@ const greenhouse: SiteAdapter = {
       description: job.content ? htmlToText(job.content) : null,
       location: cleanInline(job.location?.name),
       requisitionId: job.requisition_id ?? null,
-      canonicalUrl: typeof job.absolute_url === 'string' ? job.absolute_url : null
+      canonicalUrl: typeof job.absolute_url === 'string' ? job.absolute_url : null,
+      hints: { postedAt: job.first_published ?? job.updated_at }
     };
   },
   // Without a board name the link itself is the only address known to work, and on a
@@ -134,7 +135,8 @@ const greenhouse: SiteAdapter = {
           [null, post.conclusion]
         ]),
         location: cleanInline(post.job_post_location),
-        canonicalUrl: typeof post.public_url === 'string' ? post.public_url : null
+        canonicalUrl: typeof post.public_url === 'string' ? post.public_url : null,
+        hints: { postedAt: post.published_at ?? post.first_published ?? post.updated_at }
       };
     } catch {
       return null;
@@ -168,7 +170,13 @@ const lever: SiteAdapter = {
         [null, job.additional]
       ]),
       location: cleanInline(job.categories?.allLocations?.join('; ') ?? job.categories?.location),
-      canonicalUrl: typeof job.hostedUrl === 'string' ? job.hostedUrl : null
+      canonicalUrl: typeof job.hostedUrl === 'string' ? job.hostedUrl : null,
+      hints: {
+        postedAt: job.createdAt,
+        salary: job.salaryRange ? { min: job.salaryRange.min, max: job.salaryRange.max, currency: job.salaryRange.currency, period: job.salaryRange.interval } : null,
+        employmentType: job.categories?.commitment,
+        workArrangement: job.workplaceType
+      }
     };
   },
   pageUrl: ({ url }) => url.toString().replace(/\/apply(?=$|[?#])/, '')
@@ -189,7 +197,13 @@ const ashby: SiteAdapter = {
         title: cleanInline(data.posting.title),
         company: cleanInline(data.organization?.name) ?? cleanInline($('meta[property="og:site_name"]').attr('content')),
         description: data.posting.descriptionHtml ? htmlToText(data.posting.descriptionHtml) : null,
-        location: cleanInline(data.posting.locationName)
+        location: cleanInline(data.posting.locationName),
+        hints: {
+          postedAt: data.posting.publishedDate,
+          salaryText: data.posting.compensationTierSummary ?? data.posting.scrapeableCompensationSalarySummary,
+          employmentType: data.posting.employmentType,
+          workArrangement: data.posting.workplaceType ?? (data.posting.isRemote ? 'remote' : null)
+        }
       };
     } catch {
       return null;
@@ -238,7 +252,8 @@ const workday: SiteAdapter = {
       description: info.jobDescription ? htmlToText(info.jobDescription) : null,
       location: cleanInline(info.location),
       requisitionId: info.jobReqId ?? null,
-      canonicalUrl: typeof info.externalUrl === 'string' ? info.externalUrl : null
+      canonicalUrl: typeof info.externalUrl === 'string' ? info.externalUrl : null,
+      hints: { postedAt: info.startDate, employmentType: info.timeType, workArrangement: info.remoteType }
     };
   }
 };
@@ -266,7 +281,13 @@ const smartRecruiters: SiteAdapter = {
       ]),
       location: place.remote ? (where ? `Remote; ${where}` : 'Remote') : where,
       requisitionId: job.refNumber ?? null,
-      canonicalUrl: typeof job.postingUrl === 'string' ? job.postingUrl : null
+      canonicalUrl: typeof job.postingUrl === 'string' ? job.postingUrl : null,
+      hints: {
+        postedAt: job.releasedDate,
+        salary: job.compensation ? { min: job.compensation.min, max: job.compensation.max, currency: job.compensation.currency, period: job.compensation.period } : null,
+        employmentType: job.typeOfEmployment?.label ?? job.typeOfEmployment?.id,
+        workArrangement: place.hybrid ? 'hybrid' : place.remote ? 'remote' : null
+      }
     };
   }
 };
@@ -294,7 +315,8 @@ const workable: SiteAdapter = {
       ]),
       location: job.remote ? (where ? `Remote; ${where}` : 'Remote') : where,
       requisitionId: job.code || null,
-      canonicalUrl: `https://apply.workable.com/${account}/j/${code}/`
+      canonicalUrl: `https://apply.workable.com/${account}/j/${code}/`,
+      hints: { postedAt: job.published ?? job.created, employmentType: job.type, workArrangement: job.workplace ?? (job.remote ? 'remote' : null) }
     };
   }
 };
@@ -315,7 +337,13 @@ const rippling: SiteAdapter = {
         [null, job.description?.role]
       ]),
       location: Array.isArray(job.workLocations) ? cleanInline(job.workLocations.join('; ')) : null,
-      canonicalUrl: typeof job.url === 'string' ? job.url : null
+      canonicalUrl: typeof job.url === 'string' ? job.url : null,
+      hints: {
+        postedAt: job.createdOn,
+        salary: job.payRangeDetails?.[0] ? { min: job.payRangeDetails[0].rangeStart, max: job.payRangeDetails[0].rangeEnd, currency: job.payRangeDetails[0].currency, period: job.payRangeDetails[0].frequency } : null,
+        employmentType: job.employmentType?.label ?? job.employmentType?.id,
+        workArrangement: job.payRangeDetails?.[0]?.isRemote ? 'remote' : null
+      }
     };
   }
 };
@@ -337,7 +365,13 @@ const recruitee: SiteAdapter = {
         [null, offer.description],
         ['Requirements', offer.requirements]
       ]),
-      location: cleanInline(offer.location)
+      location: cleanInline(offer.location),
+      hints: {
+        postedAt: offer.published_at ?? offer.created_at,
+        employmentType: offer.employment_type_code,
+        workArrangement: offer.hybrid ? 'hybrid' : offer.remote ? 'remote' : offer.on_site ? 'onsite' : null,
+        salary: offer.salary ? { min: Number(offer.salary.min) || null, max: Number(offer.salary.max) || null, currency: offer.salary.currency, period: offer.salary.period } : null
+      }
     };
   }
 };
@@ -364,7 +398,8 @@ const oracle: SiteAdapter = {
         [null, item.OrganizationDescriptionStr]
       ]),
       location: cleanInline(item.PrimaryLocation),
-      requisitionId: item.RequisitionId ? String(item.RequisitionId) : null
+      requisitionId: item.RequisitionId ? String(item.RequisitionId) : null,
+      hints: { postedAt: item.ExternalPostedStartDate, employmentType: item.JobType ?? item.WorkerType, workArrangement: item.WorkplaceType }
     };
   }
 };
@@ -386,7 +421,14 @@ const bambooHr: SiteAdapter = {
       company: cleanInline(about?.result?.name) ?? humanizeSlug(identity?.board),
       description: opening.description ? htmlToText(opening.description) : null,
       location: [place.city, place.state].filter(Boolean).join(', ') || (opening.isRemote ? 'Remote' : null),
-      canonicalUrl: typeof opening.jobOpeningShareUrl === 'string' ? opening.jobOpeningShareUrl : null
+      canonicalUrl: typeof opening.jobOpeningShareUrl === 'string' ? opening.jobOpeningShareUrl : null,
+      hints: {
+        postedAt: opening.datePosted,
+        salaryText: opening.compensation,
+        employmentType: opening.employmentStatusLabel,
+        // BambooHR's codes: 0 on-site, 1 remote, 2 hybrid.
+        workArrangement: opening.locationType === '1' || opening.isRemote ? 'remote' : opening.locationType === '2' ? 'hybrid' : opening.locationType === '0' ? 'onsite' : null
+      }
     };
   }
 };
@@ -483,7 +525,8 @@ const jobright: SiteAdapter = {
           ['Responsibilities', list(job.coreResponsibilities)],
           ['Qualifications', list(job.qualifications?.mustHave ?? job.detailQualifications)]
         ]),
-        location: cleanInline(job.jobLocation)
+        location: cleanInline(job.jobLocation),
+        hints: { postedAt: job.publishTime, salaryText: job.salaryDesc, employmentType: job.employmentType, workArrangement: job.workModel }
       };
     } catch {
       return null;
@@ -504,7 +547,17 @@ const linkedIn: SiteAdapter = {
       title,
       company: cleanInline($('.topcard__org-name-link, .topcard__flavor a').first().text()),
       description: description ? htmlToText(description) : null,
-      location: cleanInline($('.topcard__flavor--bullet').first().text())
+      location: cleanInline($('.topcard__flavor--bullet').first().text()),
+      hints: {
+        salaryText: cleanInline($('.compensation__salary').first().text()),
+        employmentType: cleanInline(
+          $('.description__job-criteria-item')
+            .filter((_, item) => /employment type/i.test($(item).find('.description__job-criteria-subheader').text()))
+            .first()
+            .find('.description__job-criteria-text')
+            .text()
+        )
+      }
     };
   }
 };
@@ -592,7 +645,8 @@ const dover: SiteAdapter = {
       title: cleanInline(job.title),
       company: cleanInline(job.client_name),
       description: job.user_provided_description ? htmlToText(job.user_provided_description) : null,
-      location: Array.isArray(job.locations) ? cleanInline(job.locations.map((place: Json) => place?.name).filter(Boolean).join('; ')) : null
+      location: Array.isArray(job.locations) ? cleanInline(job.locations.map((place: Json) => place?.name).filter(Boolean).join('; ')) : null,
+      hints: { postedAt: job.created ?? job.published_at, employmentType: job.employment_type, workArrangement: job.locations?.[0]?.location_type }
     };
   }
 };

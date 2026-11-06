@@ -377,7 +377,7 @@ describe('interview process on the job list', () => {
     const url = serveJob(server, 'acme');
     await users.tyler.addJob(url);
     await users.tyler.addJob(url, { profileId: second });
-    for (const sort of ['recent', 'updated', 'company', 'interview', 'status', 'applicants']) {
+    for (const sort of ['recent', 'applied', 'updated', 'company', 'interview', 'status', 'applicants']) {
       for (const scope of ['all', 'mine']) {
         const list = (await users.tyler.get(`/api/jobs?sort=${sort}&scope=${scope}`)).json;
         expect(list.total, `${sort} ${scope}`).toBe(1);
@@ -452,10 +452,10 @@ describe('most applied sort', () => {
 });
 
 describe('pass rates', () => {
-  it('uses the highest stage in the history', () => {
+  it('uses the stage reached, where moving back corrects a mistake and a rejection does not', () => {
     expect(furthestStage(['Applied'])).toBe('Applied');
     expect(furthestStage(['Applied', 'Technical Interview', 'Rejected'])).toBe('Technical Interview');
-    expect(furthestStage(['Applied', 'Final Interview', 'Recruiter Screen'])).toBe('Final Interview');
+    expect(furthestStage(['Applied', 'Final Interview', 'Recruiter Screen'])).toBe('Recruiter Screen');
     expect(furthestStage(['Rejected'])).toBe('Applied');
   });
 

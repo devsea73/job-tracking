@@ -17,6 +17,7 @@ import type { AppContext } from '../context';
 import { prepared, type Db } from '../db/client';
 import { applicationStatusHistory, interviews, jobs, jobUrls, users } from '../db/schema';
 import { notFound } from '../errors';
+import { FACTS_COLUMNS, readJobFacts, toJobFacts, type FactsRow } from './job-facts-store';
 import { toProfileRef } from './profiles';
 import { toUserRef } from './users';
 
@@ -30,7 +31,7 @@ function searchTokens(query: string): string[] {
   return (query.normalize('NFKC').match(/[\p{L}\p{N}][\p{L}\p{N}+#.-]*/gu) ?? []).slice(0, 8);
 }
 
-interface JobRow {
+interface JobRow extends FactsRow {
   id: number;
   title: string;
   company_name: string;
@@ -73,8 +74,12 @@ function sortPlan(userId: number, query: JobListQuery, now: string): SortPlan {
   const keys = (select: string, from = 'applications x') => `LEFT JOIN (SELECT x.job_id, ${select} AS sort_key FROM ${from} WHERE ${relevant} GROUP BY x.job_id) s ON s.job_id = j.id`;
   switch (query.sort ?? 'recent') {
     case 'recent':
-      if (query.scope === 'mine') return { join: keys('MAX(x.applied_at)'), joinParams: [], order: 's.sort_key DESC' };
+      // Mine: when I added it here, which an imported list can make differ from when I applied.
+      if (query.scope === 'mine') return { join: keys('MAX(x.id)'), joinParams: [], order: 's.sort_key DESC' };
       return { join: '', joinParams: [], order: 'j.created_at DESC' };
+    case 'applied':
+      // Mine: when I applied. Otherwise: the latest anyone shown applied.
+      return { join: keys('MAX(x.applied_at)'), joinParams: [], order: 's.sort_key IS NULL, s.sort_key DESC' };
     case 'updated':
       if (everyone) return { join: '', joinParams: [], order: 'j.last_activity_at DESC' };
       return { join: keys('MAX(x.updated_at)'), joinParams: [], order: "MAX(j.updated_at, COALESCE(s.sort_key, '')) DESC" };
@@ -173,8 +178,8 @@ export function listJobs(db: Db, userId: number, query: JobListQuery): JobListRe
   const order = [query.highlightFirst ? 'j.is_highlighted DESC' : null, plan.order, 'j.id DESC'].filter(Boolean).join(', ');
   const rows = prepared(
     sqlite,
-    `SELECT j.id, j.title, j.company_name, j.location, j.is_highlighted, j.created_at, j.updated_at
-     FROM jobs j ${plan.join} ${filter} ORDER BY ${order} LIMIT ? OFFSET ?`
+    `SELECT j.id, j.title, j.company_name, j.location, j.is_highlighted, j.created_at, j.updated_at, ${FACTS_COLUMNS}
+     FROM jobs j LEFT JOIN job_facts f ON f.job_id = j.id ${plan.join} ${filter} ORDER BY ${order} LIMIT ? OFFSET ?`
   ).all(...plan.joinParams, ...params, query.limit ?? 100, query.offset ?? 0) as JobRow[];
 
   const byJob = listApplicationsForJobs(
@@ -193,6 +198,7 @@ export function listJobs(db: Db, userId: number, query: JobListQuery): JobListRe
         isHighlighted: row.is_highlighted === 1,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
+        facts: toJobFacts(row),
         applications: byJob.get(row.id) ?? []
       })
     )
@@ -325,11 +331,12 @@ export function getJobDetail(ctx: AppContext, viewerId: number, jobId: number): 
     lastExtractedAt: job.lastExtractedAt,
     extractionMethod: job.extractionMethod,
     urls: db.select().from(jobUrls).where(eq(jobUrls.jobId, jobId)).orderBy(asc(jobUrls.id)).all(),
+    facts: readJobFacts(db.$client, jobId),
     applications: rows.map((row) => toApplicationDetail(db, row, viewerId))
   };
 }
 
-interface InterviewRow {
+interface InterviewRow extends FactsRow {
   id: number;
   applicationId: number;
   stage: InterviewStage;
@@ -378,7 +385,7 @@ export function listInterviews(db: Db, viewerId: number, filter: InterviewQuery,
   const rows = prepared(
     db.$client,
     `SELECT i.id, i.application_id AS applicationId, i.stage, i.scheduled_at AS scheduledAt, i.timezone, i.note,
-              i.created_at AS createdAt, i.updated_at AS updatedAt, j.id AS jobId, j.title, j.company_name AS company,
+              i.created_at AS createdAt, i.updated_at AS updatedAt, j.id AS jobId, j.title, j.company_name AS company, ${FACTS_COLUMNS},
               u.id AS user_id, u.username, u.display_name, ua.updated_at AS user_avatar,
               p.id AS profile_id, p.name AS profile_name, p.is_archived, pa.updated_at AS profile_avatar
        FROM interviews i
@@ -386,6 +393,7 @@ export function listInterviews(db: Db, viewerId: number, filter: InterviewQuery,
        JOIN jobs j ON j.id = a.job_id
        JOIN users u ON u.id = a.user_id
        JOIN profiles p ON p.id = a.profile_id
+       LEFT JOIN job_facts f ON f.job_id = j.id
        LEFT JOIN user_avatars ua ON ua.user_id = u.id
        LEFT JOIN profile_avatars pa ON pa.profile_id = p.id
        ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
@@ -403,6 +411,7 @@ export function listInterviews(db: Db, viewerId: number, filter: InterviewQuery,
     jobId: row.jobId,
     title: row.title,
     company: row.company,
+    facts: toJobFacts(row),
     owner: toUserRef({ id: row.user_id, username: row.username, displayName: row.display_name, avatarVersion: row.user_avatar }),
     profile: toProfileRef({ id: row.profile_id, name: row.profile_name, isArchived: row.is_archived === 1, avatarVersion: row.profile_avatar }),
     isMine: row.user_id === viewerId

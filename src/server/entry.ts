@@ -6,6 +6,8 @@ import { closeDatabase } from './db/client';
 import { PlaywrightRenderer } from './extraction/browser';
 import { SafeHttpClient } from './extraction/safe-fetch';
 import { createFileLogger } from './logger';
+import { createBackup } from './services/backups';
+import { startDuplicateChecks } from './services/duplicates';
 import { lanAddresses } from './network';
 import { loadOrCreateTls } from './tls';
 import type { HostCommand, HostMessage } from '../shared/host-protocol';
@@ -42,11 +44,13 @@ async function start(command: Extract<HostCommand, { type: 'start' }>): Promise<
   const purge = setInterval(() => purgeExpiredSessions(ctx.db), 60 * 60 * 1000);
   purge.unref();
 
+  let stopDuplicateChecks: () => Promise<void> = async () => undefined;
   let stopping = false;
   const stop = async () => {
     if (stopping) return;
     stopping = true;
     clearInterval(purge);
+    await stopDuplicateChecks();
     // Open event streams would otherwise hold the close open.
     await Promise.race([app.close(), new Promise((resolve) => setTimeout(resolve, 2_000))]);
     await renderer.close().catch(() => undefined);
@@ -63,6 +67,8 @@ async function start(command: Extract<HostCommand, { type: 'start' }>): Promise<
   await app.listen({ host: '0.0.0.0', port: command.port });
   logger.info({ port: command.port }, 'Server listening');
   post({ type: 'ready', port: command.port, certPem: tls.cert, fingerprint: tls.fingerprint, addresses: lanAddresses() });
+  // Saved jobs are compared in the background, once people can already work.
+  stopDuplicateChecks = startDuplicateChecks(ctx, { backup: () => createBackup(ctx, 'before-merge') });
 }
 
 parent?.on('message', (event) => {

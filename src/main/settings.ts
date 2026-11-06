@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { app, safeStorage } from 'electron';
-import type { AppMode, ThemeChoice } from '../shared/bridge';
+import type { AppMode, NotificationSettings, ThemeChoice } from '../shared/bridge';
 import { DEFAULT_PORT } from '../shared/constants';
 
 export interface PairedServer {
@@ -17,9 +17,12 @@ export interface Settings {
   server: PairedServer | null;
   theme: ThemeChoice;
   trayHintShown: boolean;
+  notifications: NotificationSettings;
 }
 
-const DEFAULTS: Settings = { mode: null, hostPort: DEFAULT_PORT, server: null, theme: 'system', trayHintShown: false };
+export const DEFAULT_NOTIFICATIONS: NotificationSettings = { enabled: true, hideSeconds: 10, applyProfileId: null };
+
+const DEFAULTS: Settings = { mode: null, hostPort: DEFAULT_PORT, server: null, theme: 'system', trayHintShown: false, notifications: DEFAULT_NOTIFICATIONS };
 
 function settingsPath(): string {
   return join(app.getPath('userData'), 'settings.json');
@@ -27,7 +30,8 @@ function settingsPath(): string {
 
 export function loadSettings(): Settings {
   try {
-    return { ...DEFAULTS, ...(JSON.parse(readFileSync(settingsPath(), 'utf8')) as Partial<Settings>) };
+    const saved = JSON.parse(readFileSync(settingsPath(), 'utf8')) as Partial<Settings>;
+    return { ...DEFAULTS, ...saved, notifications: { ...DEFAULT_NOTIFICATIONS, ...saved.notifications } };
   } catch {
     return { ...DEFAULTS };
   }

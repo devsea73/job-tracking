@@ -12,3 +12,4 @@ survey-report.json
 job.txt
 *.urls.txt
 load-report*.json
+dedupe-report*

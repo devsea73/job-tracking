@@ -23,12 +23,14 @@ interface SelectProps {
   leading?: ReactNode;
   /** Shows only the symbol. The choices appear when opened. */
   hideValue?: boolean;
+  /** Where the cursor goes when the list closes. By default, back to the select itself. */
+  onCloseAutoFocus?: (event: Event) => void;
 }
 
 /** Radix treats the empty string as "nothing selected", so "all" options travel as this value. */
 export const ANY = '__any__';
 
-export function Select({ value, onChange, options, placeholder, className, ariaLabel, disabled, renderValue, triggerClassName, leading, hideValue }: SelectProps) {
+export function Select({ value, onChange, options, placeholder, className, ariaLabel, disabled, renderValue, triggerClassName, leading, hideValue, onCloseAutoFocus }: SelectProps) {
   return (
     <RadixSelect.Root value={value} onValueChange={onChange} disabled={disabled}>
       <RadixSelect.Trigger
@@ -60,6 +62,7 @@ export function Select({ value, onChange, options, placeholder, className, ariaL
         <RadixSelect.Content
           position="popper"
           sideOffset={4}
+          onCloseAutoFocus={onCloseAutoFocus}
           onClick={(event) => event.stopPropagation()}
           className="z-50 max-h-80 min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded-lg border border-border bg-surface p-1 shadow-panel"
         >

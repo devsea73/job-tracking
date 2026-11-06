@@ -1,8 +1,11 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { CalendarPlus, Clock, ExternalLink, FileText, History, Link2, MapPin, Pencil, StickyNote, Trash2, User, UserPlus, Users, X, type LucideIcon } from 'lucide-react';
+import { Banknote, CalendarDays, CalendarPlus, Clock, Copy, Info, FileText, History, Link2, MapPin, Pencil, StickyNote, Trash2, User, UserPlus, Users, X, type LucideIcon } from 'lucide-react';
 import type { ApplicationDetail, CurrentUser, Interview, JobDetail } from '@shared/api';
+import { isUnreadableNote } from '@shared/unreadable';
 import { applicationLabel, Avatar, canDeleteJob, HighlightButton, ProcessSteps, StatusBadge, StatusSelect, userName } from '@/components/job-bits';
+import { formatSalary, JobTags } from '@/components/job-tags';
+import { useCopyLink } from '@/lib/copy-link';
 import { STAGE_ICONS, Symbol } from '@/components/symbols';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog, Dialog, Sheet } from '@/components/ui/dialog';
@@ -14,16 +17,58 @@ import { call, errorMessage, useApplyToJob, useDeleteApplication, useDeleteInter
 import { formatDate, formatDateTime, formatRelative } from '@/lib/utils';
 import { InterviewFormDialog } from './interview-form';
 
-function Section({ title, icon: Icon, count, children }: { title: string; icon: LucideIcon; count?: number; children: React.ReactNode }) {
+function Section({ title, icon: Icon, count, aside, children }: { title: string; icon: LucideIcon; count?: number; aside?: React.ReactNode; children: React.ReactNode }) {
   return (
     <section className="border-t border-border px-5 py-3.5">
-      <h3 className="mb-2 flex items-center gap-1.5 text-ink-3">
-        <Symbol icon={Icon} label={title} />
-        <span className="sr-only">{title}</span>
-        {count !== undefined ? <span className="text-[12.5px] tabular-nums">{count}</span> : null}
-      </h3>
+      <div className="mb-2 flex items-center gap-3">
+        <h3 className="flex shrink-0 items-center gap-1.5 text-ink-3">
+          <Symbol icon={Icon} label={title} />
+          <span className="sr-only">{title}</span>
+          {count !== undefined ? <span className="text-[12.5px] tabular-nums">{count}</span> : null}
+        </h3>
+        {aside ? <div className="flex min-w-0 flex-1 justify-end">{aside}</div> : null}
+      </div>
       {children}
     </section>
+  );
+}
+
+/** The job's links in one row: the one it was added with first. Clicking copies, nothing opens. */
+function JobLinks({ job }: { job: JobDetail }) {
+  const copy = useCopyLink();
+  const links = job.urls.filter((url) => url.kind === 'original' || url.kind === 'canonical');
+  if (links.length === 0) return null;
+  const [first, ...rest] = links;
+  const shortLink = (url: string) => url.replace(/^https?:\/\/(www\.)?/, '');
+  return (
+    <div className="flex min-w-0 items-center gap-1.5" data-job-links>
+      <button
+        type="button"
+        title={`${first.originalUrl}\nClick to copy`}
+        aria-label={`Copy the job link ${first.originalUrl}`}
+        onClick={() => copy(first.originalUrl)}
+        className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md border border-border px-2 py-1 text-[12.5px] text-accent-soft-ink hover:bg-surface-2"
+      >
+        <Link2 className="size-3.5 shrink-0" aria-hidden />
+        <span className="truncate">{shortLink(first.originalUrl)}</span>
+        <Copy className="size-3.5 shrink-0 text-ink-3" aria-hidden />
+      </button>
+      {rest.map((url) => (
+        <button
+          key={url.id}
+          type="button"
+          title={`${url.originalUrl}\nClick to copy`}
+          aria-label={`Copy the link ${url.originalUrl}`}
+          onClick={() => copy(url.originalUrl)}
+          className="shrink-0 rounded-md border border-border px-2 py-1 text-[12px] text-ink-2 hover:bg-surface-2 hover:text-ink"
+        >
+          {linkHost(url.originalUrl)}
+        </button>
+      ))}
+      <span className="shrink-0 text-ink-3">
+        <Symbol icon={job.lastExtractedAt ? FileText : Pencil} label={job.lastExtractedAt ? `Details read ${formatRelative(job.lastExtractedAt)}.` : 'Details entered by hand.'} size="size-3.5" />
+      </span>
+    </div>
   );
 }
 
@@ -325,7 +370,9 @@ export function JobDetailSheet({ jobId, user, onClose }: { jobId: number | null;
   const [deleting, setDeleting] = useState(false);
   const toast = useToast();
   const remove = useDeleteJob();
+  const copyLink = useCopyLink();
   const primaryUrl = job?.urls.find((url) => url.kind === 'original')?.originalUrl ?? job?.urls[0]?.originalUrl;
+  const salary = job ? formatSalary(job.facts) : null;
 
   return (
     <Sheet
@@ -339,12 +386,23 @@ export function JobDetailSheet({ jobId, user, onClose }: { jobId: number | null;
         <div className="min-w-0 flex-1">
           {job ? (
             <>
+              <JobTags facts={job.facts} className="mb-1.5 h-auto flex-wrap" />
               <h2 className="selectable text-[17px] font-semibold leading-snug">{job.title}</h2>
               <p className="selectable mt-0.5 text-ink-2">{job.company}</p>
               <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-ink-3">
                 {job.location ? (
                   <span className="inline-flex items-center gap-1">
                     <MapPin className="size-3.5" aria-hidden /> {job.location}
+                  </span>
+                ) : null}
+                {salary ? (
+                  <span className="inline-flex items-center gap-1" title="Salary" aria-label={`Salary ${salary}`}>
+                    <Banknote className="size-3.5" aria-hidden /> {salary}
+                  </span>
+                ) : null}
+                {job.facts.postedAt ? (
+                  <span className="inline-flex items-center gap-1" title={`Posted ${formatRelative(job.facts.postedAt)}`} aria-label={`Posted ${formatDate(job.facts.postedAt)}`}>
+                    <CalendarDays className="size-3.5" aria-hidden /> {formatDate(job.facts.postedAt)}
                   </span>
                 ) : null}
                 <span className="inline-flex items-center gap-1" title={`Added ${formatRelative(job.createdAt)}`}>
@@ -362,9 +420,9 @@ export function JobDetailSheet({ jobId, user, onClose }: { jobId: number | null;
         <div className="flex shrink-0 items-center gap-0.5">
           {job ? <HighlightButton jobId={job.id} highlighted={job.isHighlighted} highlightedBy={job.highlightedBy} size="lg" /> : null}
           {primaryUrl ? (
-            <Tooltip content="Open posting">
-              <Button size="icon" variant="ghost" aria-label="Open posting in your browser" onClick={() => void window.jobTracker.openExternal(primaryUrl)}>
-                <ExternalLink />
+            <Tooltip content="Copy the job link">
+              <Button size="icon" variant="ghost" aria-label="Copy the job link" onClick={() => copyLink(primaryUrl)}>
+                <Copy />
               </Button>
             </Tooltip>
           ) : null}
@@ -396,7 +454,7 @@ export function JobDetailSheet({ jobId, user, onClose }: { jobId: number | null;
         ) : null}
         {job ? (
           <>
-            <Section title="Interview process" icon={Users} count={job.applications.length}>
+            <Section title="Interview process" icon={Users} count={job.applications.length} aside={<JobLinks job={job} />}>
               {job.applications.length ? (
                 <div className="space-y-2">
                   {[...job.applications]
@@ -415,25 +473,16 @@ export function JobDetailSheet({ jobId, user, onClose }: { jobId: number | null;
             <ApplySection job={job} />
 
             <Section title="Job description" icon={FileText}>
-              <div className="selectable whitespace-pre-wrap break-words leading-relaxed">{job.description}</div>
+              {isUnreadableNote(job.description) ? (
+                <p className="flex items-start gap-2 rounded-md bg-surface-2 px-3 py-2.5 text-ink-2" data-unreadable>
+                  <Info className="mt-0.5 size-4 shrink-0 text-ink-3" aria-hidden />
+                  <span>{job.description}</span>
+                </p>
+              ) : (
+                <div className="selectable whitespace-pre-wrap break-words leading-relaxed">{job.description}</div>
+              )}
             </Section>
 
-            <Section title="Links" icon={Link2} count={job.urls.filter((url) => url.kind !== 'redirect').length}>
-              <ul className="space-y-1">
-                {job.urls
-                  .filter((url) => url.kind !== 'redirect')
-                  .map((url) => (
-                    <li key={url.id}>
-                      <button type="button" className="min-w-0 max-w-full truncate text-left text-accent-soft-ink hover:underline" title={url.originalUrl} onClick={() => void window.jobTracker.openExternal(url.originalUrl)}>
-                        {linkHost(url.originalUrl)}
-                      </button>
-                    </li>
-                  ))}
-              </ul>
-              <span className="mt-2 inline-flex text-ink-3">
-                <Symbol icon={job.lastExtractedAt ? FileText : Pencil} label={job.lastExtractedAt ? `Details read ${formatRelative(job.lastExtractedAt)}.` : 'Details entered by hand.'} size="size-3.5" />
-              </span>
-            </Section>
 
             {user.role === 'admin' ? <EditJobDialog job={job} open={editing} onOpenChange={setEditing} /> : null}
             <ConfirmDialog

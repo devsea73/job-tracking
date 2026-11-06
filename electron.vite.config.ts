@@ -66,7 +66,7 @@ export default defineConfig({
       alias: { ...sharedAlias, '@': resolve('src/renderer/src') }
     },
     build: {
-      rollupOptions: { input: { index: resolve('src/renderer/index.html') } }
+      rollupOptions: { input: { index: resolve('src/renderer/index.html'), notification: resolve('src/renderer/notification.html') } }
     }
   }
 });

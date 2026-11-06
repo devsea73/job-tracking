@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import type { ServerEvent } from '../shared/api';
-import { IPC, type BridgeState, type JobTrackerBridge } from '../shared/bridge';
+import { IPC, type BridgeState, type JobTrackerBridge, type NoticePayload } from '../shared/bridge';
 
 function subscribe<T>(channel: string, listener: (value: T) => void): () => void {
   const wrapped = (_event: IpcRendererEvent, value: T) => listener(value);
@@ -20,7 +20,13 @@ const bridge: JobTrackerBridge = {
   retryConnection: () => ipcRenderer.invoke(IPC.retryConnection),
   api: (method, path, body) => ipcRenderer.invoke(IPC.api, method, path, body),
   setTheme: (theme) => ipcRenderer.invoke(IPC.setTheme, theme),
-  openExternal: (url) => ipcRenderer.invoke(IPC.openExternal, url),
+  setNotifications: (changes) => ipcRenderer.invoke(IPC.setNotifications, changes),
+  onOpenJob: (listener) => subscribe<number>(IPC.openJob, listener),
+  onNotice: (listener) => subscribe<NoticePayload>(IPC.noticeShow, listener),
+  noticeReady: () => ipcRenderer.send(IPC.noticeReady),
+  noticeAction: (id, action) => ipcRenderer.invoke(IPC.noticeAction, id, action),
+  noticeResize: (height) => ipcRenderer.send(IPC.noticeResize, height),
+  copyLink: (url) => ipcRenderer.invoke(IPC.copyLink, url),
   exportBackup: (name) => ipcRenderer.invoke(IPC.exportBackup, name),
   importBackup: () => ipcRenderer.invoke(IPC.importBackup),
   openDataFolder: () => ipcRenderer.invoke(IPC.openDataFolder)

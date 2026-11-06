@@ -81,6 +81,8 @@ export const createApplicationBody = z.object({
   draftId: z.string().uuid().optional()
 });
 
+export const checkLinkBody = z.object({ url: z.string().trim().min(1, 'Job URL is required.').max(4_000, 'That link is too long.') });
+
 export const applyToJobBody = z.object({ profileId, memo: memo.optional() });
 
 const profileName = z.string().trim().min(1, 'Give the profile a name.').max(PROFILE_NAME_MAX, `Use at most ${PROFILE_NAME_MAX} characters.`);
@@ -151,6 +153,16 @@ export const jobListQuery = z.object({
   limit: z.coerce.number().int().min(1).max(5_000).optional(),
   offset: z.coerce.number().int().min(0).optional()
 });
+
+const moment = z.string().datetime({ offset: true, message: 'Expected a date and time.' });
+export const activityQuery = z
+  .object({ from: moment, to: moment, day: moment, week: moment, month: moment })
+  .refine((query) => Date.parse(query.to) > Date.parse(query.from), 'The range ends before it starts.')
+  .refine((query) => Date.parse(query.to) - Date.parse(query.from) <= 400 * 86_400_000, 'Choose a range of at most 400 days.');
+
+export const briefQuery = z.object({ application: z.coerce.number().int().positive().optional() });
+
+export const duplicatePairBody = z.object({ jobIdA: z.number().int().positive(), jobIdB: z.number().int().positive() });
 
 export const highlightBody = z.object({ highlighted: z.boolean() });
 
