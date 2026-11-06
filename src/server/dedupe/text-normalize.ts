@@ -103,19 +103,116 @@ const COMPOUNDS: Array<[string, string, string]> = [
 const TITLE_NOISE = new Set(['remote', 'hybrid', 'onsite', 'usa', 'us', 'united', 'states', 'the', 'a', 'an']);
 
 /**
+ * Words that only say where, on what terms, or for which listing, each on its own as a piece of an
+ * aside. Lowercase, as the text is compared lowercased.
+ */
+const ASIDE_WORDS = [
+  'remote', 'hybrid', 'onsite', 'on-site', 'inoffice', 'in-office', 'us', 'usa', 'united states', 'north america', 'anywhere', 'nationwide', 'worldwide',
+  'east coast', 'west coast', 'contract', 'contractor', 'contract to hire', 'c2c', 'w2', 'w-2', '1099', 'fulltime', 'full-time', 'full time', 'parttime',
+  'part-time', 'part time', 'permanent', 'temporary', 'all levels', 'multiple levels', 'multiple locations', 'company name withheld', 'confidential',
+  'urgent hiring', 'urgently hiring', 'hiring now', 'immediate start', 'immediate hire', 'and', 'or'
+];
+
+const isLetter = (code: number) => code >= 97 && code <= 122;
+const isGenderLetter = (char: string) => char.length === 1 && 'mfwdx|'.includes(char);
+const BLANK = /\s/;
+/** The same characters as \s in a regular expression. */
+const isBlank = (char: string) => char.length === 1 && BLANK.test(char);
+
+/**
  * A part of a title in brackets or after a dash that only says where, on what terms, or for which
  * listing: "(Remote - US)", "- 100% Remote", "(Contract)", "(Company name withheld)", "| New York, NY".
  * Inside the title proper the same words can matter: a "Contract Manager" is a role.
+ *
+ * True when the whole text is a run of such pieces: the words above, "m/f/d", "City, ST",
+ * "US Remote", "Remote - anything", single separators, after an optional "50%" and "fully".
+ * It reads the text once, keeping every place a piece can end, so it stays quick however a title
+ * is put together. A regular expression for the same thing backtracks: a title with sixteen
+ * "Remote"s in it would take minutes.
  */
-const ASIDE =
-  /^(?:\d+%\s*)?(?:(?:fully|100%)\s+)?(?:remote|hybrid|on-?site|in-?office|usa?|united states|north america|anywhere|nationwide|worldwide|east coast|west coast|contract(?:or)?|contract to hire|c2c|w-?2|1099|full[- ]?time|part[- ]?time|permanent|temporary|all levels|multiple (?:levels|locations)|company name withheld|confidential|urgent(?:ly)? hiring|hiring now|immediate (?:start|hire)|[m|f|w|d|x](?:\s*\/\s*[m|f|w|d|x]){1,2}|[a-z .'-]+,\s*[a-z]{2}|[a-z]+ remote|remote[ ,-]+[a-z ,]+|[\s,/&-]|and|or)+$/i;
+export function isAside(raw: string): boolean {
+  // Only ASCII letters change case, as with a regular expression's i flag; the length stays the same.
+  const text = raw.replace(/[A-Z]/g, (char) => char.toLowerCase());
+  const n = text.length;
+  if (n === 0) return false;
+  const code = (index: number) => (index < n ? text.charCodeAt(index) : -1);
+  const blankRun = (from: number) => {
+    let index = from;
+    while (index < n && isBlank(text[index])) index += 1;
+    return index;
+  };
+
+  // Where the pieces may begin: after "50%" and any spaces, then after "fully " or "100% ".
+  const starts = new Set<number>([0]);
+  const percent = /^\d+%/.exec(text);
+  if (percent) for (let index = percent[0].length, end = blankRun(index); index <= end; index += 1) starts.add(index);
+  for (const start of [...starts]) {
+    for (const lead of ['fully', '100%']) {
+      if (!text.startsWith(lead, start)) continue;
+      const after = start + lead.length;
+      const end = blankRun(after);
+      for (let index = after + 1; index <= end; index += 1) starts.add(index);
+    }
+  }
+
+  const reached = new Uint8Array(n + 1);
+  const reach = (index: number) => {
+    reached[index] = 1;
+  };
+  for (let at = 0; at < n; at += 1) {
+    if (!reached[at] && !starts.has(at)) continue;
+    for (const word of ASIDE_WORDS) if (text.startsWith(word, at)) reach(at + word.length);
+    const char = text[at];
+    // A separator on its own.
+    if (isBlank(char) || ',/&-'.includes(char)) reach(at + 1);
+    // "m/f/d", "m / w / x".
+    if (isGenderLetter(char)) {
+      let index = at + 1;
+      for (let repeat = 0; repeat < 2; repeat += 1) {
+        let next = blankRun(index);
+        if (text[next] !== '/') break;
+        next = blankRun(next + 1);
+        if (next >= n || !isGenderLetter(text[next])) break;
+        index = next + 1;
+        reach(index);
+      }
+    }
+    // "New York, NY": letters, spaces, dots, apostrophes and dashes up to a comma, then two letters.
+    let run = at;
+    while (run < n && (isLetter(code(run)) || " .'-".includes(text[run]))) run += 1;
+    if (run > at && text[run] === ',') {
+      const letters = blankRun(run + 1);
+      if (isLetter(code(letters)) && isLetter(code(letters + 1))) reach(letters + 2);
+    }
+    // "US remote": one word, then " remote".
+    let word = at;
+    while (word < n && isLetter(code(word))) word += 1;
+    if (word > at && text.startsWith(' remote', word)) reach(word + 7);
+    // "Remote - US, Canada": separators, then letters, spaces and commas; dashes only before any letter.
+    if (text.startsWith('remote', at)) {
+      const from = at + 6;
+      if (from < n && ' ,-'.includes(text[from])) {
+        let sawLetter = false;
+        for (let end = from + 1; end <= n; end += 1) {
+          const last = text[end - 1];
+          if (last === '-') {
+            if (sawLetter) break;
+          } else if (isLetter(code(end - 1))) sawLetter = true;
+          else if (last !== ' ' && last !== ',') break;
+          if (end - from >= 2 && last !== '-') reach(end);
+        }
+      }
+    }
+  }
+  return reached[n] === 1;
+}
 
 function withoutAsides(title: string): string {
-  let text = title.replace(/\(([^)]*)\)|\[([^\]]*)\]/g, (_whole: string, round: string | undefined, square: string | undefined) => (ASIDE.test((round ?? square ?? '').trim()) ? ' ' : ` ${round ?? square} `));
+  let text = title.replace(/\(([^)]*)\)|\[([^\]]*)\]/g, (_whole: string, round: string | undefined, square: string | undefined) => (isAside((round ?? square ?? '').trim()) ? ' ' : ` ${round ?? square} `));
   // Trailing segments after a dash or bar, one at a time, from the end.
   for (;;) {
     const match = /^(.*\S)\s+[-–—|:]\s+([^-–—|:]+)$/.exec(text.trim());
-    if (!match || !ASIDE.test(match[2].trim())) break;
+    if (!match || !isAside(match[2].trim())) break;
     text = match[1];
   }
   // Requisition codes: "Job-ID 3301", "Req #12345", "R-102938", "(2024-1135)".
