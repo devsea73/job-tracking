@@ -1,22 +1,22 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
-import { Banknote, CalendarCheck, CalendarDays, CalendarPlus, Clock, Copy, Info, FileText, History, Link2, MapPin, Pencil, StickyNote, Trash2, User, UserPlus, Users, X, type LucideIcon } from 'lucide-react';
-import type { ApplicationDetail, CurrentUser, Interview, JobDetail } from '@shared/api';
-import type { ApplicationStatus } from '@shared/constants';
+import { Banknote, CalendarCheck, CalendarDays, CalendarPlus, Clock, Copy, Info, FileText, Link2, MapPin, Pencil, StickyNote, Trash2, User, UserPlus, Users, X, type LucideIcon } from 'lucide-react';
+import type { ApplicationDetail, CurrentUser, JobDetail, Step } from '@shared/api';
+import type { StepStage } from '@shared/constants';
 import { isUnreadableNote } from '@shared/unreadable';
-import { applicationLabel, Avatar, canDeleteJob, HighlightButton, ProcessSteps, StatusBadge, StatusSelect, userName } from '@/components/job-bits';
+import { applicationLabel, Avatar, canDeleteJob, HighlightButton, ProcessSteps, StageBadge, userName } from '@/components/job-bits';
 import { formatSalary, JobTags } from '@/components/job-tags';
 import { useCopyLink } from '@/lib/copy-link';
-import { STAGE_ICONS, Symbol } from '@/components/symbols';
+import { Symbol } from '@/components/symbols';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog, Dialog, Sheet } from '@/components/ui/dialog';
 import { Field, Input, Textarea } from '@/components/ui/field';
 import { Notice, Skeleton, Tooltip } from '@/components/ui/misc';
 import { Select } from '@/components/ui/select';
 import { useToast } from '@/components/ui/toast';
-import { call, errorMessage, useApplyToJob, useDeleteApplication, useDeleteInterview, useDeleteJob, useJob, useProfiles, useUpdateApplication } from '@/lib/api';
-import { formatDate, formatDateTime, formatRelative } from '@/lib/utils';
-import { InterviewFormDialog } from './interview-form';
+import { call, errorMessage, useApplyToJob, useDeleteApplication, useDeleteJob, useDeleteStep, useJob, useProfiles, useUpdateApplication } from '@/lib/api';
+import { cn, formatDate, formatDateTime, formatRelative, localTimeZone, toLocalInputValue } from '@/lib/utils';
+import { StepFormDialog } from './step-form';
 
 function Section({ title, icon: Icon, count, aside, children }: { title: string; icon: LucideIcon; count?: number; aside?: React.ReactNode; children: React.ReactNode }) {
   return (
@@ -100,41 +100,114 @@ function MemoEditor({ application }: { application: ApplicationDetail }) {
   );
 }
 
-function InterviewList({ application }: { application: ApplicationDetail }) {
-  const [editing, setEditing] = useState<Interview | null>(null);
-  const [formOpen, setFormOpen] = useState(false);
-  const [removing, setRemoving] = useState<Interview | null>(null);
-  const remove = useDeleteInterview();
-  const toast = useToast();
-  const now = Date.now();
-  const editable = application.isMine;
+/** When the person applied, if not when they added it here: the timeline's first entry. */
+function AppliedDateDialog({ application, open, onOpenChange }: { application: ApplicationDetail; open: boolean; onOpenChange: (open: boolean) => void }) {
+  const [date, setDate] = useState('');
+  const [time, setTime] = useState('');
+  const update = useUpdateApplication();
+  useEffect(() => {
+    if (!open) return;
+    update.reset();
+    const [day, clock] = toLocalInputValue(application.appliedAt).split('T');
+    setDate(day);
+    setTime(clock);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+  const at = date && time ? new Date(`${date}T${time}`) : null;
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={onOpenChange}
+      className="max-w-sm"
+      title="When did you apply?"
+      footer={
+        <>
+          <Button onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button
+            variant="primary"
+            loading={update.isPending}
+            disabled={!at || Number.isNaN(at.getTime())}
+            onClick={() => at && update.mutate({ id: application.id, body: { appliedAt: at.toISOString() } }, { onSuccess: () => onOpenChange(false) })}
+          >
+            Save
+          </Button>
+        </>
+      }
+    >
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Date" htmlFor="applied-date">
+          <Input id="applied-date" type="date" value={date} onChange={(event) => setDate(event.target.value)} />
+        </Field>
+        <Field label="Time" htmlFor="applied-time" hint={localTimeZone()}>
+          <Input id="applied-time" type="time" value={time} onChange={(event) => setTime(event.target.value)} />
+        </Field>
+      </div>
+      {update.isError ? <Notice kind="error">{errorMessage(update.error)}</Notice> : null}
+    </Dialog>
+  );
+}
 
-  if (!editable && application.interviews.length === 0) return null;
+/**
+ * The application's process as a timeline, oldest first: when it was applied, then each step at
+ * the time it takes place. The stage it is at is the latest step's. Several steps at one stage are
+ * its rounds, numbered: three technical interviews read Technical Interview 1, 2 and 3.
+ */
+function Timeline({ application }: { application: ApplicationDetail }) {
+  const [editing, setEditing] = useState<Step | null>(null);
+  const [formOpen, setFormOpen] = useState(false);
+  const [removing, setRemoving] = useState<Step | null>(null);
+  const [changingApplied, setChangingApplied] = useState(false);
+  const remove = useDeleteStep();
+  const toast = useToast();
+  const now = new Date().toISOString();
+  const editable = application.isMine;
+  const latest = application.steps[application.steps.length - 1];
+  const rounds = new Map<StepStage, number>();
+  const ofStage = (stage: StepStage) => application.steps.filter((step) => step.stage === stage).length;
 
   return (
     <>
-      <div className="mt-2.5 space-y-1">
-        {application.interviews.map((interview) => {
-          const past = new Date(interview.scheduledAt).getTime() < now;
-          const StageIcon = STAGE_ICONS[interview.stage];
+      <ol className="relative mt-2.5 space-y-1 before:absolute before:bottom-3 before:left-[11px] before:top-3 before:w-px before:bg-border" data-timeline>
+        <li className="group relative flex items-center gap-2.5 py-0.5">
+          <StageBadge stage="Applied" />
+          <span className="min-w-0 flex-1 truncate">Applied</span>
+          <span className="whitespace-nowrap tabular-nums text-ink-2">{formatDateTime(application.appliedAt)}</span>
+          {editable ? (
+            <span className="flex w-[52px] shrink-0 justify-end opacity-0 focus-within:opacity-100 group-hover:opacity-100">
+              <Tooltip content="Change when you applied">
+                <Button size="icon-sm" variant="ghost" aria-label="Change when you applied" onClick={() => setChangingApplied(true)}>
+                  <Pencil />
+                </Button>
+              </Tooltip>
+            </span>
+          ) : null}
+        </li>
+        {application.steps.map((step) => {
+          const round = (rounds.get(step.stage) ?? 0) + 1;
+          rounds.set(step.stage, round);
+          const upcoming = step.at > now;
+          const isCurrent = step === latest;
+          const name = ofStage(step.stage) > 1 ? `${step.stage} ${round}` : step.stage;
           return (
-            <div key={interview.id} className="group flex items-start gap-2.5 rounded-lg border border-border px-2.5 py-1.5">
-              <span title={interview.stage} className="pt-0.5">
-                <StageIcon className={past ? 'size-4 text-ink-3' : 'size-4 text-ink-2'} aria-label={interview.stage} />
-              </span>
-              <div className="min-w-0 flex-1">
-                <p className={past ? 'tabular-nums text-ink-2' : 'font-medium tabular-nums'}>{formatDateTime(interview.scheduledAt)}</p>
-                {interview.note ? <p className="selectable whitespace-pre-wrap text-[12.5px] text-ink-2">{interview.note}</p> : null}
+            <li key={step.id} className="group relative flex items-start gap-2.5 py-0.5" data-step={step.stage}>
+              <StageBadge stage={step.stage} label={name} className={isCurrent ? 'ring-2 ring-surface outline outline-1 outline-current' : undefined} />
+              <div className="min-w-0 flex-1 pt-0.5">
+                <p className="flex items-center gap-1.5">
+                  <span className={cn('truncate', isCurrent && 'font-semibold')}>{name}</span>
+                  {upcoming ? <span className="rounded bg-accent-soft px-1.5 text-[11px] text-accent-soft-ink">Upcoming</span> : null}
+                </p>
+                {step.note ? <p className="selectable whitespace-pre-wrap text-[12.5px] text-ink-2">{step.note}</p> : null}
               </div>
+              <span className={cn('whitespace-nowrap pt-0.5 tabular-nums', upcoming ? 'font-medium' : 'text-ink-2')}>{formatDateTime(step.at)}</span>
               {editable ? (
-                <div className="flex shrink-0 gap-0.5 opacity-0 focus-within:opacity-100 group-hover:opacity-100">
-                  <Tooltip content="Edit">
+                <span className="flex w-[52px] shrink-0 justify-end gap-0.5 opacity-0 focus-within:opacity-100 group-hover:opacity-100">
+                  <Tooltip content="Change">
                     <Button
                       size="icon-sm"
                       variant="ghost"
-                      aria-label="Edit interview"
+                      aria-label={`Change ${name}`}
                       onClick={() => {
-                        setEditing(interview);
+                        setEditing(step);
                         setFormOpen(true);
                       }}
                     >
@@ -142,39 +215,37 @@ function InterviewList({ application }: { application: ApplicationDetail }) {
                     </Button>
                   </Tooltip>
                   <Tooltip content="Remove">
-                    <Button size="icon-sm" variant="danger-ghost" aria-label="Remove interview" onClick={() => setRemoving(interview)}>
+                    <Button size="icon-sm" variant="danger-ghost" aria-label={`Remove ${name}`} onClick={() => setRemoving(step)}>
                       <Trash2 />
                     </Button>
                   </Tooltip>
-                </div>
+                </span>
               ) : null}
-            </div>
+            </li>
           );
         })}
-      </div>
+      </ol>
       {editable ? (
         <>
-          <Tooltip content="Schedule an interview">
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              className="mt-1.5"
-              aria-label="Schedule"
-              onClick={() => {
-                setEditing(null);
-                setFormOpen(true);
-              }}
-            >
-              <CalendarPlus />
-            </Button>
-          </Tooltip>
-          <InterviewFormDialog open={formOpen} onOpenChange={setFormOpen} applicationId={application.id} interview={editing} />
+          <Button
+            size="sm"
+            variant="ghost"
+            className="mt-1.5"
+            onClick={() => {
+              setEditing(null);
+              setFormOpen(true);
+            }}
+          >
+            <CalendarPlus /> Add a step
+          </Button>
+          <StepFormDialog open={formOpen} onOpenChange={setFormOpen} applicationId={application.id} step={editing} current={application.stage} steps={application.steps} />
+          <AppliedDateDialog application={application} open={changingApplied} onOpenChange={setChangingApplied} />
           <ConfirmDialog
             open={removing !== null}
             onOpenChange={(open) => {
               if (!open) setRemoving(null);
             }}
-            title="Remove this interview?"
+            title="Remove this step?"
             confirmLabel="Remove"
             danger
             loading={remove.isPending}
@@ -186,40 +257,12 @@ function InterviewList({ application }: { application: ApplicationDetail }) {
               });
             }}
           >
-            {removing ? `${removing.stage}, ${formatDateTime(removing.scheduledAt)}.` : null}
+            {removing ? `${removing.stage}, ${formatDateTime(removing.at)}. The stage goes back to the step before it.` : null}
           </ConfirmDialog>
         </>
       ) : null}
     </>
   );
-}
-
-interface TimelineEntry {
-  key: string;
-  oldStatus: ApplicationStatus | null;
-  newStatus: ApplicationStatus;
-  /** Null for the status two merged copies of a job settled on, which has no moment of its own. */
-  at: string | null;
-  applied: boolean;
-}
-
-/**
- * The application's own story, oldest first: it starts when it was applied, then every status
- * change. The start is the applied date, not when a status record was written, which a merge of
- * two copies of a job or an imported list can make different. Merging keeps the furthest status,
- * which need not be the last change either copy made: then the story ends by saying so.
- */
-function timelineOf(application: ApplicationDetail): TimelineEntry[] {
-  const changes = application.history
-    .filter((entry) => entry.oldStatus !== null)
-    .sort((a, b) => a.changedAt.localeCompare(b.changedAt) || a.id - b.id);
-  const story: TimelineEntry[] = [
-    { key: 'applied', oldStatus: null, newStatus: 'Applied', at: application.appliedAt, applied: true },
-    ...changes.map((entry) => ({ key: String(entry.id), oldStatus: entry.oldStatus, newStatus: entry.newStatus, at: entry.changedAt, applied: false }))
-  ];
-  const last = story[story.length - 1].newStatus;
-  if (last !== application.status) story.push({ key: 'merged', oldStatus: last, newStatus: application.status, at: null, applied: false });
-  return story;
 }
 
 /** One profile's whole process on this job. Everyone can read it; only the owner can change it. */
@@ -228,7 +271,6 @@ function ApplicationCard({ application }: { application: ApplicationDetail }) {
   const withdraw = useDeleteApplication();
   const toast = useToast();
   const copy = useCopyLink();
-  const timeline = timelineOf(application);
   return (
     <article className="rounded-lg border border-border p-3">
       <header className="mb-2 flex items-center gap-2.5">
@@ -254,8 +296,8 @@ function ApplicationCard({ application }: { application: ApplicationDetail }) {
             ) : null}
           </p>
         </div>
-        <ProcessSteps status={application.status} furthest={application.furthestStage} />
-        {application.isMine ? <StatusSelect applicationId={application.id} status={application.status} /> : <StatusBadge status={application.status} />}
+        <ProcessSteps stage={application.stage} furthest={application.furthestStage} />
+        <StageBadge stage={application.stage} label={`Stage: ${application.stage}`} />
         {application.isMine ? (
           <Tooltip content="Remove this application">
             <Button size="icon-sm" variant="danger-ghost" aria-label="Remove this application" onClick={() => setWithdrawing(true)}>
@@ -272,27 +314,7 @@ function ApplicationCard({ application }: { application: ApplicationDetail }) {
           {application.memo}
         </p>
       ) : null}
-      <InterviewList application={application} />
-      <details className="mt-2">
-        <summary className="inline-flex cursor-default items-center gap-1.5 text-[12.5px] tabular-nums text-ink-3" aria-label="History" title="History">
-          <History className="size-3.5" aria-hidden /> {timeline.length}
-        </summary>
-        <ol className="mt-1.5 space-y-1" data-timeline>
-          {timeline.map((entry) => (
-            <li key={entry.key} className="flex items-center gap-1.5 text-[12.5px] text-ink-2">
-              {entry.oldStatus ? (
-                <>
-                  <StatusBadge status={entry.oldStatus} className="size-5" />
-                  <span aria-label="changed to">→</span>
-                </>
-              ) : null}
-              <StatusBadge status={entry.newStatus} className="size-5" />
-              {entry.applied ? <span>Applied</span> : null}
-              <span className="ml-auto whitespace-nowrap tabular-nums text-ink-3">{entry.at ? formatDateTime(entry.at) : 'When two copies of this job were merged'}</span>
-            </li>
-          ))}
-        </ol>
-      </details>
+      <Timeline application={application} />
       <ConfirmDialog
         open={withdrawing}
         onOpenChange={setWithdrawing}
@@ -307,7 +329,7 @@ function ApplicationCard({ application }: { application: ApplicationDetail }) {
           })
         }
       >
-        Its status, memo and interviews will be deleted. The job stays in the shared list.
+        Its memo and timeline will be deleted. The job stays in the shared list.
       </ConfirmDialog>
     </article>
   );

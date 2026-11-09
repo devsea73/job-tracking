@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { asc, desc, eq, sql } from 'drizzle-orm';
+import { asc, eq, sql } from 'drizzle-orm';
 import type {
   ApplicationDetail,
   ApplicationSummary,
@@ -10,6 +10,7 @@ import type {
   JobListItem,
   JobListQuery,
   JobListResponse,
+  Step,
   TeamApplication,
   TeamApplicationSort,
   TeamApplicationsQuery,
@@ -17,11 +18,11 @@ import type {
   TeamBoardRow,
   TeamMember
 } from '../../shared/api';
-import { APPLICATION_STATUSES, CLOSED_STATUSES, type ApplicationStatus, type InterviewStage } from '../../shared/constants';
+import { INTERVIEW_STAGES, STAGES, type InterviewStage, type Stage, type StepStage } from '../../shared/constants';
 import { PIPELINE_STAGES, statsFromCounts, type ReachedCounts } from '../../shared/pipeline';
 import type { AppContext } from '../context';
 import { prepared, type Db } from '../db/client';
-import { applicationStatusHistory, interviews, jobs, jobUrls, users } from '../db/schema';
+import { applicationSteps, jobs, jobUrls, users } from '../db/schema';
 import { notFound } from '../errors';
 import { FACTS_COLUMNS, readJobFacts, toJobFacts, type FactsRow } from './job-facts-store';
 import { toProfileRef } from './profiles';
@@ -47,11 +48,14 @@ interface JobRow extends FactsRow {
   updated_at: string;
 }
 
-const STATUS_ORDER = `CASE x.status ${APPLICATION_STATUSES.map((status, index) => `WHEN '${status}' THEN ${index}`).join(' ')} END`;
+const STAGE_ORDER = `CASE x.stage ${STAGES.map((stage, index) => `WHEN '${stage}' THEN ${index}`).join(' ')} END`;
+
+/** The stages that are interviews, as SQL. */
+export const INTERVIEWS_SQL = INTERVIEW_STAGES.map((stage) => `'${stage}'`).join(', ');
 
 /**
  * Which applications a listing is looking at: all of them, or those of one person or profile.
- * Interview dates and statuses in the sort order come from these. Every id here has already
+ * Interview dates and stages in the sort order come from these. Every id here has already
  * been validated as an integer, and Number() keeps it that way inside the SQL text.
  */
 function relevantApplications(userId: number, query: JobListQuery): string {
@@ -80,8 +84,8 @@ function sortPlan(userId: number, query: JobListQuery, now: string): SortPlan {
   const keys = (select: string, from = 'applications x') => `LEFT JOIN (SELECT x.job_id, ${select} AS sort_key FROM ${from} WHERE ${relevant} GROUP BY x.job_id) s ON s.job_id = j.id`;
   switch (query.sort ?? 'recent') {
     case 'recent':
-      // Mine: when I added it here, which an imported list can make differ from when I applied.
-      if (query.scope === 'mine') return { join: keys('MAX(x.id)'), joinParams: [], order: 's.sort_key DESC' };
+      // Mine: when I added it here, which an imported list or a corrected date can make differ from when I applied.
+      if (query.scope === 'mine') return { join: keys('MAX(x.created_at)'), joinParams: [], order: 's.sort_key DESC' };
       return { join: '', joinParams: [], order: 'j.created_at DESC' };
     case 'applied':
       // Mine: when I first applied, with several of my profiles: the date the list shows. Otherwise: the first time anyone shown applied.
@@ -93,12 +97,12 @@ function sortPlan(userId: number, query: JobListQuery, now: string): SortPlan {
       return { join: '', joinParams: [], order: 'j.company_name COLLATE NOCASE ASC, j.title COLLATE NOCASE ASC' };
     case 'interview':
       return {
-        join: `LEFT JOIN (SELECT x.job_id, MIN(n.scheduled_at) AS sort_key FROM interviews n JOIN applications x ON x.id = n.application_id WHERE n.scheduled_at >= ? AND ${relevant} GROUP BY x.job_id) s ON s.job_id = j.id`,
+        join: `LEFT JOIN (SELECT x.job_id, MIN(n.at) AS sort_key FROM application_steps n JOIN applications x ON x.id = n.application_id WHERE n.stage IN (${INTERVIEWS_SQL}) AND n.at >= ? AND ${relevant} GROUP BY x.job_id) s ON s.job_id = j.id`,
         joinParams: [now],
         order: 's.sort_key IS NULL, s.sort_key ASC'
       };
-    case 'status':
-      return { join: keys(`MIN(${STATUS_ORDER})`), joinParams: [], order: 's.sort_key IS NULL, s.sort_key ASC' };
+    case 'stage':
+      return { join: keys(`MIN(${STAGE_ORDER})`), joinParams: [], order: 's.sort_key IS NULL, s.sort_key ASC' };
     case 'applicants':
       return { join: '', joinParams: [], order: 'j.application_count DESC' };
   }
@@ -150,25 +154,21 @@ export function listJobs(db: Db, userId: number, query: JobListQuery): JobListRe
     onApplication.push('a.profile_id = ?');
     applicationParams.push(query.profileId);
   }
-  if (query.status) {
-    onApplication.push('a.status = ?');
-    applicationParams.push(query.status);
+  if (query.stage) {
+    onApplication.push('a.stage = ?');
+    applicationParams.push(query.stage);
   }
-  if (query.stage || query.interviewFrom || query.interviewTo) {
-    const conditions = ['i.application_id = a.id'];
-    if (query.stage) {
-      conditions.push('i.stage = ?');
-      applicationParams.push(query.stage);
-    }
+  if (query.interviewFrom || query.interviewTo) {
+    const conditions = ['i.application_id = a.id', `i.stage IN (${INTERVIEWS_SQL})`];
     if (query.interviewFrom) {
-      conditions.push('i.scheduled_at >= ?');
+      conditions.push('i.at >= ?');
       applicationParams.push(new Date(query.interviewFrom).toISOString());
     }
     if (query.interviewTo) {
-      conditions.push('i.scheduled_at <= ?');
+      conditions.push('i.at <= ?');
       applicationParams.push(new Date(query.interviewTo).toISOString());
     }
-    onApplication.push(`EXISTS (SELECT 1 FROM interviews i WHERE ${conditions.join(' AND ')})`);
+    onApplication.push(`EXISTS (SELECT 1 FROM application_steps i WHERE ${conditions.join(' AND ')})`);
   }
   if (onApplication.length > 0) {
     // Worked out once from the applications, rather than checked again for each of 10,000 jobs.
@@ -214,10 +214,11 @@ export function listJobs(db: Db, userId: number, query: JobListQuery): JobListRe
 interface ApplicationRow {
   id: number;
   job_id: number;
-  status: ApplicationStatus;
+  stage: Stage;
   memo: string;
   furthest_rank: number;
   applied_at: string;
+  created_at: string;
   updated_at: string;
   user_id: number;
   username: string;
@@ -234,11 +235,11 @@ interface ApplicationRow {
 }
 
 const APPLICATION_COLUMNS = `
-  a.id, a.job_id, a.status, a.memo, a.furthest_rank, a.applied_at, a.updated_at,
+  a.id, a.job_id, a.stage, a.memo, a.furthest_rank, a.applied_at, a.created_at, a.updated_at,
   u.id AS user_id, u.username, u.display_name, ua.updated_at AS user_avatar,
   p.id AS profile_id, p.name AS profile_name, p.is_archived, pa.updated_at AS profile_avatar,
-  (SELECT MIN(n.scheduled_at) FROM interviews n WHERE n.application_id = a.id AND n.scheduled_at >= @now) AS next_interview,
-  (SELECT COUNT(*) FROM interviews c WHERE c.application_id = a.id) AS interview_count,
+  (SELECT MIN(n.at) FROM application_steps n WHERE n.application_id = a.id AND n.stage IN (${INTERVIEWS_SQL}) AND n.at >= @now) AS next_interview,
+  (SELECT COUNT(*) FROM application_steps c WHERE c.application_id = a.id AND c.stage IN (${INTERVIEWS_SQL})) AS interview_count,
   l.id AS link_id, l.original_url AS link_url`;
 
 const APPLICATION_JOINS = `
@@ -255,12 +256,13 @@ function toApplicationSummary(row: ApplicationRow, viewerId: number): Applicatio
     owner: toUserRef({ id: row.user_id, username: row.username, displayName: row.display_name, avatarVersion: row.user_avatar }),
     profile: toProfileRef({ id: row.profile_id, name: row.profile_name, isArchived: row.is_archived === 1, avatarVersion: row.profile_avatar }),
     isMine: row.user_id === viewerId,
-    status: row.status,
+    stage: row.stage,
     furthestStage: PIPELINE_STAGES[row.furthest_rank] ?? PIPELINE_STAGES[0],
     memoPreview: row.memo.slice(0, MEMO_PREVIEW_LENGTH),
     nextInterviewAt: row.next_interview,
     interviewCount: row.interview_count,
     appliedAt: row.applied_at,
+    createdAt: row.created_at,
     updatedAt: row.updated_at,
     link: row.link_id !== null && row.link_url !== null ? { id: row.link_id, url: row.link_url } : null
   };
@@ -282,24 +284,26 @@ export function listApplicationsForJobs(db: Db, viewerId: number, jobIds: number
   return result;
 }
 
+/** A step as read with plain SQL. */
+export function toStep(row: Record<string, unknown>): Step {
+  return {
+    id: row.id as number,
+    applicationId: row.application_id as number,
+    stage: row.stage as StepStage,
+    at: row.at as string,
+    timezone: row.timezone as string,
+    note: (row.note as string | null) ?? null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string
+  };
+}
+
 function toApplicationDetail(db: Db, row: ApplicationRow, viewerId: number): ApplicationDetail {
   return {
     ...toApplicationSummary(row, viewerId),
     memo: row.memo,
-    interviews: db
-      .select()
-      .from(interviews)
-      .where(eq(interviews.applicationId, row.id))
-      .orderBy(asc(interviews.scheduledAt))
-      .all()
-      .map((interview) => ({ ...interview, stage: interview.stage as InterviewStage })),
-    history: db
-      .select()
-      .from(applicationStatusHistory)
-      .where(eq(applicationStatusHistory.applicationId, row.id))
-      .orderBy(desc(applicationStatusHistory.changedAt), desc(applicationStatusHistory.id))
-      .all()
-      .map((entry) => ({ id: entry.id, oldStatus: entry.oldStatus, newStatus: entry.newStatus, changedAt: entry.changedAt }))
+    // Oldest first, as the timeline reads.
+    steps: db.select().from(applicationSteps).where(eq(applicationSteps.applicationId, row.id)).orderBy(asc(applicationSteps.at), asc(applicationSteps.id)).all()
   };
 }
 
@@ -351,7 +355,7 @@ interface InterviewRow extends FactsRow {
   id: number;
   applicationId: number;
   stage: InterviewStage;
-  scheduledAt: string;
+  at: string;
   timezone: string;
   note: string | null;
   createdAt: string;
@@ -370,11 +374,12 @@ interface InterviewRow extends FactsRow {
 }
 
 /**
- * The signed-in user's own interviews, unless the query asks for someone else's or everyone's.
- * Soonest first, or latest first when asked: the latest past ones are the ones worth seeing first.
+ * Interviews by the time they take place: the steps at an interview stage. The signed-in user's
+ * own, unless the query asks for someone else's or everyone's. Soonest first, or latest first when
+ * asked: the latest past ones are the ones worth seeing first.
  */
 export function listInterviews(db: Db, viewerId: number, filter: InterviewQuery, limit = 2_000): InterviewListItem[] {
-  const conditions: string[] = [];
+  const conditions: string[] = [`i.stage IN (${INTERVIEWS_SQL})`];
   const params: unknown[] = [];
   if (filter.person !== 'all') {
     conditions.push('a.user_id = ?');
@@ -385,11 +390,11 @@ export function listInterviews(db: Db, viewerId: number, filter: InterviewQuery,
     params.push(filter.profileId);
   }
   if (filter.from) {
-    conditions.push('i.scheduled_at >= ?');
+    conditions.push('i.at >= ?');
     params.push(new Date(filter.from).toISOString());
   }
   if (filter.to) {
-    conditions.push('i.scheduled_at <= ?');
+    conditions.push('i.at <= ?');
     params.push(new Date(filter.to).toISOString());
   }
   if (filter.stage) {
@@ -398,11 +403,11 @@ export function listInterviews(db: Db, viewerId: number, filter: InterviewQuery,
   }
   const rows = prepared(
     db.$client,
-    `SELECT i.id, i.application_id AS applicationId, i.stage, i.scheduled_at AS scheduledAt, i.timezone, i.note,
+    `SELECT i.id, i.application_id AS applicationId, i.stage, i.at, i.timezone, i.note,
               i.created_at AS createdAt, i.updated_at AS updatedAt, j.id AS jobId, j.title, j.company_name AS company, ${FACTS_COLUMNS},
               u.id AS user_id, u.username, u.display_name, ua.updated_at AS user_avatar,
               p.id AS profile_id, p.name AS profile_name, p.is_archived, pa.updated_at AS profile_avatar
-       FROM interviews i
+       FROM application_steps i
        JOIN applications a ON a.id = i.application_id
        JOIN jobs j ON j.id = a.job_id
        JOIN users u ON u.id = a.user_id
@@ -410,14 +415,14 @@ export function listInterviews(db: Db, viewerId: number, filter: InterviewQuery,
        LEFT JOIN job_facts f ON f.job_id = j.id
        LEFT JOIN user_avatars ua ON ua.user_id = u.id
        LEFT JOIN profile_avatars pa ON pa.profile_id = p.id
-       ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
-       ORDER BY ${filter.order === 'desc' ? 'i.scheduled_at DESC, i.id DESC' : 'i.scheduled_at ASC, i.id ASC'} LIMIT ?`
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY ${filter.order === 'desc' ? 'i.at DESC, i.id DESC' : 'i.at ASC, i.id ASC'} LIMIT ?`
   ).all(...params, limit) as InterviewRow[];
   return rows.map((row): InterviewListItem => ({
     id: row.id,
     applicationId: row.applicationId,
     stage: row.stage,
-    scheduledAt: row.scheduledAt,
+    at: row.at,
     timezone: row.timezone,
     note: row.note,
     createdAt: row.createdAt,
@@ -437,12 +442,15 @@ export function getDashboard(db: Db, userId: number): DashboardResponse {
   const counts = prepared(
     sqlite,
     `SELECT COUNT(*) AS total,
-            COALESCE(SUM(CASE WHEN status IN (${CLOSED_STATUSES.map(() => '?').join(',')}) THEN 0 ELSE 1 END), 0) AS active,
-            COALESCE(SUM(CASE WHEN status = 'Rejected' THEN 1 ELSE 0 END), 0) AS rejected
+            COALESCE(SUM(CASE WHEN stage = 'Rejected' THEN 0 ELSE 1 END), 0) AS active,
+            COALESCE(SUM(CASE WHEN stage = 'Rejected' THEN 1 ELSE 0 END), 0) AS rejected
      FROM applications WHERE user_id = ?`
-  ).get(...CLOSED_STATUSES, userId) as { total: number; active: number; rejected: number };
+  ).get(userId) as { total: number; active: number; rejected: number };
   const now = new Date().toISOString();
-  const upcoming = prepared(sqlite, `SELECT COUNT(*) AS total FROM interviews i JOIN applications a ON a.id = i.application_id WHERE a.user_id = ? AND i.scheduled_at >= ?`).get(userId, now) as { total: number };
+  const upcoming = prepared(
+    sqlite,
+    `SELECT COUNT(*) AS total FROM application_steps i JOIN applications a ON a.id = i.application_id WHERE a.user_id = ? AND i.stage IN (${INTERVIEWS_SQL}) AND i.at >= ?`
+  ).get(userId, now) as { total: number };
   return {
     totalApplications: counts.total,
     activeApplications: counts.active,
@@ -457,7 +465,7 @@ export function getDashboard(db: Db, userId: number): DashboardResponse {
 const TEAM_APPLICATION_ORDER: Record<TeamApplicationSort, string> = {
   applied: 'a.applied_at DESC, a.id DESC',
   // Furthest along first; of those, the ones still going before the turned down.
-  stage: "a.furthest_rank DESC, a.status = 'Rejected' ASC, a.applied_at DESC, a.id DESC",
+  stage: "a.furthest_rank DESC, a.stage = 'Rejected' ASC, a.applied_at DESC, a.id DESC",
   updated: 'a.updated_at DESC, a.id DESC',
   company: 'j.company_name COLLATE NOCASE ASC, j.title COLLATE NOCASE ASC, a.applied_at DESC, a.id DESC'
 };
@@ -474,9 +482,8 @@ export interface SharedWork {
 }
 
 /**
- * Every member's applications in the range by status, before anyone is marked as the viewer: the
- * same for everyone who looks. Those past Applied got an interview by their furthest stage; the
- * rest only need looking up when an interview was booked for one.
+ * Every member's applications in the range by the stage each is at, before anyone is marked as the
+ * viewer: the same for everyone who looks. One got an interview when its timeline went past Applied.
  */
 function teamBoard(sqlite: Database.Database, span: { from: string; to: string } | null): TeamBoardRow[] {
   const inRange = span ? 'a.applied_at >= @from AND a.applied_at < @to' : '1';
@@ -485,24 +492,20 @@ function teamBoard(sqlite: Database.Database, span: { from: string; to: string }
     sqlite,
     `SELECT u.id, u.username, u.display_name, u.is_active, ua.updated_at AS avatar FROM users u LEFT JOIN user_avatars ua ON ua.user_id = u.id`
   ).all() as Array<{ id: number; username: string; display_name: string | null; is_active: number; avatar: string | null }>;
-  const counted = prepared(sqlite, `SELECT a.user_id, a.status, COUNT(*) AS total, SUM(a.furthest_rank >= 1) AS interviews FROM applications a WHERE ${inRange} GROUP BY a.user_id, a.status`).all(params) as Array<{
+  const counted = prepared(sqlite, `SELECT a.user_id, a.stage, COUNT(*) AS total, SUM(a.furthest_rank >= 1) AS interviews FROM applications a WHERE ${inRange} GROUP BY a.user_id, a.stage`).all(params) as Array<{
     user_id: number;
-    status: ApplicationStatus;
+    stage: Stage;
     total: number;
     interviews: number;
   }>;
-  const booked = prepared(
-    sqlite,
-    `SELECT a.user_id, COUNT(*) AS total FROM (SELECT DISTINCT application_id AS id FROM interviews) i JOIN applications a ON a.id = i.id WHERE a.furthest_rank = 0 AND ${inRange} GROUP BY a.user_id`
-  ).all(params) as Array<{ user_id: number; total: number }>;
   return people
     .map((person): TeamBoardRow => {
-      const statuses = Object.fromEntries(APPLICATION_STATUSES.map((status) => [status, 0])) as Record<ApplicationStatus, number>;
+      const stages = Object.fromEntries(STAGES.map((stage) => [stage, 0])) as Record<Stage, number>;
       let total = 0;
-      let interviewed = booked.find((row) => row.user_id === person.id)?.total ?? 0;
+      let interviewed = 0;
       for (const row of counted) {
         if (row.user_id !== person.id) continue;
-        statuses[row.status] += row.total;
+        stages[row.stage] += row.total;
         total += row.total;
         interviewed += row.interviews;
       }
@@ -511,7 +514,7 @@ function teamBoard(sqlite: Database.Database, span: { from: string; to: string }
         isMe: false,
         isActive: person.is_active === 1,
         total,
-        statuses,
+        stages,
         interviews: interviewed,
         interviewRate: total > 0 ? Math.round((interviewed / total) * 1000) / 10 : null
       };
@@ -536,9 +539,9 @@ function teamApplicationPage(sqlite: Database.Database, query: TeamApplicationsQ
     where.push('a.user_id = @person');
     params.person = query.person;
   }
-  if (query.status) {
-    where.push('a.status = @status');
-    params.status = query.status;
+  if (query.stage) {
+    where.push('a.stage = @stage');
+    params.stage = query.stage;
   }
   const tokens = searchTokens(query.q ?? '');
   tokens.forEach((token, index) => {
@@ -583,7 +586,7 @@ export function listTeamApplications(
   const once = <T>(key: string, compute: () => T): T => (shared ? shared.value(key, compute) : compute());
   const board = once(`team-board:${span?.from ?? ''}|${span?.to ?? ''}`, () => teamBoard(sqlite, span));
   const page = once(
-    `team-page:${JSON.stringify([span?.from, span?.to, query.person, query.status, query.q, query.sort, query.limit, query.offset])}`,
+    `team-page:${JSON.stringify([span?.from, span?.to, query.person, query.stage, query.q, query.sort, query.limit, query.offset])}`,
     () => teamApplicationPage(sqlite, query, span)
   );
   const mine = board.find((row) => row.user.id === viewerId);
@@ -631,7 +634,12 @@ export function getTeam(db: Db): TeamMember[] {
     ).map((row) => [row.profile_id, row])
   );
   const interviewCounts = new Map(
-    (prepared(sqlite, `SELECT a.profile_id, COUNT(*) AS total FROM interviews i JOIN applications a ON a.id = i.application_id GROUP BY a.profile_id`).all() as Array<{ profile_id: number; total: number }>).map((row) => [row.profile_id, row.total])
+    (
+      prepared(sqlite, `SELECT a.profile_id, COUNT(*) AS total FROM application_steps i JOIN applications a ON a.id = i.application_id WHERE i.stage IN (${INTERVIEWS_SQL}) GROUP BY a.profile_id`).all() as Array<{
+        profile_id: number;
+        total: number;
+      }>
+    ).map((row) => [row.profile_id, row.total])
   );
   const NOTHING: ReachedCounts = { applications: 0, screen: 0, technical: 0, final: 0, offers: 0 };
 

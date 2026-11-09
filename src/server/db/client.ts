@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { schema } from './schema';
+import { stepsFromHistory } from './steps-from-history';
 
 export type Db = BetterSQLite3Database<typeof schema> & { $client: Database.Database };
 
@@ -48,6 +49,14 @@ export function openDatabase(path: string, migrationsDir: string, options: OpenO
 
 /** Drizzle's table of applied migrations: kept as it is, so databases from earlier versions open as before. */
 const MIGRATIONS_TABLE = '__drizzle_migrations';
+
+/**
+ * Work too involved for SQL, run straight after the migration it belongs to, in the same
+ * transaction: if it fails, nothing changes.
+ */
+const AFTER_MIGRATION: Record<string, (sqlite: Database.Database) => void> = {
+  '0009_application_steps': stepsFromHistory
+};
 
 export interface Migration {
   tag: string;
@@ -117,6 +126,7 @@ function runMigrations(sqlite: Database.Database, migrations: Migration[], optio
         for (const migration of pending) {
           running = migration;
           for (const statement of migration.statements) if (statement.trim()) sqlite.exec(statement);
+          AFTER_MIGRATION[migration.tag]?.(sqlite);
           record.run(migration.hash, migration.when);
         }
         const broken = sqlite.pragma('foreign_key_check') as Array<{ table: string; parent: string }>;

@@ -25,7 +25,7 @@ async function setUp() {
   const screened = await apply(users.andy, '2026-11-05T14:30:00.000Z');
   await apply(users.andy, '2026-11-02T10:00:00.000Z');
   await apply(users.andy, '2026-10-20T10:00:00.000Z');
-  // John: three today, one with an interview booked, and one yesterday.
+  // John: three today, one with an interview booked for next week, and one yesterday.
   await apply(users.john, '2026-11-05T08:00:00.000Z');
   await apply(users.john, '2026-11-05T08:20:00.000Z');
   const booked = await apply(users.john, '2026-11-05T13:00:00.000Z');
@@ -33,8 +33,9 @@ async function setUp() {
   // Mia: nothing this week.
   await apply(users.mia, '2026-10-01T10:00:00.000Z');
 
-  await users.andy.patch(`/api/applications/${screened.applicationId}`, { status: 'Recruiter Screen' });
-  await users.john.post(`/api/applications/${booked.applicationId}/interviews`, { stage: 'Recruiter Screen', scheduledAt: '2026-11-10T15:00:00.000Z', timezone: 'UTC' });
+  // Andy has a screen this afternoon; John's is booked for Tuesday 10 November, 15:00.
+  await users.andy.addStep(screened.applicationId, 'Recruiter Screen', '2026-11-05T16:00:00.000Z');
+  await users.john.addStep(booked.applicationId, 'Recruiter Screen', '2026-11-10T15:00:00.000Z');
 
   const query = (client: ApiClient, wanted: Partial<ActivityQuery> & Pick<ActivityQuery, 'from' | 'to'>) => {
     const params = new URLSearchParams({ tz: 'UTC', today: '2026-11-05', ...wanted } as Record<string, string>);
@@ -92,7 +93,7 @@ describe('applying activity', () => {
     expect(mia).toMatchObject({ today: 0, week: 1, inRange: 0 });
   });
 
-  it('counts an interview as received when it reached a screen or has one booked', async () => {
+  it('counts an application as having got an interview when its timeline has one, held or booked', async () => {
     const { users, read } = await setUp();
     const people = byName(await read(users.andy, THIS_WEEK));
     expect(people.andy).toMatchObject({ interviews: 1, interviewRate: 33.3, allTimeInterviews: 1, allTimeInterviewRate: 25 });
@@ -111,9 +112,11 @@ describe('applying activity', () => {
       inRange: 7,
       interviews: 2,
       interviewRate: 28.6,
-      reached: { screen: 1, technical: 0, final: 0, offer: 0, rejected: 0 },
-      scheduled: 0,
-      scheduledToday: 0
+      // A booked screen puts an application at the screen stage, as a held one does: John's and Andy's.
+      reached: { screen: 2, technical: 0, final: 0, offer: 0, rejected: 0 },
+      // Andy's screen this afternoon; John's is next week.
+      scheduled: 1,
+      scheduledToday: 1
     });
   });
 
@@ -122,9 +125,9 @@ describe('applying activity', () => {
     const andy = byName(await read(users.andy, THIS_WEEK)).andy;
     const applied = (await users.andy.get('/api/jobs?scope=mine&sort=applied')).json as { items: Array<{ applications: Array<{ id: number; isMine: boolean; appliedAt: string }> }> };
     const monday = applied.items.flatMap((job) => job.applications).find((application) => application.isMine && application.appliedAt.startsWith('2026-11-02'));
-    // Straight to Technical Interview, then turned down: it still reached the screen and the technical.
-    await users.andy.patch(`/api/applications/${monday?.id}`, { status: 'Technical Interview' });
-    await users.andy.patch(`/api/applications/${monday?.id}`, { status: 'Rejected' });
+    // Straight to a technical interview, then turned down: it still reached the screen and the technical.
+    await users.andy.addStep(monday?.id ?? 0, 'Technical Interview', '2026-11-03T10:00:00.000Z');
+    await users.andy.addStep(monday?.id ?? 0, 'Rejected', '2026-11-04T10:00:00.000Z');
     const after = byName(await read(users.andy, THIS_WEEK)).andy;
     expect(andy.reached).toEqual({ screen: 1, technical: 0, final: 0, offer: 0, rejected: 0 });
     expect(after.reached).toEqual({ screen: 2, technical: 1, final: 0, offer: 0, rejected: 1 });
@@ -139,6 +142,44 @@ describe('applying activity', () => {
     expect(nextWeek.team.scheduled).toBe(1);
     // Asked on the day itself, it is today's interview.
     expect(byName(await read(users.andy, { from: '2026-11-10', to: '2026-11-10', today: '2026-11-10' })).john).toMatchObject({ scheduled: 1, scheduledToday: 1 });
+    // Andy's screen this afternoon is today's.
+    expect(byName(await read(users.andy, TODAY)).andy).toMatchObject({ scheduled: 1, scheduledToday: 1 });
+  });
+
+  it('counts only interviews as scheduled: an offer or a rejection is a step, not a meeting', async () => {
+    const { users, read } = await setUp();
+    const applied = (await users.andy.get('/api/jobs?scope=mine&sort=applied')).json as { items: Array<{ applications: Array<{ id: number; isMine: boolean; appliedAt: string }> }> };
+    const monday = applied.items.flatMap((job) => job.applications).find((application) => application.isMine && application.appliedAt.startsWith('2026-11-02'));
+    await users.andy.addStep(monday?.id ?? 0, 'Offer', '2026-11-05T11:00:00.000Z');
+    const andy = byName(await read(users.andy, TODAY)).andy;
+    expect(andy).toMatchObject({ scheduled: 1, scheduledToday: 1 });
+    // The offer still takes the application to every stage.
+    expect(byName(await read(users.andy, THIS_WEEK)).andy.reached).toMatchObject({ screen: 2, technical: 1, final: 1, offer: 1 });
+  });
+
+  it('counts by the times entered, never by when a record was written or changed', async () => {
+    const { server, users, read } = await setUp();
+    const sqlite = server.ctx.handle.sqlite;
+    const ranges = [THIS_WEEK, TODAY, { from: '2026-11-09', to: '2026-11-15' }, { from: '2026-10-01', to: '2026-11-30' }];
+    const look = async () => {
+      server.ctx.readCache.invalidate();
+      const seen: ActivityResponse[] = [];
+      for (const range of ranges) seen.push(await read(users.andy, range));
+      return seen;
+    };
+    const before = await look();
+    sqlite.prepare(`UPDATE applications SET created_at = '2019-01-01T00:00:00.000Z', updated_at = '2031-06-01T00:00:00.000Z'`).run();
+    sqlite.prepare(`UPDATE application_steps SET created_at = '2019-01-01T00:00:00.000Z', updated_at = '2031-06-01T00:00:00.000Z'`).run();
+    expect(await look()).toEqual(before);
+  });
+
+  it('counts a bid on the day the person says they applied', async () => {
+    const { users, read } = await setUp();
+    const applied = (await users.andy.get('/api/jobs?scope=mine&sort=applied')).json as { items: Array<{ applications: Array<{ id: number; isMine: boolean; appliedAt: string }> }> };
+    const thisMorning = applied.items.flatMap((job) => job.applications).find((application) => application.isMine && application.appliedAt === '2026-11-05T09:10:00.000Z');
+    // Put in this morning, but sent on Saturday 31 October.
+    expect((await users.andy.patch(`/api/applications/${thisMorning?.id}`, { appliedAt: '2026-10-31T20:00:00.000Z' })).status).toBe(200);
+    expect(byName(await read(users.andy, THIS_WEEK)).andy).toMatchObject({ today: 1, week: 2, month: 2, inRange: 2, allTime: 4 });
   });
 
   it('splits each person by profile, and their numbers add up to the person’s', async () => {

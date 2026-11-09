@@ -1,10 +1,11 @@
 import { and, count, eq } from 'drizzle-orm';
-import type { ApplicationDetail, InterviewInput, UpdateApplicationRequest } from '../../shared/api';
+import type { ApplicationDetail, Step, StepInput, StepSaved, UpdateApplicationRequest } from '../../shared/api';
+import { isOutcomeStage } from '../../shared/constants';
 import type { AppContext } from '../context';
-import { nowIso, type Db } from '../db/client';
-import { applications, applicationStatusHistory, interviews, jobs } from '../db/schema';
+import { nowIso, prepared, type Db } from '../db/client';
+import { applications, applicationSteps, jobs } from '../db/schema';
 import { forbidden, notFound } from '../errors';
-import { getApplicationDetail } from './job-queries';
+import { getApplicationDetail, INTERVIEWS_SQL, toStep } from './job-queries';
 
 type ApplicationRow = typeof applications.$inferSelect;
 
@@ -22,27 +23,20 @@ function getOwnApplication(db: Db, userId: number, applicationId: number): Appli
   return row;
 }
 
+/** The memo, and when the person applied. The stage is never set here: it comes from the timeline. */
 export function updateApplication(ctx: AppContext, userId: number, applicationId: number, body: UpdateApplicationRequest): ApplicationDetail {
-  const db = ctx.db;
-  const existing = getOwnApplication(db, userId, applicationId);
-  ctx.handle.sqlite
-    .transaction(() => {
-      const now = nowIso();
-      db.update(applications)
-        .set({
-          ...(body.status !== undefined ? { status: body.status } : {}),
-          ...(body.memo !== undefined ? { memo: body.memo } : {}),
-          updatedAt: now
-        })
-        .where(eq(applications.id, applicationId))
-        .run();
-      if (body.status !== undefined && body.status !== existing.status) {
-        db.insert(applicationStatusHistory).values({ applicationId, oldStatus: existing.status, newStatus: body.status, changedAt: now }).run();
-      }
+  const existing = getOwnApplication(ctx.db, userId, applicationId);
+  ctx.db
+    .update(applications)
+    .set({
+      ...(body.memo !== undefined ? { memo: body.memo } : {}),
+      ...(body.appliedAt !== undefined ? { appliedAt: new Date(body.appliedAt).toISOString() } : {}),
+      updatedAt: nowIso()
     })
-    .immediate();
+    .where(eq(applications.id, applicationId))
+    .run();
   ctx.events.publish('applications_changed', existing.jobId);
-  return getApplicationDetail(db, userId, applicationId) as ApplicationDetail;
+  return getApplicationDetail(ctx.db, userId, applicationId) as ApplicationDetail;
 }
 
 /** Withdraws this one application. The shared job stays for everyone else. */
@@ -52,61 +46,83 @@ export function deleteApplication(ctx: AppContext, userId: number, applicationId
   ctx.events.publish('applications_changed', existing.jobId);
 }
 
-/** An interview changed: everyone's process view needs to hear about it. */
+/** A timeline changed: the record says so, and everyone's view of the process hears about it. */
 function touch(ctx: AppContext, application: { id: number; jobId: number }): void {
   ctx.db.update(applications).set({ updatedAt: nowIso() }).where(eq(applications.id, application.id)).run();
   ctx.events.publish('applications_changed', application.jobId);
 }
 
-export function addInterview(ctx: AppContext, userId: number, applicationId: number, input: InterviewInput) {
+/**
+ * An offer or a rejection ends the process, so the interviews after it will not happen: they come
+ * off the timeline and the calendars. Only interviews, and only later ones: whatever came before
+ * stays, and so does another outcome (an offer taken back is a rejection after the offer).
+ */
+function interviewsAfter(ctx: AppContext, applicationId: number, at: string, except?: number): Step[] {
+  return (
+    prepared(ctx.handle.sqlite, `SELECT * FROM application_steps WHERE application_id = ? AND stage IN (${INTERVIEWS_SQL}) AND at > ? AND id != ? ORDER BY at, id`).all(applicationId, at, except ?? 0) as Array<
+      Record<string, unknown>
+    >
+  ).map((row) => toStep(row));
+}
+
+function removeInterviewsAfter(ctx: AppContext, applicationId: number, input: { stage: string; at: string }, except?: number): Step[] {
+  if (!isOutcomeStage(input.stage)) return [];
+  const later = interviewsAfter(ctx, applicationId, input.at, except);
+  for (const step of later) ctx.db.delete(applicationSteps).where(eq(applicationSteps.id, step.id)).run();
+  return later;
+}
+
+export function addStep(ctx: AppContext, userId: number, applicationId: number, input: StepInput): StepSaved {
   const application = getOwnApplication(ctx.db, userId, applicationId);
-  const row = ctx.db
-    .insert(interviews)
-    .values({
-      applicationId,
-      stage: input.stage,
-      scheduledAt: new Date(input.scheduledAt).toISOString(),
-      timezone: input.timezone,
-      note: input.note?.trim() || null
+  const at = new Date(input.at).toISOString();
+  const saved = ctx.handle.sqlite
+    .transaction(() => {
+      const removed = removeInterviewsAfter(ctx, applicationId, { stage: input.stage, at });
+      const row = ctx.db
+        .insert(applicationSteps)
+        .values({ applicationId, stage: input.stage, at, timezone: input.timezone, note: input.note?.trim() || null })
+        .returning()
+        .get();
+      return { ...row, removed };
     })
-    .returning()
-    .get();
+    .immediate();
   touch(ctx, application);
-  return row;
+  return saved;
 }
 
-function getOwnInterview(db: Db, userId: number, interviewId: number) {
+function getOwnStep(db: Db, userId: number, stepId: number) {
   const row = db
-    .select({ interview: interviews, jobId: applications.jobId })
-    .from(interviews)
-    .innerJoin(applications, eq(applications.id, interviews.applicationId))
-    .where(and(eq(interviews.id, interviewId), eq(applications.userId, userId)))
+    .select({ step: applicationSteps, jobId: applications.jobId })
+    .from(applicationSteps)
+    .innerJoin(applications, eq(applications.id, applicationSteps.applicationId))
+    .where(and(eq(applicationSteps.id, stepId), eq(applications.userId, userId)))
     .get();
-  if (!row) throw notFound('That interview was not found.');
-  return { ...row.interview, jobId: row.jobId };
+  if (!row) throw notFound('That step was not found.');
+  return { ...row.step, jobId: row.jobId };
 }
 
-export function updateInterview(ctx: AppContext, userId: number, interviewId: number, input: InterviewInput) {
-  const existing = getOwnInterview(ctx.db, userId, interviewId);
-  const row = ctx.db
-    .update(interviews)
-    .set({
-      stage: input.stage,
-      scheduledAt: new Date(input.scheduledAt).toISOString(),
-      timezone: input.timezone,
-      note: input.note?.trim() || null,
-      updatedAt: nowIso()
+export function updateStep(ctx: AppContext, userId: number, stepId: number, input: StepInput): StepSaved {
+  const existing = getOwnStep(ctx.db, userId, stepId);
+  const at = new Date(input.at).toISOString();
+  const saved = ctx.handle.sqlite
+    .transaction(() => {
+      const removed = removeInterviewsAfter(ctx, existing.applicationId, { stage: input.stage, at }, stepId);
+      const row = ctx.db
+        .update(applicationSteps)
+        .set({ stage: input.stage, at, timezone: input.timezone, note: input.note?.trim() || null, updatedAt: nowIso() })
+        .where(eq(applicationSteps.id, stepId))
+        .returning()
+        .get();
+      return { ...row, removed };
     })
-    .where(eq(interviews.id, interviewId))
-    .returning()
-    .get();
+    .immediate();
   touch(ctx, { id: existing.applicationId, jobId: existing.jobId });
-  return row;
+  return saved;
 }
 
-export function deleteInterview(ctx: AppContext, userId: number, interviewId: number): void {
-  const existing = getOwnInterview(ctx.db, userId, interviewId);
-  ctx.db.delete(interviews).where(eq(interviews.id, interviewId)).run();
+export function deleteStep(ctx: AppContext, userId: number, stepId: number): void {
+  const existing = getOwnStep(ctx.db, userId, stepId);
+  ctx.db.delete(applicationSteps).where(eq(applicationSteps.id, stepId)).run();
   touch(ctx, { id: existing.applicationId, jobId: existing.jobId });
 }
 

@@ -1,7 +1,8 @@
 import { useCallback, useMemo, useState } from 'react';
 import { Activity, ArrowDown, CalendarDays, CodeXml, Filter, ImageOff, Percent, Phone, Send, Trophy, User, UserRound, UsersRound, type LucideIcon } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
-import { APPLICATION_STATUSES, type ApplicationStatus } from '@shared/constants';
+import { STAGES as EVERY_STAGE, type Stage } from '@shared/constants';
+import { stageInk } from '@/components/symbols';
 import type { ActivityPerson, ActivityProfile, ActivityResponse, CurrentUser, TeamBoardRow, TeamMember, TrendMetric } from '@shared/api';
 import type { PassRate, ProcessStats } from '@shared/pipeline';
 import { Avatar, userLabel, userName } from '@/components/job-bits';
@@ -88,15 +89,7 @@ const CARD_MEASURES: Array<{ metric: Exclude<TrendMetric, 'success'>; color: str
   { metric: 'offers', color: seriesColor(6) }
 ];
 
-const STATUS_COLORS: Record<ApplicationStatus, string> = {
-  Applied: 'var(--status-applied-ink)',
-  'Recruiter Screen': 'var(--status-recruiter-ink)',
-  'Technical Interview': 'var(--status-technical-ink)',
-  'Final Interview': 'var(--status-final-ink)',
-  Offer: 'var(--status-offer-ink)',
-  Rejected: 'var(--status-rejected-ink)'
-};
-const STATUS_SHORT: Record<ApplicationStatus, string> = {
+const STAGE_SHORT: Record<Stage, string> = {
   Applied: 'Applied',
   'Recruiter Screen': 'Screen',
   'Technical Interview': 'Technical',
@@ -105,22 +98,22 @@ const STATUS_SHORT: Record<ApplicationStatus, string> = {
   Rejected: 'Rejected'
 };
 
-/** Where one person's applications from the range are now, as one bar split by status. */
-function StatusBar({ row }: { row: TeamBoardRow | undefined }) {
+/** Where one person's applications from the range are now, as one bar split by stage. */
+function StageBar({ row }: { row: TeamBoardRow | undefined }) {
   if (!row || row.total === 0) return <div className="h-2.5 rounded-[3px] bg-surface-2" title="No applications in the range" />;
-  const parts = APPLICATION_STATUSES.filter((status) => row.statuses[status] > 0);
+  const parts = EVERY_STAGE.filter((stage) => row.stages[stage] > 0);
   return (
     <div>
-      <div className="flex h-2.5 gap-[2px] overflow-hidden rounded-[3px]" role="img" aria-label={`Where the ${row.total} applications are now: ${parts.map((status) => `${status} ${row.statuses[status]}`).join(', ')}`}>
-        {parts.map((status) => (
-          <div key={status} title={`${status}: ${row.statuses[status]}`} style={{ flexGrow: row.statuses[status], backgroundColor: STATUS_COLORS[status] }} />
+      <div className="flex h-2.5 gap-[2px] overflow-hidden rounded-[3px]" role="img" aria-label={`Where the ${row.total} applications are now: ${parts.map((stage) => `${stage} ${row.stages[stage]}`).join(', ')}`}>
+        {parts.map((stage) => (
+          <div key={stage} title={`${stage}: ${row.stages[stage]}`} style={{ flexGrow: row.stages[stage], backgroundColor: stageInk(stage) }} />
         ))}
       </div>
       <p className="mt-1 flex flex-wrap gap-x-2 text-[11px] text-ink-3">
-        {parts.map((status) => (
-          <span key={status} className="inline-flex items-center gap-1">
-            <span className="size-2 rounded-[2px]" style={{ backgroundColor: STATUS_COLORS[status] }} aria-hidden />
-            {STATUS_SHORT[status]} <span className="font-semibold tabular-nums text-ink-2">{row.statuses[status]}</span>
+        {parts.map((stage) => (
+          <span key={stage} className="inline-flex items-center gap-1">
+            <span className="size-2 rounded-[2px]" style={{ backgroundColor: stageInk(stage) }} aria-hidden />
+            {STAGE_SHORT[stage]} <span className="font-semibold tabular-nums text-ink-2">{row.stages[stage]}</span>
           </span>
         ))}
       </p>
@@ -202,11 +195,11 @@ function PersonCard({
       </div>
       <div className="mt-2">
         <p className="mb-1 text-[11px] text-ink-3">Where these applications are now</p>
-        <StatusBar row={board} />
+        <StageBar row={board} />
       </div>
       {/* Two different counts, each named for what it counts: applications that got one, and interviews by their date. */}
       <p className="mt-1.5 text-[11.5px] text-ink-2">
-        <span title={`${person.interviews} of the ${person.inRange} applications made ${rangeName.toLowerCase()} got an interview: Recruiter Screen or later, or one booked`}>
+        <span title={`${person.interviews} of the ${person.inRange} applications made ${rangeName.toLowerCase()} got an interview: a step past Applied on its timeline`}>
           Got an interview <span className="font-semibold tabular-nums text-ink">{count(person.interviews)}</span>/{count(person.inRange)} · <span className="font-semibold text-ink">{percent(person.interviewRate)}</span>
         </span>
         <span className="text-ink-3" title="Interviews whose date falls in the range, whenever their application was made">
@@ -273,7 +266,7 @@ const PIPELINE_COLUMNS: Array<{ key: PipelineSort; label: string; title: string;
   { key: 'final', label: 'Final', title: 'Reached Final Interview or later' },
   { key: 'offer', label: 'Offer', title: 'Got an offer' },
   { key: 'rejected', label: 'Rejected', title: 'Turned down, at any stage' },
-  { key: 'interviewRate', label: 'Interview rate', title: 'Got an interview: Recruiter Screen or later, or one booked', rate: true },
+  { key: 'interviewRate', label: 'Interview rate', title: 'Got an interview: a step past Applied on its timeline', rate: true },
   { key: 'offerRate', label: 'Offer rate', title: 'Offers out of applications', rate: true },
   { key: 'scheduled', label: 'Interviews dated', title: 'Interviews whose date falls in the range' }
 ];
@@ -642,7 +635,7 @@ function TeamAnalytics({ filters, data }: { filters: Filters; data: ActivityResp
           <div className="px-3.5 py-2.5">
             <InterviewRanking data={data} colors={colors} />
             <p className="mt-2 text-[11.5px] text-ink-3">
-              Of the applications made {filters.preset === 'today' || filters.preset === 'yesterday' ? 'that day' : 'in the range'}, the share that reached Recruiter Screen or later, or has an interview booked. Recent applications may still get one.
+              Of the applications made {filters.preset === 'today' || filters.preset === 'yesterday' ? 'that day' : 'in the range'}, the share whose timeline has an interview or an offer. Recent applications may still get one.
             </p>
           </div>
         </Panel>
@@ -765,8 +758,8 @@ function MemberCard({ member, isAdmin }: { member: TeamMember; isAdmin: boolean 
 
       <div className="mb-3 flex flex-wrap justify-between gap-x-3 gap-y-1 border-y border-border py-2">
         <Figure label="Applications" icon={Send} value={stats.applications.toLocaleString()} />
-        {/* Interviews booked, not applications that got one: one application can have several. */}
-        <Figure label="Interviews booked, every stage (one application can have several)" icon={CalendarDays} value={stats.interviews.toLocaleString()} />
+        {/* Interviews on timelines, not applications that got one: one application can have several. */}
+        <Figure label="Interviews, every stage and round (one application can have several)" icon={CalendarDays} value={stats.interviews.toLocaleString()} />
         <Figure label="Technical" icon={CodeXml} value={stats.technical.toLocaleString()} />
         <Figure label="Offers" icon={Trophy} value={stats.offers.toLocaleString()} />
         <Figure label="Success" icon={Percent} value={formatRate(stats.success)} />

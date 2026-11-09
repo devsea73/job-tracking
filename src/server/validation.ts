@@ -1,13 +1,5 @@
 import { z } from 'zod';
-import {
-  APPLICATION_STATUSES,
-  INTERVIEW_STAGES,
-  JOB_SCOPES,
-  JOB_SORTS,
-  PASSWORD_MIN_LENGTH,
-  PROFILE_NAME_MAX,
-  USERNAME_PATTERN
-} from '../shared/constants';
+import { INTERVIEW_STAGES, JOB_SCOPES, JOB_SORTS, PASSWORD_MIN_LENGTH, PROFILE_NAME_MAX, STAGES, STEP_STAGES, USERNAME_PATTERN } from '../shared/constants';
 import { ACTIVITY_GROUPS, daysBetween, groupFits, isCalendarDate, MAX_RANGE_DAYS } from '../shared/calendar';
 import { TEAM_APPLICATION_SORTS } from '../shared/api';
 import { badRequest } from './errors';
@@ -104,14 +96,19 @@ export const updateProfileBody = z
 /** Base64 runs a third longer than the image it holds, so this is a generous outer limit. */
 export const avatarBody = z.object({ image: z.string().min(1).max(1_000_000, 'That image is too large.') });
 
-export const updateApplicationBody = z
-  .object({ status: z.enum(APPLICATION_STATUSES).optional(), memo: memo.optional() })
-  .refine((body) => body.status !== undefined || body.memo !== undefined, 'Nothing to update.');
-
 /** An instant with an explicit offset. Local times without one would be ambiguous. */
 const instant = z.string().refine((value) => /(Z|[+-]\d{2}:\d{2})$/i.test(value) && !Number.isNaN(Date.parse(value)), {
   message: 'Use a full date and time with a timezone offset.'
 });
+
+/** A moment something happened or will: within reach of the calendars, which count from 1970. */
+const momentOfStep = instant.refine((value) => Date.parse(value) >= Date.parse('1970-01-02T00:00:00Z') && Date.parse(value) < Date.parse('9998-01-01T00:00:00Z'), {
+  message: 'Use a date between 1970 and 9998.'
+});
+
+export const updateApplicationBody = z
+  .object({ memo: memo.optional(), appliedAt: momentOfStep.optional() })
+  .refine((body) => body.memo !== undefined || body.appliedAt !== undefined, 'Nothing to update.');
 
 const timezone = z.string().refine(
   (value) => {
@@ -125,9 +122,9 @@ const timezone = z.string().refine(
   { message: 'Unknown timezone.' }
 );
 
-export const interviewBody = z.object({
-  stage: z.enum(INTERVIEW_STAGES),
-  scheduledAt: instant,
+export const stepBody = z.object({
+  stage: z.enum(STEP_STAGES, { message: `Choose one of: ${STEP_STAGES.join(', ')}.` }),
+  at: momentOfStep,
   timezone,
   note: z.string().trim().max(5_000).nullable().optional()
 });
@@ -150,8 +147,7 @@ const queryBoolean = z.enum(['true', 'false']).transform((value) => value === 't
 export const jobListQuery = z.object({
   q: z.string().trim().max(200).optional(),
   company: z.string().trim().max(200).optional(),
-  status: z.enum(APPLICATION_STATUSES).optional(),
-  stage: z.enum(INTERVIEW_STAGES).optional(),
+  stage: z.enum(STAGES).optional(),
   interviewFrom: instant.optional(),
   interviewTo: instant.optional(),
   highlighted: queryBoolean.optional(),
@@ -185,7 +181,7 @@ export const teamApplicationsQuery = z
     from: calendarDate.optional(),
     to: calendarDate.optional(),
     person: queryId.optional(),
-    status: z.enum(APPLICATION_STATUSES).optional(),
+    stage: z.enum(STAGES).optional(),
     q: z.string().trim().max(200).optional(),
     sort: z.enum(TEAM_APPLICATION_SORTS).optional(),
     limit: z.coerce.number().int().min(1).max(500).optional(),

@@ -12,7 +12,8 @@ import { closeDatabase } from '../src/server/db/client';
 import { FetchError, type FetchOptions, type FetchResult, type HttpClient } from '../src/server/extraction/safe-fetch';
 import type { PageRenderer, RenderedPage } from '../src/server/extraction/types';
 import { createSilentLogger } from '../src/server/logger';
-import type { CreateApplicationResponse, LoginResponse } from '../src/shared/api';
+import type { CreateApplicationResponse, LoginResponse, StepSaved } from '../src/shared/api';
+import type { StepStage } from '../src/shared/constants';
 
 /** A page the fake internet serves. Tests never touch real job sites. */
 export interface FakePage {
@@ -164,6 +165,21 @@ export class ApiClient {
   async addJob(url: string, extra: Record<string, unknown> = {}): Promise<CreateApplicationResponse> {
     const response = await this.post('/api/applications', { url, profileId: extra.profileId ?? (await this.defaultProfileId()), ...extra });
     if (response.status !== 200) throw new Error(`Adding ${url} failed: ${response.status} ${JSON.stringify(response.json)}`);
+    return response.json;
+  }
+
+  /**
+   * Puts a step on one of this person's application timelines: an interview, an offer or a
+   * rejection, at `at` (an instant, or a Date). The application's stage follows from it.
+   */
+  async addStep(applicationId: number, stage: StepStage, at: string | Date, extra: { timezone?: string; note?: string | null } = {}): Promise<StepSaved> {
+    const response = await this.post(`/api/applications/${applicationId}/steps`, {
+      stage,
+      at: typeof at === 'string' ? at : at.toISOString(),
+      timezone: extra.timezone ?? 'UTC',
+      ...(extra.note !== undefined ? { note: extra.note } : {})
+    });
+    if (response.status !== 201) throw new Error(`Adding ${stage} to application ${applicationId} failed: ${response.status} ${JSON.stringify(response.json)}`);
     return response.json;
   }
 }

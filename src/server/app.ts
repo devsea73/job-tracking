@@ -321,29 +321,31 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
     return { ok: true };
   });
 
-  app.post('/api/applications/:id/interviews', async (request, reply) => {
+  // A step on the application's timeline: an interview, an offer or a rejection, at the time it takes place.
+  app.post('/api/applications/:id/steps', async (request, reply) => {
     const { id } = v.parse(v.idParam, request.params);
-    const interview = applicationsService.addInterview(ctx, requireSession(request).user.id, id, v.parse(v.interviewBody, request.body));
-    return reply.code(201).send(interview);
+    const step = applicationsService.addStep(ctx, requireSession(request).user.id, id, v.parse(v.stepBody, request.body));
+    return reply.code(201).send(step);
   });
 
+  app.patch('/api/steps/:id', async (request) => {
+    const { id } = v.parse(v.idParam, request.params);
+    return applicationsService.updateStep(ctx, requireSession(request).user.id, id, v.parse(v.stepBody, request.body));
+  });
+
+  app.delete('/api/steps/:id', async (request) => {
+    const { id } = v.parse(v.idParam, request.params);
+    applicationsService.deleteStep(ctx, requireSession(request).user.id, id);
+    return { ok: true };
+  });
+
+  // The steps that are interviews, by when they take place: what the calendars show.
   app.get('/api/interviews', async (request, reply) => {
     const userId = requireSession(request).user.id;
     return cachedJson(reply, `interviews:${userId}:${request.url}`, () => {
       const { limit, ...filter } = v.parse(v.interviewQuery, request.query);
       return listInterviews(ctx.db, userId, filter, limit);
     });
-  });
-
-  app.patch('/api/interviews/:id', async (request) => {
-    const { id } = v.parse(v.idParam, request.params);
-    return applicationsService.updateInterview(ctx, requireSession(request).user.id, id, v.parse(v.interviewBody, request.body));
-  });
-
-  app.delete('/api/interviews/:id', async (request) => {
-    const { id } = v.parse(v.idParam, request.params);
-    applicationsService.deleteInterview(ctx, requireSession(request).user.id, id);
-    return { ok: true };
   });
 
   app.get('/api/activity', async (request, reply) => {

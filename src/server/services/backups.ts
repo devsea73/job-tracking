@@ -101,7 +101,10 @@ export function createSnapshot(ctx: AppContext): Promise<{ path: string; name: s
   });
 }
 
-const REQUIRED_TABLES = ['users', 'jobs', 'job_urls', 'applications', 'interviews', 'application_status_history', 'sessions'];
+const REQUIRED_TABLES = ['users', 'jobs', 'job_urls', 'applications', 'sessions'];
+
+/** Timelines, or what a copy from before them kept instead: restoring one of those brings it up to date. */
+const TIMELINE_TABLES = [['application_steps'], ['interviews', 'application_status_history']];
 
 /**
  * Refuses to replace live data with anything that is not a healthy database from this app, or
@@ -113,6 +116,7 @@ export function assertRestorable(path: string, migrationsDir?: string): void {
     candidate = new Database(path, { readonly: true, fileMustExist: true });
     const tables = new Set((candidate.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>).map((row) => row.name));
     const missing = REQUIRED_TABLES.filter((table) => !tables.has(table));
+    if (!TIMELINE_TABLES.some((set) => set.every((table) => tables.has(table)))) missing.push('application_steps');
     if (missing.length > 0) throw new Error(`missing tables: ${missing.join(', ')}`);
     const check = candidate.pragma('integrity_check', { simple: true });
     if (check !== 'ok') throw new Error(`integrity check: ${String(check)}`);

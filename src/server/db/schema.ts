@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { blob, check, index, integer, primaryKey, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 import type { EmploymentType, SalaryPeriod, WorkArrangement } from '../../shared/api';
-import type { ApplicationStatus, InterviewStage, UserRole } from '../../shared/constants';
+import type { Stage, StepStage, UserRole } from '../../shared/constants';
 
 /** All instants are stored as ISO-8601 UTC strings so that they sort lexicographically. */
 const nowIso = sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`;
@@ -171,13 +171,17 @@ export const applications = sqliteTable(
     jobId: integer('job_id')
       .notNull()
       .references(() => jobs.id, { onDelete: 'cascade' }),
-    status: text('status').$type<ApplicationStatus>().notNull().default('Applied'),
+    /** The stage of the latest step on the timeline, or Applied without one. Kept up to date by triggers: never set by hand. */
+    stage: text('stage').$type<Stage>().notNull().default('Applied'),
     memo: text('memo').notNull().default(''),
-    /** The highest pipeline stage ever reached, as an index into PIPELINE_STAGES. Kept up to date by a trigger. */
+    /** The furthest stage any step reached, as an index into PIPELINE_STAGES. Kept up to date by triggers. */
     furthestRank: integer('furthest_rank').notNull().default(0),
     /** The link this application was added with. Empty when someone joined the job without one. */
     jobUrlId: integer('job_url_id').references(() => jobUrls.id, { onDelete: 'set null' }),
+    /** When the person applied: the timeline's first entry, and what bids are counted by. They can change it. */
     appliedAt: text('applied_at').notNull().default(nowIso),
+    /** When the record was written and last changed. Bookkeeping only: nothing is counted by them. */
+    createdAt: text('created_at').notNull().default(nowIso),
     updatedAt: text('updated_at').notNull().default(nowIso)
   },
   (t) => [
@@ -185,55 +189,47 @@ export const applications = sqliteTable(
     uniqueIndex('applications_profile_job_unique').on(t.profileId, t.jobId),
     index('applications_job_idx').on(t.jobId),
     index('applications_user_job_idx').on(t.userId, t.jobId),
-    index('applications_status_idx').on(t.status),
-    index('applications_user_status_idx').on(t.userId, t.status),
+    index('applications_stage_idx').on(t.stage),
+    index('applications_user_stage_idx').on(t.userId, t.stage),
     index('applications_job_url_idx').on(t.jobUrlId),
     // The numbers pages read a range of days; count each profile's that got somewhere; and find the
     // offers, which success counts from the start.
     index('applications_applied_idx').on(t.appliedAt),
     index('applications_furthest_idx').on(t.furthestRank, t.profileId),
-    check(
-      'applications_status_check',
-      sql`${t.status} in ('Applied', 'Recruiter Screen', 'Technical Interview', 'Final Interview', 'Rejected', 'Offer')`
-    )
+    check('applications_stage_check', sql`${t.stage} in ('Applied', 'Recruiter Screen', 'Technical Interview', 'Final Interview', 'Offer', 'Rejected')`)
   ]
 );
 
-export const interviews = sqliteTable(
-  'interviews',
+/**
+ * An application's timeline: each step is a stage and the moment it takes place, as the person
+ * entered it. An interview is a step at an interview stage, so three technical rounds are three
+ * steps; an offer or a rejection is a step on the day it came. Everything counted is counted by
+ * `at`, never by when the row was written or changed.
+ */
+export const applicationSteps = sqliteTable(
+  'application_steps',
   {
     id: integer('id').primaryKey({ autoIncrement: true }),
     applicationId: integer('application_id')
       .notNull()
       .references(() => applications.id, { onDelete: 'cascade' }),
-    stage: text('stage').$type<InterviewStage>().notNull(),
-    scheduledAt: text('scheduled_at').notNull(),
+    stage: text('stage').$type<StepStage>().notNull(),
+    /** UTC instant: when the interview is, or when the offer or rejection came. */
+    at: text('at').notNull(),
+    /** The zone it was entered in. */
     timezone: text('timezone').notNull(),
     note: text('note'),
     createdAt: text('created_at').notNull().default(nowIso),
     updatedAt: text('updated_at').notNull().default(nowIso)
   },
   (t) => [
-    index('interviews_application_idx').on(t.applicationId, t.scheduledAt),
-    index('interviews_scheduled_idx').on(t.scheduledAt),
-    // Which applications got an interview booked in a range of days.
-    index('interviews_created_idx').on(t.createdAt, t.applicationId)
+    index('application_steps_application_idx').on(t.applicationId, t.at),
+    // The calendars, by day.
+    index('application_steps_at_idx').on(t.at),
+    // Which applications reached a stage in a range of days.
+    index('application_steps_stage_at_idx').on(t.stage, t.at, t.applicationId),
+    check('application_steps_stage_check', sql`${t.stage} in ('Recruiter Screen', 'Technical Interview', 'Final Interview', 'Offer', 'Rejected')`)
   ]
-);
-
-export const applicationStatusHistory = sqliteTable(
-  'application_status_history',
-  {
-    id: integer('id').primaryKey({ autoIncrement: true }),
-    applicationId: integer('application_id')
-      .notNull()
-      .references(() => applications.id, { onDelete: 'cascade' }),
-    oldStatus: text('old_status').$type<ApplicationStatus>(),
-    newStatus: text('new_status').$type<ApplicationStatus>().notNull(),
-    changedAt: text('changed_at').notNull().default(nowIso)
-  },
-  // By application; and which applications reached a stage in a range of days.
-  (t) => [index('status_history_application_idx').on(t.applicationId, t.changedAt), index('status_history_reached_idx').on(t.newStatus, t.changedAt, t.applicationId)]
 );
 
 /** What is known about a job wherever it is listed: the tags on it, and what duplicates are judged by. */
@@ -323,8 +319,7 @@ export const schema = {
   jobUrls,
   jobIdentifiers,
   applications,
-  interviews,
-  applicationStatusHistory,
+  applicationSteps,
   jobFacts,
   jobSignatures,
   jobTextFeatures,

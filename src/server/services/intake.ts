@@ -11,11 +11,10 @@ import type {
   ManualJobFields,
   MatchedBy
 } from '../../shared/api';
-import { DEFAULT_STATUS } from '../../shared/constants';
 import { isUnreadableNote, unreadableNote } from '../../shared/unreadable';
 import type { AppContext } from '../context';
 import { nowIso, prepared } from '../db/client';
-import { applications, applicationStatusHistory, jobIdentifiers, jobs, jobUrls, profiles } from '../db/schema';
+import { applications, jobIdentifiers, jobs, jobUrls, profiles } from '../db/schema';
 import { identifyAts, isAggregator, titleFromUrl } from '../dedupe/ats';
 import { deriveJobFacts } from '../dedupe/job-facts';
 import { buildEvidence, findContentMatches, findExactMatch, identifiersFromEvidence, isSpecificPage, type UrlEvidence } from '../dedupe/matcher';
@@ -269,10 +268,9 @@ function linkProfile(
 
       const application = db
         .insert(applications)
-        .values({ userId: applicant.userId, profileId: applicant.profileId, jobId, memo, status: DEFAULT_STATUS, jobUrlId: sourceLink(ctx, jobId, evidence, chosenLink) })
+        .values({ userId: applicant.userId, profileId: applicant.profileId, jobId, memo, jobUrlId: sourceLink(ctx, jobId, evidence, chosenLink) })
         .returning({ id: applications.id })
         .get();
-      db.insert(applicationStatusHistory).values({ applicationId: application.id, oldStatus: null, newStatus: DEFAULT_STATUS }).run();
       if (aliasAdded || !jobWasNew) db.update(jobs).set({ updatedAt: nowIso() }).where(eq(jobs.id, jobId)).run();
       return { outcome: 'created', applicationId: application.id, jobId, jobWasNew, matchedBy };
     })

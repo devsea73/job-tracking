@@ -12,14 +12,14 @@ import type {
   CurrentUser,
   DashboardResponse,
   DuplicatesResponse,
-  Interview,
-  InterviewInput,
   InterviewListItem,
   InterviewQuery,
   JobDetail,
   JobListQuery,
   JobListResponse,
   MyProfilesResponse,
+  StepInput,
+  StepSaved,
   TeamApplicationsQuery,
   TeamApplicationsResponse,
   TeamMember,
@@ -252,14 +252,13 @@ export const useDeleteJob = () => useRefreshingMutation((id: number) => call('DE
 export const useSetHighlight = () =>
   useRefreshingMutation(({ jobId, highlighted }: { jobId: number; highlighted: boolean }) => call('POST', `/api/jobs/${jobId}/highlight`, { highlighted }));
 
-export const useSaveInterview = () =>
-  useRefreshingMutation(({ applicationId, interviewId, input }: { applicationId: number; interviewId?: number; input: InterviewInput }) =>
-    interviewId
-      ? call<Interview>('PATCH', `/api/interviews/${interviewId}`, input)
-      : call<Interview>('POST', `/api/applications/${applicationId}/interviews`, input)
+/** Adds a step to an application's timeline, or changes one: an interview, an offer, a rejection. */
+export const useSaveStep = () =>
+  useRefreshingMutation(({ applicationId, stepId, input }: { applicationId: number; stepId?: number; input: StepInput }) =>
+    stepId ? call<StepSaved>('PATCH', `/api/steps/${stepId}`, input) : call<StepSaved>('POST', `/api/applications/${applicationId}/steps`, input)
   );
 
-export const useDeleteInterview = () => useRefreshingMutation((id: number) => call('DELETE', `/api/interviews/${id}`));
+export const useDeleteStep = () => useRefreshingMutation((id: number) => call('DELETE', `/api/steps/${id}`));
 
 export function useDuplicates(): UseQueryResult<DuplicatesResponse> {
   return useQuery({ queryKey: ['duplicates'], queryFn: () => call<DuplicatesResponse>('GET', '/api/duplicates') });

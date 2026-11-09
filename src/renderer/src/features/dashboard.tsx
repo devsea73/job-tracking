@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import { CalendarClock, Filter, Inbox, Send, UserRound } from 'lucide-react';
 import type { ActivityPerson, ActivityResponse, JobListItem, TrendMetric } from '@shared/api';
-import { AvatarStack, StatusBadge } from '@/components/job-bits';
+import { AvatarStack, StageBadge } from '@/components/job-bits';
 import { JobTags } from '@/components/job-tags';
 import { STAGE_ICONS } from '@/components/symbols';
 import { Button } from '@/components/ui/button';
@@ -65,7 +65,7 @@ function JobLine({ job, onOpen }: { job: JobListItem; onOpen: (id: number) => vo
           <p className="truncate font-medium">{job.title}</p>
           <p className="truncate text-[12.5px] text-ink-2">{job.company}</p>
         </div>
-        {mine.length === 1 ? <StatusBadge status={mine[0].status} /> : null}
+        {mine.length === 1 ? <StageBadge stage={mine[0].stage} /> : null}
         <AvatarStack applications={job.applications} />
         {applied ? (
           <span className="w-16 shrink-0 text-right text-[12px] tabular-nums text-ink-3" title={`Applied ${formatDateTime(applied)}`}>
@@ -210,7 +210,7 @@ export function DashboardPage({ onOpenJob, onNavigate, onAddJob }: { onOpenJob: 
                         <p className="truncate font-medium">{interview.title}</p>
                         <p className="truncate text-[12.5px] text-ink-2">{interview.company}</p>
                       </div>
-                      <span className="shrink-0 text-right text-[12.5px] tabular-nums text-ink-2">{formatDateTime(interview.scheduledAt)}</span>
+                      <span className="shrink-0 text-right text-[12.5px] tabular-nums text-ink-2">{formatDateTime(interview.at)}</span>
                     </div>
                   </li>
                 );

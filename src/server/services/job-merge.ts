@@ -66,20 +66,19 @@ function hasOwnPostingId(sqlite: Database.Database, jobId: number): boolean {
 interface ApplicationRow {
   id: number;
   profile_id: number;
-  status: string;
   memo: string;
-  furthest_rank: number;
   applied_at: string;
+  created_at: string;
   updated_at: string;
   job_url_id: number | null;
 }
 
-const APPLICATION_FIELDS = 'id, profile_id, status, memo, furthest_rank, applied_at, updated_at, job_url_id';
+const APPLICATION_FIELDS = 'id, profile_id, memo, applied_at, created_at, updated_at, job_url_id';
 
 /**
  * Folds one job into another: links, posting ids and applications all move. If one profile
- * applied to both, they become one application that keeps its furthest progress, both memos,
- * and every interview and history entry. Run inside a transaction.
+ * applied to both, they become one application with both timelines, every step of each, and both
+ * memos; its stage then comes from the steps, as always. Run inside a transaction.
  */
 export function mergeJobs(sqlite: Database.Database, keepId: number, otherId: number): void {
   const keep = getJob(sqlite, keepId);
@@ -99,19 +98,17 @@ export function mergeJobs(sqlite: Database.Database, keepId: number, otherId: nu
       prepared(sqlite, 'UPDATE applications SET job_id = ? WHERE id = ?').run(keepId, application.id);
       continue;
     }
-    prepared(sqlite, 'UPDATE interviews SET application_id = ? WHERE application_id = ?').run(existing.id, application.id);
-    prepared(sqlite, 'UPDATE application_status_history SET application_id = ? WHERE application_id = ?').run(existing.id, application.id);
-    const incomingLeads = application.furthest_rank > existing.furthest_rank || (application.furthest_rank === existing.furthest_rank && application.updated_at > existing.updated_at);
+    // The steps' triggers set the kept application's stage and furthest stage from them all.
+    prepared(sqlite, 'UPDATE application_steps SET application_id = ? WHERE application_id = ?').run(existing.id, application.id);
     const memos = [...new Set([existing.memo, application.memo].map((memo) => memo.trim()).filter(Boolean))];
     prepared(sqlite, 'DELETE FROM applications WHERE id = ?').run(application.id);
     // The link stays with the earlier application, which the kept date belongs to.
     const earlier = existing.applied_at <= application.applied_at ? existing : application;
     const later = earlier === existing ? application : existing;
-    prepared(sqlite, 'UPDATE applications SET status = ?, memo = ?, furthest_rank = ?, applied_at = ?, updated_at = ?, job_url_id = ? WHERE id = ?').run(
-      incomingLeads ? application.status : existing.status,
+    prepared(sqlite, 'UPDATE applications SET memo = ?, applied_at = ?, created_at = ?, updated_at = ?, job_url_id = ? WHERE id = ?').run(
       memos.join('\n\n'),
-      Math.max(existing.furthest_rank, application.furthest_rank),
       earlier.applied_at,
+      existing.created_at < application.created_at ? existing.created_at : application.created_at,
       existing.updated_at > application.updated_at ? existing.updated_at : application.updated_at,
       earlier.job_url_id ?? later.job_url_id,
       existing.id

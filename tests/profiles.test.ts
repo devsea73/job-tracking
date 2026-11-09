@@ -1,8 +1,10 @@
 import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import type Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 import { closeDatabase, openDatabase } from '../src/server/db/client';
-import { computeStats, furthestStage, passRate } from '../src/shared/pipeline';
+import { standingChanges, stepsOf } from '../src/server/db/steps-from-history';
+import { computeStats, currentStage, furthestStage, interviewsEndedBy, passRate } from '../src/shared/pipeline';
 import { createTestServer, createUsers, jobPage, tempDir, type ApiClient, type TestServer } from './helpers';
 
 const PNG = `data:image/png;base64,${Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(32, 1)]).toString('base64')}`;
@@ -20,7 +22,16 @@ function serveJob(server: TestServer, slug: string, title = 'Engineer', company 
 }
 
 describe('migrating an existing database', () => {
-  /** A database as the previous version left it, with real rows in every table involved. */
+  /**
+   * A database as an early version left it, with real rows in every table involved: statuses set by
+   * hand, with their history, and interviews with stages of their own.
+   *
+   * Tyler's application 100 went to Recruiter Screen, was set to Final Interview by mistake and put
+   * back to Technical Interview a few minutes later, then was rejected. It had a call ("Other"), a
+   * hiring manager interview and a technical interview. John's application 101 reached Technical,
+   * got an offer, and still had a final interview on the calendar after it. Tyler's 102 was imported
+   * the day after it was applied, and never went anywhere.
+   */
   function databaseFromPreviousVersion(dir: string): { path: string; realMigrations: string } {
     const realMigrations = resolve(__dirname, '..', 'drizzle');
     const oldMigrations = join(dir, 'old-migrations');
@@ -34,16 +45,35 @@ describe('migrating an existing database', () => {
     const old = openDatabase(path, oldMigrations);
     old.sqlite.exec(`
       INSERT INTO users (id, username, display_name, password_hash) VALUES (1, 'tyler', 'Tyler Morgan', 'x'), (2, 'john', NULL, 'x'), (3, 'unused', NULL, 'x');
-      INSERT INTO jobs (id, company_name, title, description, company_key, title_key) VALUES (10, 'Stripe', 'Engineer', 'text', 'stripe', 'engineer');
-      INSERT INTO applications (id, user_id, job_id, status, memo) VALUES (100, 1, 10, 'Technical Interview', 'keep this memo'), (101, 2, 10, 'Applied', '');
-      INSERT INTO interviews (id, application_id, stage, scheduled_at, timezone) VALUES (1000, 100, 'Technical Interview', '2030-01-01T00:00:00.000Z', 'UTC');
-      INSERT INTO application_status_history (application_id, old_status, new_status) VALUES (100, NULL, 'Applied'), (100, 'Applied', 'Technical Interview');
+      INSERT INTO jobs (id, company_name, title, description, company_key, title_key) VALUES (10, 'Stripe', 'Engineer', 'text', 'stripe', 'engineer'), (11, 'Figma', 'Designer', 'text', 'figma', 'designer');
+      INSERT INTO applications (id, user_id, job_id, status, memo, applied_at, updated_at) VALUES
+        (100, 1, 10, 'Rejected', 'keep this memo', '2026-10-01T09:00:00.000Z', '2026-10-10T12:00:00.000Z'),
+        (101, 2, 10, 'Offer', '', '2026-10-05T10:00:00.000Z', '2026-10-20T10:00:00.000Z'),
+        (102, 1, 11, 'Applied', '', '2026-10-14T00:00:00.000Z', '2026-10-15T08:00:00.000Z');
+      INSERT INTO interviews (id, application_id, stage, scheduled_at, timezone, note) VALUES
+        (1000, 100, 'Other', '2026-10-03T15:00:00.000Z', 'UTC', 'Phone call'),
+        (1001, 100, 'Hiring Manager', '2026-10-06T16:00:00.000Z', 'Europe/London', 'Ask about the team'),
+        (1002, 100, 'Technical Interview', '2026-10-08T14:00:00.000Z', 'UTC', NULL),
+        (1003, 101, 'Final Interview', '2026-10-25T13:00:00.000Z', 'America/New_York', 'Meet the team');
+      INSERT INTO application_status_history (application_id, old_status, new_status, changed_at) VALUES
+        (100, NULL, 'Applied', '2026-10-01T09:00:00.000Z'),
+        (100, 'Applied', 'Recruiter Screen', '2026-10-02T09:00:00.000Z'),
+        (100, 'Recruiter Screen', 'Final Interview', '2026-10-04T09:00:00.000Z'),
+        (100, 'Final Interview', 'Technical Interview', '2026-10-04T09:05:00.000Z'),
+        (100, 'Technical Interview', 'Rejected', '2026-10-10T12:00:00.000Z'),
+        (101, NULL, 'Applied', '2026-10-05T10:00:00.000Z'),
+        (101, 'Applied', 'Technical Interview', '2026-10-07T10:00:00.000Z'),
+        (101, 'Technical Interview', 'Offer', '2026-10-20T10:00:00.000Z'),
+        (102, NULL, 'Applied', '2026-10-15T08:00:00.000Z');
     `);
     closeDatabase(old);
     return { path, realMigrations };
   }
 
-  it('keeps every application, interview and history entry, and gives each user a profile', () => {
+  const stepsOfApplication = (sqlite: Database.Database, id: number) =>
+    sqlite.prepare('SELECT stage, at, timezone, note FROM application_steps WHERE application_id = ? ORDER BY at, id').all(id);
+
+  it('turns every interview and status change into steps on a timeline, and gives each user a profile', () => {
     const { path, realMigrations } = databaseFromPreviousVersion(tempDir());
     const migrated = openDatabase(path, realMigrations);
     try {
@@ -54,26 +84,112 @@ describe('migrating an existing database', () => {
         { user_id: 2, name: 'john' },
         { user_id: 3, name: 'unused' }
       ]);
-      const application = sqlite.prepare('SELECT a.memo, a.status, p.name FROM applications a JOIN profiles p ON p.id = a.profile_id WHERE a.id = 100').get();
-      expect(application).toEqual({ memo: 'keep this memo', status: 'Technical Interview', name: 'Tyler Morgan' });
-      expect(sqlite.prepare('SELECT COUNT(*) AS c FROM interviews').get()).toEqual({ c: 1 });
-      expect(sqlite.prepare('SELECT COUNT(*) AS c FROM application_status_history').get()).toEqual({ c: 2 });
+      const application = sqlite.prepare('SELECT a.memo, a.stage, a.furthest_rank, a.applied_at, a.created_at, p.name FROM applications a JOIN profiles p ON p.id = a.profile_id WHERE a.id = 100').get();
+      expect(application).toEqual({ memo: 'keep this memo', stage: 'Rejected', furthest_rank: 2, applied_at: '2026-10-01T09:00:00.000Z', created_at: '2026-10-01T09:00:00.000Z', name: 'Tyler Morgan' });
+
+      // Each interview at its own time. "Other" and "Hiring Manager" take the stage the application
+      // was at then; the mistaken Final Interview, undone minutes later, is gone; the rejection ends it.
+      expect(stepsOfApplication(sqlite, 100)).toEqual([
+        { stage: 'Recruiter Screen', at: '2026-10-03T15:00:00.000Z', timezone: 'UTC', note: 'Phone call' },
+        { stage: 'Technical Interview', at: '2026-10-06T16:00:00.000Z', timezone: 'Europe/London', note: 'Hiring manager: Ask about the team' },
+        { stage: 'Technical Interview', at: '2026-10-08T14:00:00.000Z', timezone: 'UTC', note: null },
+        { stage: 'Rejected', at: '2026-10-10T12:00:00.000Z', timezone: 'UTC', note: null }
+      ]);
+
+      // A stage reached without an interview is a step at the moment it was set. The offer stays the
+      // last step, after the final interview still on the calendar, so the application stays at Offer.
+      expect(stepsOfApplication(sqlite, 101)).toEqual([
+        { stage: 'Technical Interview', at: '2026-10-07T10:00:00.000Z', timezone: 'UTC', note: null },
+        { stage: 'Final Interview', at: '2026-10-25T13:00:00.000Z', timezone: 'America/New_York', note: 'Meet the team' },
+        { stage: 'Offer', at: '2026-10-25T13:00:01.000Z', timezone: 'UTC', note: null }
+      ]);
+      expect(sqlite.prepare('SELECT stage, furthest_rank FROM applications WHERE id = 101').get()).toEqual({ stage: 'Offer', furthest_rank: 4 });
+
+      // Nothing happened to the third: no steps, still Applied. It was written the day after it was applied.
+      expect(stepsOfApplication(sqlite, 102)).toEqual([]);
+      expect(sqlite.prepare('SELECT stage, furthest_rank, applied_at, created_at FROM applications WHERE id = 102').get()).toEqual({
+        stage: 'Applied',
+        furthest_rank: 0,
+        applied_at: '2026-10-14T00:00:00.000Z',
+        created_at: '2026-10-15T08:00:00.000Z'
+      });
+
+      // The status, its history and the interviews' own stages are gone.
+      const tables = (sqlite.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>).map((row) => row.name);
+      expect(tables).toContain('application_steps');
+      expect(tables).not.toContain('interviews');
+      expect(tables).not.toContain('application_status_history');
+      const columns = (sqlite.prepare('PRAGMA table_info(applications)').all() as Array<{ name: string }>).map((column) => column.name);
+      expect(columns).toEqual(expect.arrayContaining(['stage', 'furthest_rank', 'applied_at', 'created_at', 'updated_at']));
+      expect(columns).not.toContain('status');
+      // The memo search was rebuilt along with the table.
+      expect(sqlite.prepare(`SELECT rowid FROM applications_fts WHERE applications_fts MATCH 'memo'`).pluck().all()).toEqual([100]);
     } finally {
       closeDatabase(migrated);
     }
   });
 
-  it('leaves foreign keys on, and working, afterwards', () => {
+  it('leaves foreign keys on, and working, afterwards, and keeps each stage up to date from its steps', () => {
     const { path, realMigrations } = databaseFromPreviousVersion(tempDir());
     const migrated = openDatabase(path, realMigrations);
     try {
       const { sqlite } = migrated;
       expect(sqlite.pragma('foreign_keys', { simple: true })).toBe(1);
+      expect(sqlite.pragma('foreign_key_check')).toEqual([]);
       sqlite.prepare('DELETE FROM applications WHERE id = 100').run();
-      expect(sqlite.prepare('SELECT COUNT(*) AS c FROM interviews').get()).toEqual({ c: 0 });
+      expect(sqlite.prepare('SELECT COUNT(*) AS c FROM application_steps WHERE application_id = 100').get()).toEqual({ c: 0 });
+      expect(sqlite.prepare('SELECT application_count FROM jobs WHERE id = 10').get()).toEqual({ application_count: 1 });
+
+      // The triggers work on the rebuilt table: a step sets the stage, removing it sets it back.
+      sqlite.prepare(`INSERT INTO application_steps (application_id, stage, at, timezone) VALUES (102, 'Technical Interview', '2026-10-20T10:00:00.000Z', 'UTC')`).run();
+      expect(sqlite.prepare('SELECT stage, furthest_rank FROM applications WHERE id = 102').get()).toEqual({ stage: 'Technical Interview', furthest_rank: 2 });
+      sqlite.prepare('DELETE FROM application_steps WHERE application_id = 102').run();
+      expect(sqlite.prepare('SELECT stage, furthest_rank FROM applications WHERE id = 102').get()).toEqual({ stage: 'Applied', furthest_rank: 0 });
+      expect(() => sqlite.prepare(`INSERT INTO application_steps (application_id, stage, at, timezone) VALUES (999, 'Offer', '2026-10-20T10:00:00.000Z', 'UTC')`).run()).toThrow(/FOREIGN KEY/);
+      expect(() => sqlite.prepare(`INSERT INTO application_steps (application_id, stage, at, timezone) VALUES (102, 'Applied', '2026-10-20T10:00:00.000Z', 'UTC')`).run()).toThrow(/CHECK/);
     } finally {
       closeDatabase(migrated);
     }
+  });
+});
+
+describe('reading an old status history', () => {
+  const change = (id: number, old_status: string | null, new_status: string, changed_at: string) => ({ id, application_id: 1, old_status, new_status, changed_at });
+
+  it('drops a stage that was moved back from, and a rejection that was taken back', () => {
+    expect(
+      standingChanges([
+        change(1, null, 'Applied', '2026-10-01T00:00:00.000Z'),
+        change(2, 'Applied', 'Final Interview', '2026-10-02T00:00:00.000Z'),
+        change(3, 'Final Interview', 'Recruiter Screen', '2026-10-02T00:01:00.000Z'),
+        change(4, 'Recruiter Screen', 'Rejected', '2026-10-05T00:00:00.000Z'),
+        change(5, 'Rejected', 'Technical Interview', '2026-10-06T00:00:00.000Z')
+      ])
+    ).toEqual([
+      { status: 'Recruiter Screen', at: '2026-10-02T00:01:00.000Z' },
+      { status: 'Technical Interview', at: '2026-10-06T00:00:00.000Z' }
+    ]);
+  });
+
+  it('reads two merged applications as two runs, so the start of the second undoes nothing', () => {
+    expect(
+      standingChanges([
+        change(1, null, 'Applied', '2026-10-01T00:00:00.000Z'),
+        change(2, 'Applied', 'Final Interview', '2026-10-02T00:00:00.000Z'),
+        change(3, null, 'Applied', '2026-10-03T00:00:00.000Z'),
+        change(4, 'Applied', 'Recruiter Screen', '2026-10-04T00:00:00.000Z')
+      ])
+    ).toEqual([
+      { status: 'Final Interview', at: '2026-10-02T00:00:00.000Z' },
+      { status: 'Recruiter Screen', at: '2026-10-04T00:00:00.000Z' }
+    ]);
+  });
+
+  it('keeps a stage set with no change recorded for it, as late as is known', () => {
+    expect(stepsOf({ status: 'Technical Interview', updated_at: '2026-10-09T00:00:00.000Z' }, [], [])).toEqual([
+      { stage: 'Technical Interview', at: '2026-10-09T00:00:00.000Z', timezone: 'UTC', note: null, createdAt: '2026-10-09T00:00:00.000Z', updatedAt: '2026-10-09T00:00:00.000Z' }
+    ]);
+    expect(stepsOf({ status: 'Applied', updated_at: '2026-10-09T00:00:00.000Z' }, [], [change(1, null, 'Applied', '2026-10-01T00:00:00.000Z')])).toEqual([]);
   });
 });
 
@@ -116,7 +232,7 @@ describe('profiles', () => {
       ['tyler', false, 0],
       ['Used', true, 1]
     ]);
-    // The application and its history are still there.
+    // The application and its timeline are still there.
     expect((await users.tyler.get('/api/jobs?scope=mine')).json.total).toBe(1);
   });
 
@@ -291,29 +407,36 @@ describe('sharing everything', () => {
     const server = await createTestServer();
     const { admin, users } = await createUsers(server.app, 'tyler', 'john');
     const added: any = await users.tyler.addJob(serveJob(server, 'acme'), { memo: 'visible memo' });
-    await users.tyler.patch(`/api/applications/${added.applicationId}`, { status: 'Technical Interview' });
-    const interview = await users.tyler.post(`/api/applications/${added.applicationId}/interviews`, { stage: 'Technical Interview', scheduledAt: '2030-11-13T14:00:00Z', timezone: 'UTC', note: 'visible note' });
-    return { server, admin, tyler: users.tyler, john: users.john, added, interviewId: interview.json.id };
+    const interview = await users.tyler.addStep(added.applicationId, 'Technical Interview', '2030-11-13T14:00:00Z', { note: 'visible note' });
+    return { server, admin, tyler: users.tyler, john: users.john, added, stepId: interview.id };
   }
 
-  it("lets everyone read each other's status, memo, interviews and history", async () => {
-    const { john, added } = await shared();
+  it("lets everyone read each other's stage, memo and timeline", async () => {
+    const { john, tyler, added } = await shared();
+    await tyler.addStep(added.applicationId, 'Recruiter Screen', '2026-10-02T15:00:00Z');
     const job = (await john.get(`/api/jobs/${added.jobId}`)).json;
-    expect(job.applications[0]).toMatchObject({ isMine: false, status: 'Technical Interview', memo: 'visible memo', owner: { username: 'tyler' } });
-    expect(job.applications[0].interviews[0].note).toBe('visible note');
-    expect(job.applications[0].history.map((entry: any) => entry.newStatus)).toEqual(['Technical Interview', 'Applied']);
+    expect(job.applications[0]).toMatchObject({ isMine: false, stage: 'Technical Interview', furthestStage: 'Technical Interview', memo: 'visible memo', owner: { username: 'tyler' } });
+    expect(job.applications[0].steps.map((step: any) => [step.stage, step.at, step.note])).toEqual([
+      ['Recruiter Screen', '2026-10-02T15:00:00.000Z', null],
+      ['Technical Interview', '2030-11-13T14:00:00.000Z', 'visible note']
+    ]);
   });
 
   it('still lets only the owner change anything', async () => {
-    const { john, tyler, added, interviewId } = await shared();
+    const { john, tyler, added, stepId } = await shared();
     const url = `/api/applications/${added.applicationId}`;
-    expect((await john.patch(url, { status: 'Rejected' })).status).toBe(404);
+    const step = { stage: 'Rejected', at: '2030-11-13T14:00:00Z', timezone: 'UTC' };
     expect((await john.patch(url, { memo: 'changed' })).status).toBe(404);
+    expect((await john.patch(url, { appliedAt: '2026-01-01T00:00:00Z' })).status).toBe(404);
     expect((await john.delete(url)).status).toBe(404);
-    expect((await john.post(`${url}/interviews`, { stage: 'Other', scheduledAt: '2030-11-13T14:00:00Z', timezone: 'UTC' })).status).toBe(404);
-    expect((await john.patch(`/api/interviews/${interviewId}`, { stage: 'Other', scheduledAt: '2030-11-13T14:00:00Z', timezone: 'UTC' })).status).toBe(404);
-    expect((await john.delete(`/api/interviews/${interviewId}`)).status).toBe(404);
-    expect((await tyler.get(`/api/jobs/${added.jobId}`)).json.applications[0]).toMatchObject({ status: 'Technical Interview', memo: 'visible memo', isMine: true });
+    expect((await john.post(`${url}/steps`, step)).status).toBe(404);
+    expect((await john.patch(`/api/steps/${stepId}`, step)).status).toBe(404);
+    expect((await john.delete(`/api/steps/${stepId}`)).status).toBe(404);
+    // There is no stage to set by hand: it comes from the timeline.
+    expect((await tyler.patch(url, { status: 'Rejected' })).status).toBe(400);
+    const mine = (await tyler.get(`/api/jobs/${added.jobId}`)).json.applications[0];
+    expect(mine).toMatchObject({ stage: 'Technical Interview', memo: 'visible memo', isMine: true });
+    expect(mine.steps).toHaveLength(1);
   });
 
   it('never exposes password data or sessions', async () => {
@@ -342,13 +465,15 @@ describe('sharing everything', () => {
     expect((await tyler.get('/api/interviews')).json[0].isMine).toBe(true);
   });
 
-  it('tells connected apps about status and interview changes', async () => {
-    const { server, tyler, added } = await shared();
+  it('tells connected apps about every change to a timeline', async () => {
+    const { server, tyler, added, stepId } = await shared();
     const seen: string[] = [];
     server.ctx.events.subscribe((event) => seen.push(event.type));
-    await tyler.patch(`/api/applications/${added.applicationId}`, { status: 'Final Interview' });
-    await tyler.post(`/api/applications/${added.applicationId}/interviews`, { stage: 'Final Interview', scheduledAt: '2030-12-01T14:00:00Z', timezone: 'UTC' });
-    expect(seen).toEqual(['applications_changed', 'applications_changed']);
+    const final = await tyler.addStep(added.applicationId, 'Final Interview', '2030-12-01T14:00:00Z');
+    await tyler.patch(`/api/steps/${stepId}`, { stage: 'Technical Interview', at: '2030-11-14T14:00:00Z', timezone: 'UTC' });
+    await tyler.delete(`/api/steps/${final.id}`);
+    await tyler.patch(`/api/applications/${added.applicationId}`, { appliedAt: '2026-10-01T08:00:00Z' });
+    expect(seen).toEqual(['applications_changed', 'applications_changed', 'applications_changed', 'applications_changed']);
   });
 });
 
@@ -360,14 +485,14 @@ describe('interview process on the job list', () => {
     const url = serveJob(server, 'acme');
     const one: any = await users.tyler.addJob(url);
     const two: any = await users.tyler.addJob(url, { profileId: second });
-    await users.tyler.patch(`/api/applications/${one.applicationId}`, { status: 'Technical Interview' });
-    await users.tyler.patch(`/api/applications/${one.applicationId}`, { status: 'Rejected' });
-    await users.tyler.patch(`/api/applications/${two.applicationId}`, { status: 'Final Interview' });
-    await users.tyler.post(`/api/applications/${two.applicationId}/interviews`, { stage: 'Final Interview', scheduledAt: '2030-12-01T14:00:00Z', timezone: 'UTC' });
+    await users.tyler.addStep(one.applicationId, 'Technical Interview', '2026-10-05T10:00:00Z');
+    await users.tyler.addStep(one.applicationId, 'Rejected', '2026-10-06T10:00:00Z');
+    await users.tyler.addStep(two.applicationId, 'Final Interview', '2030-12-01T14:00:00Z');
 
     const { applications } = (await users.tyler.get('/api/jobs')).json.items[0];
-    expect(applications[0]).toMatchObject({ status: 'Rejected', furthestStage: 'Technical Interview', interviewCount: 0, nextInterviewAt: null });
-    expect(applications[1]).toMatchObject({ status: 'Final Interview', furthestStage: 'Final Interview', interviewCount: 1, nextInterviewAt: '2030-12-01T14:00:00.000Z' });
+    // The technical interview took place: it is still on the timeline, and still counts.
+    expect(applications[0]).toMatchObject({ stage: 'Rejected', furthestStage: 'Technical Interview', interviewCount: 1, nextInterviewAt: null });
+    expect(applications[1]).toMatchObject({ stage: 'Final Interview', furthestStage: 'Final Interview', interviewCount: 1, nextInterviewAt: '2030-12-01T14:00:00.000Z' });
   });
 
   it('lists a job once however many profiles applied', async () => {
@@ -377,7 +502,7 @@ describe('interview process on the job list', () => {
     const url = serveJob(server, 'acme');
     await users.tyler.addJob(url);
     await users.tyler.addJob(url, { profileId: second });
-    for (const sort of ['recent', 'applied', 'updated', 'company', 'interview', 'status', 'applicants']) {
+    for (const sort of ['recent', 'applied', 'updated', 'company', 'interview', 'stage', 'applicants']) {
       for (const scope of ['all', 'mine']) {
         const list = (await users.tyler.get(`/api/jobs?sort=${sort}&scope=${scope}`)).json;
         expect(list.total, `${sort} ${scope}`).toBe(1);
@@ -395,8 +520,8 @@ describe('person and profile filters', () => {
     const stripe: any = await users.tyler.addJob(serveJob(server, 'stripe'), { profileId: backend });
     await users.tyler.addJob(serveJob(server, 'figma'));
     const johnStripe: any = await users.john.addJob(serveJob(server, 'stripe'));
-    await users.john.patch(`/api/applications/${johnStripe.applicationId}`, { status: 'Offer' });
-    await users.tyler.patch(`/api/applications/${stripe.applicationId}`, { status: 'Rejected' });
+    await users.john.addStep(johnStripe.applicationId, 'Offer', '2026-10-20T10:00:00Z');
+    await users.tyler.addStep(stripe.applicationId, 'Rejected', '2026-10-21T10:00:00Z');
     const ids = { tyler: (await users.tyler.get('/api/auth/me')).json.id, john: (await users.john.get('/api/auth/me')).json.id };
     return { tyler: users.tyler, john: users.john, backend, ids };
   }
@@ -412,9 +537,10 @@ describe('person and profile filters', () => {
   it('require one application to meet every condition', async () => {
     const { john, ids } = await catalog();
     // Stripe has an Offer (John) and a Rejected (Tyler), but Tyler has no Offer.
-    expect(companies(await john.get('/api/jobs?status=Offer'))).toEqual(['stripe']);
-    expect(companies(await john.get(`/api/jobs?status=Offer&personId=${ids.john}`))).toEqual(['stripe']);
-    expect(companies(await john.get(`/api/jobs?status=Offer&personId=${ids.tyler}`))).toEqual([]);
+    expect(companies(await john.get('/api/jobs?stage=Offer'))).toEqual(['stripe']);
+    expect(companies(await john.get(`/api/jobs?stage=Offer&personId=${ids.john}`))).toEqual(['stripe']);
+    expect(companies(await john.get(`/api/jobs?stage=Offer&personId=${ids.tyler}`))).toEqual([]);
+    expect(companies(await john.get(`/api/jobs?stage=Applied&personId=${ids.tyler}`))).toEqual(['figma']);
   });
 });
 
@@ -452,11 +578,28 @@ describe('most applied sort', () => {
 });
 
 describe('pass rates', () => {
-  it('uses the stage reached, where moving back corrects a mistake and a rejection does not', () => {
+  it('uses the furthest stage any step reached, in whatever order, which a rejection keeps', () => {
+    expect(furthestStage([])).toBe('Applied');
     expect(furthestStage(['Applied'])).toBe('Applied');
-    expect(furthestStage(['Applied', 'Technical Interview', 'Rejected'])).toBe('Technical Interview');
-    expect(furthestStage(['Applied', 'Final Interview', 'Recruiter Screen'])).toBe('Recruiter Screen');
+    expect(furthestStage(['Technical Interview', 'Rejected'])).toBe('Technical Interview');
+    expect(furthestStage(['Final Interview', 'Recruiter Screen'])).toBe('Final Interview');
     expect(furthestStage(['Rejected'])).toBe('Applied');
+  });
+
+  it('puts an application at the stage of its latest step, by when each takes place', () => {
+    expect(currentStage([])).toBe('Applied');
+    const steps = [
+      { id: 1, stage: 'Technical Interview', at: '2026-10-08T10:00:00.000Z' },
+      { id: 2, stage: 'Recruiter Screen', at: '2026-10-02T10:00:00.000Z' },
+      { id: 3, stage: 'Technical Interview', at: '2026-10-12T10:00:00.000Z' }
+    ];
+    expect(currentStage(steps)).toBe('Technical Interview');
+    // Two at the same moment: the one put in later.
+    expect(currentStage([...steps, { id: 5, stage: 'Rejected', at: '2026-10-12T10:00:00.000Z' }, { id: 4, stage: 'Offer', at: '2026-10-12T10:00:00.000Z' }])).toBe('Rejected');
+    // An offer or a rejection ends it: only the interviews after it come off.
+    expect(interviewsEndedBy(steps, { stage: 'Rejected', at: '2026-10-09T00:00:00.000Z' }).map((step) => step.id)).toEqual([3]);
+    expect(interviewsEndedBy(steps, { stage: 'Technical Interview', at: '2026-10-01T00:00:00.000Z' })).toEqual([]);
+    expect(interviewsEndedBy([...steps, { id: 6, stage: 'Offer', at: '2026-10-20T00:00:00.000Z' }], { stage: 'Rejected', at: '2026-10-09T00:00:00.000Z' }).map((step) => step.id)).toEqual([3]);
   });
 
   it('compares each stage with the one before it, counting skipped stages as passed', () => {
@@ -486,11 +629,11 @@ describe('pass rates', () => {
     const screened: any = await users.tyler.addJob(serveJob(server, 'one'));
     const rejected: any = await users.tyler.addJob(serveJob(server, 'two'));
     const offered: any = await users.tyler.addJob(serveJob(server, 'three'), { profileId: backend });
-    await users.tyler.patch(`/api/applications/${screened.applicationId}`, { status: 'Recruiter Screen' });
-    await users.tyler.patch(`/api/applications/${rejected.applicationId}`, { status: 'Technical Interview' });
-    await users.tyler.patch(`/api/applications/${rejected.applicationId}`, { status: 'Rejected' });
-    await users.tyler.patch(`/api/applications/${offered.applicationId}`, { status: 'Offer' });
-    await users.tyler.post(`/api/applications/${offered.applicationId}/interviews`, { stage: 'Final Interview', scheduledAt: '2030-12-01T14:00:00Z', timezone: 'UTC' });
+    await users.tyler.addStep(screened.applicationId, 'Recruiter Screen', '2026-10-02T10:00:00Z');
+    await users.tyler.addStep(rejected.applicationId, 'Technical Interview', '2026-10-03T10:00:00Z');
+    await users.tyler.addStep(rejected.applicationId, 'Rejected', '2026-10-04T10:00:00Z');
+    await users.tyler.addStep(offered.applicationId, 'Final Interview', '2026-10-05T10:00:00Z');
+    await users.tyler.addStep(offered.applicationId, 'Offer', '2026-10-09T10:00:00Z');
 
     // John is not admin and has nothing of his own, but sees the whole team. The administrator
     // applies with their own profiles too, and is part of it.
@@ -500,14 +643,15 @@ describe('pass rates', () => {
     expect(john.stats).toMatchObject({ applications: 0, interviews: 0, technical: 0, offers: 0 });
     expect(john.stats.success.percent).toBeNull();
 
+    // Interviews are the interview steps on the timelines: the screen, the technical and the final.
     const tyler = team.find((member: any) => member.user.username === 'tyler');
-    expect(tyler.stats).toMatchObject({ applications: 3, interviews: 1, technical: 2, offers: 1 });
+    expect(tyler.stats).toMatchObject({ applications: 3, interviews: 3, technical: 2, offers: 1 });
     expect(tyler.stats.screenPass.percent).toBe(100);
     expect(tyler.stats.technicalPass).toEqual({ reached: 2, from: 3, percent: 66.7 });
     expect(tyler.stats.success).toEqual({ reached: 1, from: 3, percent: 33.3 });
 
     const byProfile = Object.fromEntries(tyler.profiles.map((entry: any) => [entry.profile.name, entry.stats]));
     expect(byProfile.Backend).toMatchObject({ applications: 1, offers: 1, interviews: 1 });
-    expect(byProfile.tyler).toMatchObject({ applications: 2, offers: 0, technical: 1 });
+    expect(byProfile.tyler).toMatchObject({ applications: 2, offers: 0, technical: 1, interviews: 2 });
   });
 });

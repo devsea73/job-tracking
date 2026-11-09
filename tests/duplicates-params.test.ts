@@ -236,8 +236,7 @@ describe('a link that shows two saved jobs are one', () => {
 
   it('folds them into one, keeping everyone’s applications', async () => {
     const { server, users, fromJobright, fromEmployer } = await savedTwice();
-    await users.tyler.patch(`/api/applications/${fromJobright.applicationId}`, { status: 'Technical Interview' });
-    await users.tyler.post(`/api/applications/${fromJobright.applicationId}/interviews`, { stage: 'Technical Interview', scheduledAt: '2030-11-13T14:00:00Z', timezone: 'UTC', note: 'kept' });
+    await users.tyler.addStep(fromJobright.applicationId, 'Technical Interview', '2030-11-13T14:00:00Z', { note: 'kept' });
 
     const bridge: any = await users.mike.addJob(`${GREENHOUSE}&jr_id=${JR}`);
     expect(counts(server)).toEqual({ jobs: 1, applications: 3 });
@@ -245,8 +244,8 @@ describe('a link that shows two saved jobs are one', () => {
     const job = (await users.mike.get(`/api/jobs/${bridge.jobId}`)).json;
     expect(job.applications.map((item: any) => item.owner.username).sort()).toEqual(['john', 'mike', 'tyler']);
     const tyler = job.applications.find((item: any) => item.owner.username === 'tyler');
-    expect(tyler).toMatchObject({ status: 'Technical Interview', memo: 'from jobright', furthestStage: 'Technical Interview' });
-    expect(tyler.interviews[0].note).toBe('kept');
+    expect(tyler).toMatchObject({ stage: 'Technical Interview', memo: 'from jobright', furthestStage: 'Technical Interview' });
+    expect(tyler.steps.map((step: any) => [step.stage, step.at, step.note])).toEqual([['Technical Interview', '2030-11-13T14:00:00.000Z', 'kept']]);
     expect(job.urls.map((url: any) => url.sourcePlatform).sort()).toEqual(['greenhouse', 'jobright']);
     expect([fromJobright.jobId, fromEmployer.jobId]).toContain(bridge.jobId);
 
@@ -256,27 +255,35 @@ describe('a link that shows two saved jobs are one', () => {
     expect(job.description).toContain('payments infrastructure');
   });
 
-  it('joins applications when one profile applied to both', async () => {
+  it('joins applications when one profile applied to both, with both timelines', async () => {
     const server = await createTestServer();
     const { users } = await createUsers(server.app, 'tyler');
     servePrompt(server);
     const a: any = await users.tyler.addJob(JOBRIGHT, { memo: 'first memo' });
     const b: any = await users.tyler.addJob(GREENHOUSE, { memo: 'second memo', resolution: { action: 'new' } });
-    await users.tyler.patch(`/api/applications/${a.applicationId}`, { status: 'Recruiter Screen' });
-    await users.tyler.patch(`/api/applications/${b.applicationId}`, { status: 'Final Interview' });
-    await users.tyler.post(`/api/applications/${a.applicationId}/interviews`, { stage: 'Recruiter Screen', scheduledAt: '2030-01-01T10:00:00Z', timezone: 'UTC' });
-    await users.tyler.post(`/api/applications/${b.applicationId}/interviews`, { stage: 'Final Interview', scheduledAt: '2030-02-01T10:00:00Z', timezone: 'UTC' });
+    // One applied earlier; the other was written down here earlier. Each date is kept on its own.
+    const sqlite = server.ctx.db.$client;
+    const dates = sqlite.prepare('UPDATE applications SET applied_at = ?, created_at = ? WHERE id = ?');
+    dates.run('2030-01-01T09:00:00.000Z', '2030-01-20T09:00:00.000Z', a.applicationId);
+    dates.run('2030-01-10T09:00:00.000Z', '2030-01-02T09:00:00.000Z', b.applicationId);
+    await users.tyler.addStep(a.applicationId, 'Recruiter Screen', '2030-01-05T10:00:00Z');
+    await users.tyler.addStep(a.applicationId, 'Technical Interview', '2030-01-12T10:00:00Z');
+    await users.tyler.addStep(b.applicationId, 'Final Interview', '2030-02-01T10:00:00Z');
+    // Written on the first copy, but the latest step of all.
+    await users.tyler.addStep(a.applicationId, 'Rejected', '2030-02-03T10:00:00Z');
 
     const merged: any = await users.tyler.addJob(`${GREENHOUSE}&jr_id=${JR}`);
     expect(merged.outcome).toBe('already_applied');
     expect(counts(server)).toEqual({ jobs: 1, applications: 1 });
     const job = (await users.tyler.get(`/api/jobs/${merged.jobId}`)).json;
     const only = job.applications[0];
-    expect(only).toMatchObject({ status: 'Final Interview', furthestStage: 'Final Interview' });
+    // The stage is the latest step's, wherever it came from; the furthest is from either copy.
+    expect(only).toMatchObject({ stage: 'Rejected', furthestStage: 'Final Interview', appliedAt: '2030-01-01T09:00:00.000Z', createdAt: '2030-01-02T09:00:00.000Z' });
     expect(only.memo).toContain('first memo');
     expect(only.memo).toContain('second memo');
-    expect(only.interviews).toHaveLength(2);
-    expect(only.history.map((entry: any) => entry.newStatus)).toEqual(expect.arrayContaining(['Recruiter Screen', 'Final Interview']));
+    expect(only.steps.map((step: any) => step.stage)).toEqual(['Recruiter Screen', 'Technical Interview', 'Final Interview', 'Rejected']);
+    expect(only.interviewCount).toBe(3);
+    expect(sqlite.prepare('SELECT COUNT(*) AS c FROM application_steps WHERE application_id != ?').get(only.id)).toEqual({ c: 0 });
   });
 
   it('keeps search working after folding them', async () => {

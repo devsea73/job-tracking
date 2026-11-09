@@ -1,11 +1,11 @@
-import { CalendarDays, CircleHelp, CodeXml, Phone, Send, Trophy, UserCheck, UsersRound, X, type LucideIcon } from 'lucide-react';
+import { CircleHelp, CodeXml, Phone, Send, Trophy, UsersRound, X, type LucideIcon } from 'lucide-react';
 import type { CSSProperties, ReactNode } from 'react';
-import type { ApplicationStatus, InterviewStage } from '@shared/constants';
+import type { Stage } from '@shared/constants';
 import { cn } from '@/lib/utils';
 import { Tooltip } from './ui/misc';
 
-/** One symbol per meaning, used everywhere, so that it only has to be learned once. */
-export const STATUS_ICONS: Record<ApplicationStatus, LucideIcon> = {
+/** One symbol per stage, used everywhere, so that it only has to be learned once. */
+export const STAGE_ICONS: Record<Stage, LucideIcon> = {
   Applied: Send,
   'Recruiter Screen': Phone,
   'Technical Interview': CodeXml,
@@ -14,15 +14,7 @@ export const STATUS_ICONS: Record<ApplicationStatus, LucideIcon> = {
   Rejected: X
 };
 
-export const STAGE_ICONS: Record<InterviewStage, LucideIcon> = {
-  'Recruiter Screen': Phone,
-  'Technical Interview': CodeXml,
-  'Hiring Manager': UserCheck,
-  'Final Interview': UsersRound,
-  Other: CalendarDays
-};
-
-const STATUS_TOKENS: Record<ApplicationStatus, string> = {
+const STAGE_TOKENS: Record<Stage, string> = {
   Applied: 'applied',
   'Recruiter Screen': 'recruiter',
   'Technical Interview': 'technical',
@@ -31,13 +23,13 @@ const STATUS_TOKENS: Record<ApplicationStatus, string> = {
   Rejected: 'rejected'
 };
 
-export function statusStyle(status: ApplicationStatus): CSSProperties {
-  const token = STATUS_TOKENS[status];
-  return { backgroundColor: `var(--status-${token}-bg)`, color: `var(--status-${token}-ink)` };
+export function stageStyle(stage: Stage): CSSProperties {
+  const token = STAGE_TOKENS[stage];
+  return { backgroundColor: `var(--stage-${token}-bg)`, color: `var(--stage-${token}-ink)` };
 }
 
-export function statusInk(status: ApplicationStatus): string {
-  return `var(--status-${STATUS_TOKENS[status]}-ink)`;
+export function stageInk(stage: Stage): string {
+  return `var(--stage-${STAGE_TOKENS[stage]}-ink)`;
 }
 
 /** An icon and a word, for menus: the one place where symbols are being explained. */

@@ -8,7 +8,6 @@ import {
   Building2,
   CalendarCheck,
   CalendarClock,
-  CalendarDays,
   ChevronLeft,
   ChevronRight,
   ChevronsLeft,
@@ -33,10 +32,10 @@ import {
   type LucideIcon
 } from 'lucide-react';
 import type { CurrentUser, JobListItem, JobListQuery } from '@shared/api';
-import { APPLICATION_STATUSES, INTERVIEW_STAGES, type ApplicationStatus, type InterviewStage, type JobScope, type JobSort } from '@shared/constants';
-import { AvatarStack, canDeleteJob, HighlightButton, ProcessLine, StatusSelect } from '@/components/job-bits';
+import { STAGES, type JobScope, type JobSort, type Stage } from '@shared/constants';
+import { AvatarStack, canDeleteJob, HighlightButton, ProcessLine, StageBadge } from '@/components/job-bits';
 import { JobTags } from '@/components/job-tags';
-import { IconLabel, STAGE_ICONS, STATUS_ICONS, Symbol } from '@/components/symbols';
+import { IconLabel, STAGE_ICONS, Symbol } from '@/components/symbols';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/field';
@@ -45,6 +44,7 @@ import { ANY, Select } from '@/components/ui/select';
 import { useToast } from '@/components/ui/toast';
 import { errorMessage, PAGE_SIZES, useCompanies, useDeleteJob, useJobPage, useTeam, type PageSize } from '@/lib/api';
 import { cn, dayBoundary, formatDate, formatDateTime, formatShortAgo, formatShortDate } from '@/lib/utils';
+import { AddStepButton } from './step-form';
 
 export type JobsView = 'mine' | 'all' | 'highlighted';
 
@@ -54,7 +54,7 @@ const SORT_OPTIONS: Array<{ value: JobSort; label: string; icon: LucideIcon }> =
   { value: 'updated', label: 'Recently updated', icon: RefreshCw },
   { value: 'company', label: 'Company name', icon: ArrowDownAZ },
   { value: 'interview', label: 'Interview date', icon: CalendarClock },
-  { value: 'status', label: 'Application status', icon: Activity },
+  { value: 'stage', label: 'Stage', icon: Activity },
   { value: 'applicants', label: 'Most applied', icon: Users }
 ];
 
@@ -69,7 +69,6 @@ const VIEW_TITLES: Record<JobsView, string> = { mine: 'My Applications', all: 'A
 interface Filters {
   q: string;
   company: string;
-  status: string;
   stage: string;
   from: string;
   to: string;
@@ -81,7 +80,7 @@ interface Filters {
   sort: JobSort;
 }
 
-const DEFAULT_FILTERS: Filters = { q: '', company: '', status: ANY, stage: ANY, from: '', to: '', scope: 'all', person: ANY, profile: ANY, highlightedOnly: false, highlightFirst: false, sort: 'recent' };
+const DEFAULT_FILTERS: Filters = { q: '', company: '', stage: ANY, from: '', to: '', scope: 'all', person: ANY, profile: ANY, highlightedOnly: false, highlightFirst: false, sort: 'recent' };
 
 /** My Applications is about when I applied; the shared lists about when jobs arrived. */
 const defaultsFor = (view: JobsView): Filters => (view === 'mine' ? { ...DEFAULT_FILTERS, sort: 'applied' } : DEFAULT_FILTERS);
@@ -171,7 +170,10 @@ const Row = memo(function Row({ job, view, columnCount, expanded, canDelete, onT
         </td>
         <td className="py-1.5 pr-3">
           {mine.length === 1 ? (
-            <StatusSelect applicationId={mine[0].id} status={mine[0].status} />
+            <span className="inline-flex items-center gap-0.5" onClick={(event) => event.stopPropagation()}>
+              <StageBadge stage={mine[0].stage} />
+              <AddStepButton applicationId={mine[0].id} current={mine[0].stage} />
+            </span>
           ) : mine.length > 1 ? (
             <button
               type="button"
@@ -237,7 +239,7 @@ const Row = memo(function Row({ job, view, columnCount, expanded, canDelete, onT
           <td colSpan={columnCount - 1} className="py-1 pr-4">
             <ul className="divide-y divide-border">
               {job.applications.map((application) => (
-                <ProcessLine key={application.id} application={application} />
+                <ProcessLine key={application.id} application={application} action={<AddStepButton applicationId={application.id} current={application.stage} />} />
               ))}
             </ul>
           </td>
@@ -355,8 +357,7 @@ export function JobsPage({ view, user, onOpenJob, onAddJob, focusSearchSignal }:
     return {
       q: typedSearch.trim() || undefined,
       company: typedCompany.trim() || undefined,
-      status: filters.status === ANY ? undefined : (filters.status as ApplicationStatus),
-      stage: filters.stage === ANY ? undefined : (filters.stage as InterviewStage),
+      stage: filters.stage === ANY ? undefined : (filters.stage as Stage),
       interviewFrom: filters.from ? dayBoundary(filters.from, 'start') : undefined,
       interviewTo: filters.to ? dayBoundary(filters.to, 'end') : undefined,
       highlighted: view === 'highlighted' || filters.highlightedOnly || undefined,
@@ -366,7 +367,7 @@ export function JobsPage({ view, user, onOpenJob, onAddJob, focusSearchSignal }:
       profileId: filters.profile === ANY ? undefined : Number(filters.profile),
       sort: filters.sort
     };
-  }, [view, typedSearch, typedCompany, filters.status, filters.stage, filters.from, filters.to, filters.scope, filters.person, filters.profile, filters.highlightedOnly, filters.highlightFirst, filters.sort]);
+  }, [view, typedSearch, typedCompany, filters.stage, filters.from, filters.to, filters.scope, filters.person, filters.profile, filters.highlightedOnly, filters.highlightFirst, filters.sort]);
 
   // A new search, filter or sort starts again from the first page.
   const queryKey = JSON.stringify(query);
@@ -396,7 +397,7 @@ export function JobsPage({ view, user, onOpenJob, onAddJob, focusSearchSignal }:
   const profileOptions = profileOwners.flatMap((member) =>
     member.profiles.map((entry) => ({ value: String(entry.profile.id), label: profileOwners.length > 1 ? `${entry.profile.name} (${member.user.displayName ?? member.user.username})` : entry.profile.name }))
   );
-  const filterCount = [filters.company, filters.status !== ANY, filters.stage !== ANY, filters.from, filters.to, filters.person !== ANY, filters.profile !== ANY].filter(Boolean).length;
+  const filterCount = [filters.company, filters.stage !== ANY, filters.from, filters.to, filters.person !== ANY, filters.profile !== ANY].filter(Boolean).length;
   const anyFilter = filterCount > 0 || !!filters.q || filters.highlightedOnly || (view !== 'mine' && filters.scope !== 'all');
   const columnCount = view === 'mine' ? 10 : 8;
 
@@ -473,18 +474,11 @@ export function JobsPage({ view, user, onOpenJob, onAddJob, focusSearchSignal }:
             ) : null}
             <Select ariaLabel="Profile" className="w-[160px]" leading={<User className="size-3.5 text-ink-3" aria-hidden />} value={filters.profile} onChange={(profile) => set({ profile })} options={[{ value: ANY, label: 'Any profile' }, ...profileOptions]} />
             <Select
-              ariaLabel="Status filter"
-              className="w-[196px]"
-              value={filters.status}
-              onChange={(value) => set({ status: value })}
-              options={[{ value: ANY, label: <IconLabel icon={Activity}>Any status</IconLabel> }, ...APPLICATION_STATUSES.map((value) => ({ value, label: <IconLabel icon={STATUS_ICONS[value]}>{value}</IconLabel> }))]}
-            />
-            <Select
-              ariaLabel="Interview stage"
+              ariaLabel="Stage filter"
               className="w-[196px]"
               value={filters.stage}
               onChange={(value) => set({ stage: value })}
-              options={[{ value: ANY, label: <IconLabel icon={CalendarDays}>Any stage</IconLabel> }, ...INTERVIEW_STAGES.map((value) => ({ value, label: <IconLabel icon={STAGE_ICONS[value]}>{value}</IconLabel> }))]}
+              options={[{ value: ANY, label: <IconLabel icon={Activity}>Any stage</IconLabel> }, ...STAGES.map((value) => ({ value, label: <IconLabel icon={STAGE_ICONS[value]}>{value}</IconLabel> }))]}
             />
             {/* Kept together, so that a narrow window never separates the two ends of the range. */}
             <span className="inline-flex items-center gap-1.5">
@@ -549,7 +543,7 @@ export function JobsPage({ view, user, onOpenJob, onAddJob, focusSearchSignal }:
               <col className="w-[36px]" />
               <col className="w-[190px]" />
               <col />
-              <col className="w-[44px]" />
+              <col className="w-[72px]" />
               {view === 'mine' ? (
                 <>
                   <col className="w-[150px]" />
@@ -571,7 +565,7 @@ export function JobsPage({ view, user, onOpenJob, onAddJob, focusSearchSignal }:
                   <Symbol icon={Briefcase} label="Job title" />
                 </th>
                 <th className="py-1.5 pr-3">
-                  <Symbol icon={Activity} label={view === 'mine' ? 'Status' : 'My status'} />
+                  <Symbol icon={Activity} label={view === 'mine' ? 'Stage' : 'My stage'} />
                 </th>
                 {view === 'mine' ? (
                   <>

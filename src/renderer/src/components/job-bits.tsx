@@ -1,44 +1,22 @@
 import { useQueryClient } from '@tanstack/react-query';
+import type { ReactNode } from 'react';
 import { CalendarClock, Star, StickyNote } from 'lucide-react';
 import type { ApplicationSummary, AvatarSubject, CurrentUser, UserRef } from '@shared/api';
-import { APPLICATION_STATUSES, type ApplicationStatus } from '@shared/constants';
+import type { Stage } from '@shared/constants';
 import { PIPELINE_STAGES, type PipelineStage } from '@shared/pipeline';
-import { errorMessage, useAvatarImage, useSetHighlight, useUpdateApplication } from '@/lib/api';
+import { errorMessage, useAvatarImage, useSetHighlight } from '@/lib/api';
 import { cn, formatDateTime } from '@/lib/utils';
-import { IconLabel, STATUS_ICONS, statusInk, statusStyle, Symbol } from './symbols';
-import { Select } from './ui/select';
+import { STAGE_ICONS, stageInk, stageStyle, Symbol } from './symbols';
 import { Tooltip } from './ui/misc';
 import { useToast } from './ui/toast';
 
-/** A status as a colored symbol. Its name is one hover away. */
-export function StatusBadge({ status, className }: { status: ApplicationStatus; className?: string }) {
-  const Icon = STATUS_ICONS[status];
+/** A stage as a colored symbol. Its name is one hover away. */
+export function StageBadge({ stage, className, label }: { stage: Stage; className?: string; label?: string }) {
+  const Icon = STAGE_ICONS[stage];
   return (
-    <span role="img" aria-label={status} title={status} className={cn('inline-flex size-6 shrink-0 items-center justify-center rounded-full', className)} style={statusStyle(status)}>
+    <span role="img" aria-label={label ?? stage} title={label ?? stage} className={cn('inline-flex size-6 shrink-0 items-center justify-center rounded-full', className)} style={stageStyle(stage)}>
       <Icon className="size-3.5" aria-hidden />
     </span>
-  );
-}
-
-/** Saves immediately, so that changing a status is one click and no "save" button. */
-export function StatusSelect({ applicationId, status }: { applicationId: number; status: ApplicationStatus }) {
-  const update = useUpdateApplication();
-  const toast = useToast();
-  const shown = update.isPending && update.variables?.body.status ? update.variables.body.status : status;
-  return (
-    <Select
-      value={shown}
-      ariaLabel="Application status"
-      onChange={(next) =>
-        update.mutate(
-          { id: applicationId, body: { status: next as ApplicationStatus } },
-          { onError: (error) => toast.show(errorMessage(error), 'error') }
-        )
-      }
-      options={APPLICATION_STATUSES.map((value) => ({ value, label: <IconLabel icon={STATUS_ICONS[value]}>{value}</IconLabel> }))}
-      renderValue={<StatusBadge status={shown} className="hover:brightness-95 dark:hover:brightness-110" />}
-      triggerClassName="rounded-full"
-    />
   );
 }
 
@@ -109,14 +87,14 @@ export function Avatar({
   label,
   size = 'sm',
   ring = true,
-  status
+  stage
 }: {
   subject: AvatarSubject;
   label: string;
   size?: keyof typeof AVATAR_SIZES;
   ring?: boolean;
   /** Marks the avatar with this application's current stage. */
-  status?: ApplicationStatus;
+  stage?: Stage;
 }) {
   const image = useAvatarImage(subject);
   return (
@@ -129,7 +107,7 @@ export function Avatar({
         style={{ backgroundColor: subject.color }}
       >
         {image ? <img src={image} alt="" className="size-full rounded-full object-cover" /> : subject.initials}
-        {status ? <span aria-hidden className="absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full ring-2 ring-surface" style={{ backgroundColor: statusInk(status) }} /> : null}
+        {stage ? <span aria-hidden className="absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full ring-2 ring-surface" style={{ backgroundColor: stageInk(stage) }} /> : null}
       </span>
     </Tooltip>
   );
@@ -145,7 +123,7 @@ export function AvatarStack({ applications, size = 'sm', showCount = true }: { a
     <div className="flex items-center gap-1.5" onClick={(event) => event.stopPropagation()}>
       <div className={cn('flex items-center', size === 'sm' ? '-space-x-1.5' : '-space-x-2')}>
         {shown.map((application) => (
-          <Avatar key={application.id} subject={application.profile} label={`${applicationLabel(application)}: ${application.status}`} size={size} status={application.status} />
+          <Avatar key={application.id} subject={application.profile} label={`${applicationLabel(application)}: ${application.stage}`} size={size} stage={application.stage} />
         ))}
       </div>
       {showCount ? (
@@ -158,23 +136,23 @@ export function AvatarStack({ applications, size = 'sm', showCount = true }: { a
 }
 
 /** The whole process at a glance: a symbol per stage, passed in green, the current one in its color. */
-export function ProcessSteps({ status, furthest, className }: { status: ApplicationStatus; furthest: PipelineStage; className?: string }) {
-  const rejected = status === 'Rejected';
+export function ProcessSteps({ stage: current, furthest, className }: { stage: Stage; furthest: PipelineStage; className?: string }) {
+  const rejected = current === 'Rejected';
   const furthestIndex = PIPELINE_STAGES.indexOf(furthest);
   const stages = rejected ? PIPELINE_STAGES.slice(0, furthestIndex + 1) : PIPELINE_STAGES;
-  const RejectedIcon = STATUS_ICONS.Rejected;
+  const RejectedIcon = STAGE_ICONS.Rejected;
   return (
-    <ol className={cn('flex items-center gap-0.5', className)} aria-label={rejected ? `Reached ${furthest}, then rejected` : `Current stage: ${status}`}>
+    <ol className={cn('flex items-center gap-0.5', className)} aria-label={rejected ? `Reached ${furthest}, then rejected` : `Current stage: ${current}`}>
       {stages.map((stage, index) => {
-        const Icon = STATUS_ICONS[stage];
-        const current = !rejected && stage === status;
-        const passed = !current && index <= furthestIndex;
+        const Icon = STAGE_ICONS[stage];
+        const isCurrent = !rejected && stage === current;
+        const passed = !isCurrent && index <= furthestIndex;
         return (
           <li key={stage} className="inline-flex items-center gap-0.5" title={stage}>
-            {index > 0 ? <span className={cn('h-px w-2', passed || current ? 'bg-success-ink' : 'bg-border-strong')} aria-hidden /> : null}
+            {index > 0 ? <span className={cn('h-px w-2', passed || isCurrent ? 'bg-success-ink' : 'bg-border-strong')} aria-hidden /> : null}
             <span
-              className={cn('inline-flex size-5 items-center justify-center rounded-full', passed && 'bg-success-soft text-success-ink', !current && !passed && 'border border-border text-ink-3', current && 'ring-1 ring-current')}
-              style={current ? statusStyle(stage) : undefined}
+              className={cn('inline-flex size-5 items-center justify-center rounded-full', passed && 'bg-success-soft text-success-ink', !isCurrent && !passed && 'border border-border text-ink-3', isCurrent && 'ring-1 ring-current')}
+              style={isCurrent ? stageStyle(stage) : undefined}
             >
               <Icon className="size-3" aria-hidden />
             </span>
@@ -184,7 +162,7 @@ export function ProcessSteps({ status, furthest, className }: { status: Applicat
       {rejected ? (
         <li className="inline-flex items-center gap-0.5" title="Rejected">
           <span className="h-px w-2 bg-border-strong" aria-hidden />
-          <span className="inline-flex size-5 items-center justify-center rounded-full ring-1 ring-current" style={statusStyle('Rejected')}>
+          <span className="inline-flex size-5 items-center justify-center rounded-full ring-1 ring-current" style={stageStyle('Rejected')}>
             <RejectedIcon className="size-3" aria-hidden />
           </span>
         </li>
@@ -193,17 +171,18 @@ export function ProcessSteps({ status, furthest, className }: { status: Applicat
   );
 }
 
-/** One line per profile in an expanded job row. Only your own can be changed from here. */
-export function ProcessLine({ application }: { application: ApplicationSummary }) {
+/** One line per profile in an expanded job row. `action` is offered on your own: adding a step. */
+export function ProcessLine({ application, action }: { application: ApplicationSummary; action?: ReactNode }) {
   return (
     <li className="flex items-center gap-3 py-1.5">
       <Avatar subject={application.profile} label={applicationLabel(application)} ring={false} />
       <span className="w-[170px] min-w-0 truncate" title={applicationLabel(application)}>
         {applicationLabel(application)}
       </span>
-      <ProcessSteps status={application.status} furthest={application.furthestStage} className="flex-1" />
-      <span onClick={(event) => event.stopPropagation()} className="inline-flex w-7 justify-center">
-        {application.isMine ? <StatusSelect applicationId={application.id} status={application.status} /> : <StatusBadge status={application.status} />}
+      <ProcessSteps stage={application.stage} furthest={application.furthestStage} className="flex-1" />
+      <span onClick={(event) => event.stopPropagation()} className="inline-flex w-14 items-center justify-end gap-1">
+        <StageBadge stage={application.stage} />
+        {application.isMine ? action : null}
       </span>
       <span className="inline-flex w-[176px] items-center gap-1.5 text-[12px] tabular-nums text-ink-2">
         {application.nextInterviewAt ? (

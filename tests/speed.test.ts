@@ -14,7 +14,8 @@ function serveJob(server: TestServer, slug: string) {
 }
 
 const counters = (server: TestServer, jobId: number) => server.ctx.db.$client.prepare('SELECT application_count, last_activity_at, updated_at FROM jobs WHERE id = ?').get(jobId) as { application_count: number; last_activity_at: string; updated_at: string };
-const furthest = (server: TestServer, applicationId: number) => (server.ctx.db.$client.prepare('SELECT furthest_rank FROM applications WHERE id = ?').get(applicationId) as { furthest_rank: number }).furthest_rank;
+/** The stage and furthest stage the database keeps on an application, worked out from its steps. */
+const kept = (server: TestServer, applicationId: number) => server.ctx.db.$client.prepare('SELECT stage, furthest_rank FROM applications WHERE id = ?').get(applicationId) as { stage: string; furthest_rank: number };
 
 describe('counters kept by the database', () => {
   it('count applications as they come and go', async () => {
@@ -50,20 +51,52 @@ describe('counters kept by the database', () => {
     expect(counters(server, first.jobId).last_activity_at > before).toBe(true);
   });
 
-  it('remember the furthest stage through a rejection, and correct it on a step back', async () => {
+  it('keep the stage of the latest step and the furthest stage, through a rejection and a step taken off', async () => {
     const server = await createTestServer();
     const { users } = await createUsers(server.app, 'tyler');
     const { applicationId }: any = await users.tyler.addJob(serveJob(server, 'acme'));
-    expect(furthest(server, applicationId)).toBe(0);
-    await users.tyler.patch(`/api/applications/${applicationId}`, { status: 'Technical Interview' });
-    expect(furthest(server, applicationId)).toBe(2);
-    await users.tyler.patch(`/api/applications/${applicationId}`, { status: 'Recruiter Screen' });
-    expect(furthest(server, applicationId)).toBe(1);
-    await users.tyler.patch(`/api/applications/${applicationId}`, { status: 'Technical Interview' });
-    await users.tyler.patch(`/api/applications/${applicationId}`, { status: 'Rejected' });
-    expect(furthest(server, applicationId)).toBe(2);
-    await users.tyler.patch(`/api/applications/${applicationId}`, { status: 'Offer' });
-    expect(furthest(server, applicationId)).toBe(4);
+    expect(kept(server, applicationId)).toEqual({ stage: 'Applied', furthest_rank: 0 });
+    const screen = await users.tyler.addStep(applicationId, 'Recruiter Screen', '2026-10-01T10:00:00.000Z');
+    const technical = await users.tyler.addStep(applicationId, 'Technical Interview', '2026-10-08T10:00:00.000Z');
+    expect(kept(server, applicationId)).toEqual({ stage: 'Technical Interview', furthest_rank: 2 });
+    // The latest by when it takes place, not the one put in last.
+    await users.tyler.addStep(applicationId, 'Recruiter Screen', '2026-10-03T10:00:00.000Z');
+    expect(kept(server, applicationId)).toEqual({ stage: 'Technical Interview', furthest_rank: 2 });
+    const rejected = await users.tyler.addStep(applicationId, 'Rejected', '2026-10-10T10:00:00.000Z');
+    expect(kept(server, applicationId)).toEqual({ stage: 'Rejected', furthest_rank: 2 });
+    // A step put in by mistake is taken off, and the furthest stage goes back with it.
+    expect((await users.tyler.delete(`/api/steps/${technical.id}`)).status).toBe(200);
+    expect(kept(server, applicationId)).toEqual({ stage: 'Rejected', furthest_rank: 1 });
+    // Changing a step changes both.
+    expect((await users.tyler.patch(`/api/steps/${rejected.id}`, { stage: 'Offer', at: '2026-10-10T10:00:00.000Z', timezone: 'UTC' })).status).toBe(200);
+    expect(kept(server, applicationId)).toEqual({ stage: 'Offer', furthest_rank: 4 });
+    expect((await users.tyler.patch(`/api/steps/${screen.id}`, { stage: 'Recruiter Screen', at: '2026-10-20T10:00:00.000Z', timezone: 'UTC' })).status).toBe(200);
+    expect(kept(server, applicationId)).toEqual({ stage: 'Recruiter Screen', furthest_rank: 4 });
+    // Every step gone: back to Applied.
+    const sqlite = server.ctx.db.$client;
+    sqlite.prepare('DELETE FROM application_steps WHERE application_id = ?').run(applicationId);
+    expect(kept(server, applicationId)).toEqual({ stage: 'Applied', furthest_rank: 0 });
+  });
+
+  it('keep up with steps written straight into the database, and moved from one application to another', async () => {
+    const server = await createTestServer();
+    const { users } = await createUsers(server.app, 'tyler');
+    const second = (await users.tyler.post('/api/profiles', { name: 'Second' })).json.id;
+    const url = serveJob(server, 'acme');
+    const one: any = await users.tyler.addJob(url);
+    const two: any = await users.tyler.addJob(url, { profileId: second });
+    const sqlite = server.ctx.db.$client;
+    const insert = sqlite.prepare('INSERT INTO application_steps (application_id, stage, at, timezone) VALUES (?, ?, ?, ?)');
+    insert.run(one.applicationId, 'Final Interview', '2026-10-05T10:00:00.000Z', 'UTC');
+    insert.run(two.applicationId, 'Recruiter Screen', '2026-10-09T10:00:00.000Z', 'UTC');
+    expect(kept(server, one.applicationId)).toEqual({ stage: 'Final Interview', furthest_rank: 3 });
+    expect(kept(server, two.applicationId)).toEqual({ stage: 'Recruiter Screen', furthest_rank: 1 });
+    // What merging two copies of a job does: the kept application takes the other's steps.
+    sqlite.prepare('UPDATE application_steps SET application_id = ? WHERE application_id = ?').run(one.applicationId, two.applicationId);
+    expect(kept(server, one.applicationId)).toEqual({ stage: 'Recruiter Screen', furthest_rank: 3 });
+    expect(kept(server, two.applicationId)).toEqual({ stage: 'Applied', furthest_rank: 0 });
+    // A stage the timeline cannot have is refused.
+    expect(() => insert.run(one.applicationId, 'Applied', '2026-10-10T10:00:00.000Z', 'UTC')).toThrow(/CHECK/);
   });
 
   it('are filled in for data from before this version', () => {
@@ -92,6 +125,16 @@ describe('counters kept by the database', () => {
       const { sqlite } = migrated;
       expect(sqlite.prepare('SELECT application_count, last_activity_at FROM jobs WHERE id = 10').get()).toEqual({ application_count: 2, last_activity_at: '2026-03-01T00:00:00.000Z' });
       expect(sqlite.prepare('SELECT furthest_rank FROM applications WHERE id = 100').get()).toEqual({ furthest_rank: 3 });
+      // The status history became a timeline, and the stage comes from it: rejected after the final.
+      expect(sqlite.prepare('SELECT stage FROM application_steps WHERE application_id = 100 ORDER BY at, id').pluck().all()).toEqual(['Final Interview', 'Rejected']);
+      expect(sqlite.prepare('SELECT id, stage FROM applications ORDER BY id').all()).toEqual([
+        { id: 100, stage: 'Rejected' },
+        { id: 101, stage: 'Applied' }
+      ]);
+      // Without a first status change to date it by, the record counts as written when it was applied.
+      const plain = sqlite.prepare('SELECT applied_at, created_at FROM applications WHERE id = 101').get() as { applied_at: string; created_at: string };
+      expect(plain.created_at).toBe(plain.applied_at);
+      expect(sqlite.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('interviews', 'application_status_history')`).all()).toEqual([]);
       expect(sqlite.prepare(`SELECT rowid FROM jobs_fts WHERE jobs_fts MATCH 'pay*'`).all()).toEqual([{ rowid: 10 }]);
       expect(sqlite.prepare(`SELECT rowid FROM applications_fts WHERE applications_fts MATCH 'find*'`).all()).toEqual([{ rowid: 100 }]);
     } finally {
@@ -121,17 +164,17 @@ describe('cached responses', () => {
     const server = await createTestServer();
     const { users } = await createUsers(server.app, 'tyler', 'john');
     const added: any = await users.tyler.addJob(serveJob(server, 'acme'));
-    const status = async () => (await users.john.get('/api/jobs')).json.items[0].applications[0].status;
+    const stage = async () => (await users.john.get('/api/jobs')).json.items[0].applications[0].stage;
 
-    expect(await status()).toBe('Applied');
-    expect(await status()).toBe('Applied');
-    await users.tyler.patch(`/api/applications/${added.applicationId}`, { status: 'Offer' });
-    expect(await status()).toBe('Offer');
+    expect(await stage()).toBe('Applied');
+    expect(await stage()).toBe('Applied');
+    await users.tyler.addStep(added.applicationId, 'Offer', '2026-10-01T10:00:00.000Z');
+    expect(await stage()).toBe('Offer');
     const team = (await users.john.get('/api/team')).json;
     expect(team.find((member: any) => member.user.username === 'tyler').stats.offers).toBe(1);
 
-    await users.tyler.patch(`/api/applications/${added.applicationId}`, { status: 'Rejected' });
-    expect(await status()).toBe('Rejected');
+    await users.tyler.addStep(added.applicationId, 'Rejected', '2026-10-03T10:00:00.000Z');
+    expect(await stage()).toBe('Rejected');
     await users.john.post(`/api/jobs/${added.jobId}/highlight`, { highlighted: true });
     expect((await users.tyler.get('/api/jobs')).json.items[0].isHighlighted).toBe(true);
   });
@@ -262,7 +305,7 @@ describe('with a large data set', () => {
 
   it('pages through every job exactly once', async () => {
     const { tyler } = await loaded();
-    for (const sort of ['recent', 'applied', 'updated', 'company', 'interview', 'status', 'applicants']) {
+    for (const sort of ['recent', 'applied', 'updated', 'company', 'interview', 'stage', 'applicants']) {
       const seen = new Set<number>();
       for (let offset = 0; offset < 400; offset += 50) {
         const { items, total } = (await tyler.get(`/api/jobs?sort=${sort}&limit=50&offset=${offset}`)).json;
@@ -280,10 +323,28 @@ describe('with a large data set', () => {
     for (const member of team) {
       const expected = sqlite.prepare('SELECT COUNT(*) AS c FROM applications WHERE user_id = ?').get(member.user.id) as { c: number };
       expect(member.stats.applications).toBe(expected.c);
-      const offers = sqlite.prepare(`SELECT COUNT(DISTINCT h.application_id) AS c FROM application_status_history h JOIN applications a ON a.id = h.application_id WHERE a.user_id = ? AND h.new_status = 'Offer'`).get(member.user.id) as { c: number };
+      const offers = sqlite.prepare(`SELECT COUNT(DISTINCT s.application_id) AS c FROM application_steps s JOIN applications a ON a.id = s.application_id WHERE a.user_id = ? AND s.stage = 'Offer'`).get(member.user.id) as { c: number };
       expect(member.stats.offers).toBe(offers.c);
-      const interviews = sqlite.prepare('SELECT COUNT(*) AS c FROM interviews i JOIN applications a ON a.id = i.application_id WHERE a.user_id = ?').get(member.user.id) as { c: number };
+      // Every round counts: three technical interviews are three.
+      const interviews = sqlite
+        .prepare(`SELECT COUNT(*) AS c FROM application_steps s JOIN applications a ON a.id = s.application_id WHERE a.user_id = ? AND s.stage IN ('Recruiter Screen', 'Technical Interview', 'Final Interview')`)
+        .get(member.user.id) as { c: number };
       expect(member.stats.interviews).toBe(interviews.c);
     }
+  });
+
+  it('keeps each application at the stage of its latest step', async () => {
+    const { server } = await loaded();
+    const sqlite = server.ctx.db.$client;
+    const wrong = sqlite
+      .prepare(
+        `SELECT COUNT(*) AS c FROM applications a
+         WHERE a.stage != COALESCE((SELECT s.stage FROM application_steps s WHERE s.application_id = a.id ORDER BY s.at DESC, s.id DESC LIMIT 1), 'Applied')
+            OR a.furthest_rank != COALESCE((SELECT MAX(CASE s.stage WHEN 'Recruiter Screen' THEN 1 WHEN 'Technical Interview' THEN 2 WHEN 'Final Interview' THEN 3 WHEN 'Offer' THEN 4 ELSE 0 END) FROM application_steps s WHERE s.application_id = a.id), 0)`
+      )
+      .get();
+    expect(wrong).toEqual({ c: 0 });
+    // Some went through several technical rounds, as the data is meant to show.
+    expect((sqlite.prepare(`SELECT COUNT(*) AS c FROM (SELECT application_id FROM application_steps WHERE stage = 'Technical Interview' GROUP BY application_id HAVING COUNT(*) > 1)`).get() as { c: number }).c).toBeGreaterThan(0);
   });
 });

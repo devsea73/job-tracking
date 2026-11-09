@@ -25,10 +25,11 @@ async function setUp() {
   const johnFinal = await apply(users.john, '2026-09-01T10:00:00.000Z');
   // Mia applied to nothing, and is still on the board.
 
-  await users.andy.patch(`/api/applications/${andyScreen.applicationId}`, { status: 'Recruiter Screen' });
-  await users.john.patch(`/api/applications/${johnRejected.applicationId}`, { status: 'Technical Interview' });
-  await users.john.patch(`/api/applications/${johnRejected.applicationId}`, { status: 'Rejected' });
-  await users.john.patch(`/api/applications/${johnFinal.applicationId}`, { status: 'Final Interview' });
+  // Each one's timeline, at the times the steps take place.
+  await users.andy.addStep(andyScreen.applicationId, 'Recruiter Screen', '2026-11-06T15:00:00.000Z');
+  await users.john.addStep(johnRejected.applicationId, 'Technical Interview', '2026-11-05T10:00:00.000Z');
+  await users.john.addStep(johnRejected.applicationId, 'Rejected', '2026-11-05T18:00:00.000Z');
+  await users.john.addStep(johnFinal.applicationId, 'Final Interview', '2026-09-20T10:00:00.000Z');
   server.ctx.readCache.invalidate();
 
   const list = async (client: ApiClient, query: Record<string, string> = {}) => {
@@ -40,12 +41,12 @@ async function setUp() {
 }
 
 describe('everyone’s applications on the Team page', () => {
-  it('lists every member’s applications with where each one is, newest first, and no administrator', async () => {
+  it('lists every member’s applications with the stage each is at, newest first, the administrator among the members', async () => {
     const { admin, users, list } = await setUp();
     const all = await list(users.mia);
     expect(all.range).toBeNull();
     expect(all.total).toBe(6);
-    expect(all.items.map((item) => [item.owner.username, item.job.company, item.status])).toEqual([
+    expect(all.items.map((item) => [item.owner.username, item.job.company, item.stage])).toEqual([
       ['andy', 'Company 2', 'Recruiter Screen'],
       ['andy', 'Stripe', 'Applied'],
       ['john', 'Company 4', 'Applied'],
@@ -53,7 +54,7 @@ describe('everyone’s applications on the Team page', () => {
       ['andy', 'Company 3', 'Applied'],
       ['john', 'Company 6', 'Final Interview']
     ]);
-    const rejected = all.items.find((item) => item.status === 'Rejected');
+    const rejected = all.items.find((item) => item.stage === 'Rejected');
     expect(rejected).toMatchObject({ furthestStage: 'Technical Interview', isMine: false, link: { url: 'https://careers.example.com/jobs/5' } });
 
     // The board: the viewer first, even with nothing, then by applications. Everyone is on it.
@@ -64,8 +65,8 @@ describe('everyone’s applications on the Team page', () => {
       ['admin', false, 0]
     ]);
     const john = all.board.find((row) => row.user.username === 'john');
-    expect(john?.statuses).toEqual({ Applied: 1, 'Recruiter Screen': 0, 'Technical Interview': 0, 'Final Interview': 1, Offer: 0, Rejected: 1 });
-    // Interviews are counted by how far each got, so the rejected one still had one.
+    expect(john?.stages).toEqual({ Applied: 1, 'Recruiter Screen': 0, 'Technical Interview': 0, 'Final Interview': 1, Offer: 0, Rejected: 1 });
+    // Interviews are counted by how far each timeline got, so the rejected one still had one.
     expect(john).toMatchObject({ interviews: 2, interviewRate: 66.7 });
     expect(all.board.find((row) => row.user.username === 'mia')?.interviewRate).toBeNull();
 
@@ -79,7 +80,7 @@ describe('everyone’s applications on the Team page', () => {
     ]);
   });
 
-  it('narrows to a person, a status or a search, while the board stays the same', async () => {
+  it('narrows to a person, a stage or a search, while the board stays the same', async () => {
     const { users, list } = await setUp();
     const andy = (await list(users.mia)).board.find((row) => row.user.username === 'andy');
     const johnId = (await list(users.mia)).board.find((row) => row.user.username === 'john')?.user.id;
@@ -88,11 +89,12 @@ describe('everyone’s applications on the Team page', () => {
     expect(johns.items.every((item) => item.owner.username === 'john')).toBe(true);
     expect(johns.board.find((row) => row.user.username === 'andy')).toEqual(andy);
 
-    expect((await list(users.mia, { status: 'Rejected' })).items.map((item) => item.owner.username)).toEqual(['john']);
+    expect((await list(users.mia, { stage: 'Rejected' })).items.map((item) => item.owner.username)).toEqual(['john']);
+    expect((await list(users.mia, { stage: 'Recruiter Screen' })).items.map((item) => item.job.company)).toEqual(['Company 2']);
     expect((await list(users.mia, { q: 'stripe' })).items.map((item) => item.job.company)).toEqual(['Stripe']);
     expect((await list(users.mia, { q: 'engineer 6' })).total).toBe(1);
     // Furthest along first.
-    expect((await list(users.mia, { sort: 'stage' })).items.slice(0, 3).map((item) => item.status)).toEqual(['Final Interview', 'Rejected', 'Recruiter Screen']);
+    expect((await list(users.mia, { sort: 'stage' })).items.slice(0, 3).map((item) => item.stage)).toEqual(['Final Interview', 'Rejected', 'Recruiter Screen']);
     // A page at a time, with the full count.
     const page = await list(users.mia, { limit: '2', offset: '2' });
     expect(page.total).toBe(6);
@@ -142,7 +144,7 @@ describe('everyone’s applications on the Team page', () => {
     const { server, users } = await setUp();
     expect((await users.andy.get('/api/team/applications?tz=UTC&from=2026-11-05')).status).toBe(400);
     expect((await users.andy.get('/api/team/applications?tz=UTC&from=2026-11-05&to=2026-11-01')).status).toBe(400);
-    expect((await users.andy.get('/api/team/applications?status=Hired')).status).toBe(400);
+    expect((await users.andy.get('/api/team/applications?stage=Hired')).status).toBe(400);
     expect((await server.app.inject({ method: 'GET', url: '/api/team/applications' })).statusCode).toBe(401);
   });
 });

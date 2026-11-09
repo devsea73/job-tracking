@@ -7,65 +7,34 @@ import { createTestServer, createUsers, jobPage, type ApiClient } from './helper
 type Created = Extract<CreateApplicationResponse, { outcome: 'created' }>;
 
 describe('when an application reached each stage', () => {
-  it('reads the statuses in the order they were set', () => {
+  it('dates each stage by the first step at it or past it', () => {
     // Straight to Technical: the interview stage was passed on the way, at the same moment.
-    expect(reachTimes([{ status: 'Applied', at: 1 }, { status: 'Technical Interview', at: 5 }], 2, null)).toEqual([5, 5, null, null]);
+    expect(reachTimes([{ stage: 'Technical Interview', at: 5 }])).toEqual([5, 5, null, null]);
     // A rejection keeps what was reached.
-    expect(reachTimes([{ status: 'Applied', at: 1 }, { status: 'Final Interview', at: 3 }, { status: 'Rejected', at: 9 }], 3, null)).toEqual([3, 3, 3, null]);
+    expect(reachTimes([{ stage: 'Final Interview', at: 3 }, { stage: 'Rejected', at: 9 }])).toEqual([3, 3, 3, null]);
+    // An offer has passed every stage before it.
+    expect(reachTimes([{ stage: 'Offer', at: 7 }])).toEqual([7, 7, 7, 7]);
   });
 
-  it('treats a move back as a correction: the stage counts from when it is set again', () => {
-    const misclick = [
-      { status: 'Applied', at: 1 },
-      { status: 'Technical Interview', at: 2 },
-      { status: 'Applied', at: 3 },
-      { status: 'Technical Interview', at: 8 }
+  it('reaches a stage once, at its first round, however many there are', () => {
+    const rounds = [
+      { stage: 'Recruiter Screen', at: 2 },
+      { stage: 'Technical Interview', at: 4 },
+      { stage: 'Technical Interview', at: 6 },
+      { stage: 'Technical Interview', at: 8 }
     ];
-    expect(reachTimes(misclick, 2, null)).toEqual([8, 8, null, null]);
-    // Corrected and never set again: never reached.
-    expect(reachTimes(misclick.slice(0, 3), 0, null)).toEqual([null, null, null, null]);
+    expect(reachTimes(rounds)).toEqual([2, 4, null, null]);
   });
 
-  it('counts an interview as got on the day one was booked, if that came first', () => {
-    expect(reachTimes([], 0, 4)).toEqual([4, null, null, null]);
-    expect(reachTimes([{ status: 'Recruiter Screen', at: 7 }], 1, 4)).toEqual([4, null, null, null]);
-    expect(reachTimes([{ status: 'Recruiter Screen', at: 3 }], 1, 4)).toEqual([3, null, null, null]);
+  it('reads the steps by when they take place, in whatever order they come', () => {
+    expect(reachTimes([{ stage: 'Final Interview', at: 9 }, { stage: 'Recruiter Screen', at: 2 }, { stage: 'Technical Interview', at: 5 }])).toEqual([2, 5, 9, null]);
+    // A later screen does not move the interview reached on a technical before it.
+    expect(reachTimes([{ stage: 'Technical Interview', at: 3 }, { stage: 'Recruiter Screen', at: 6 }])).toEqual([3, 3, null, null]);
   });
 
-  it('lets the stored furthest stage have the last word, as after two applications are merged', () => {
-    const merged = [
-      { status: 'Applied', at: 1 },
-      { status: 'Final Interview', at: 2 },
-      { status: 'Applied', at: 3 }
-    ];
-    expect(reachTimes(merged, 3, null)).toEqual([2, 2, 2, null]);
-  });
-
-  it('reads two merged applications as two runs of statuses, so each stage keeps the first day it was reached', () => {
-    // Technical on day 2; the copy merged in was applied to on day 50 and got a screen on day 60.
-    const merged = [
-      { status: 'Applied', at: 1, old: null },
-      { status: 'Technical Interview', at: 2, old: 'Applied' },
-      { status: 'Applied', at: 50, old: null },
-      { status: 'Recruiter Screen', at: 60, old: 'Applied' }
-    ];
-    expect(reachTimes(merged, 2, null)).toEqual([2, 2, null, null]);
-    // Mixed together by when each was set: a status carries on the run it moved from.
-    const mixed = [
-      { status: 'Applied', at: 1, old: null },
-      { status: 'Applied', at: 2, old: null },
-      { status: 'Recruiter Screen', at: 3, old: 'Applied' },
-      { status: 'Technical Interview', at: 4, old: 'Applied' }
-    ];
-    expect(reachTimes(mixed, 2, null)).toEqual([3, 4, null, null]);
-    // Within one run, a move back is still a correction.
-    const corrected = [
-      { status: 'Applied', at: 1, old: null },
-      { status: 'Technical Interview', at: 2, old: 'Applied' },
-      { status: 'Applied', at: 3, old: 'Technical Interview' },
-      { status: 'Technical Interview', at: 8, old: 'Applied' }
-    ];
-    expect(reachTimes(corrected, 2, null)).toEqual([8, 8, null, null]);
+  it('reaches nothing without a step, or with only a rejection', () => {
+    expect(reachTimes([])).toEqual([null, null, null, null]);
+    expect(reachTimes([{ stage: 'Rejected', at: 3 }])).toEqual([null, null, null, null]);
   });
 });
 
@@ -77,33 +46,30 @@ describe('two copies of a job merged into one', () => {
     const add = async (n: number, appliedAt: string) => {
       server.http.serve(`https://careers.example.com/jobs/${n}`, jobPage({ title: `Engineer ${n}`, company: `Company ${n}` }));
       const added = (await users.john.addJob(`https://careers.example.com/jobs/${n}`)) as Created;
-      sqlite.prepare('UPDATE applications SET applied_at = ? WHERE id = ?').run(appliedAt, added.applicationId);
-      sqlite.prepare('UPDATE application_status_history SET changed_at = ? WHERE application_id = ?').run(appliedAt, added.applicationId);
+      expect((await users.john.patch(`/api/applications/${added.applicationId}`, { appliedAt })).status).toBe(200);
       return added;
-    };
-    const move = async (id: number, status: string, at: string) => {
-      expect((await users.john.patch(`/api/applications/${id}`, { status })).status).toBe(200);
-      sqlite.prepare('UPDATE application_status_history SET changed_at = ? WHERE id = (SELECT MAX(id) FROM application_status_history WHERE application_id = ?)').run(at, id);
     };
     const read = async () => {
       server.ctx.readCache.invalidate();
       const response = await users.john.get('/api/activity?tz=UTC&today=2026-11-05&from=2026-11-02&to=2026-11-08');
       return byName(response.json as ActivityResponse).john;
     };
-    // Technical Interview on Tuesday last week with one copy; the other, added this week, got a screen on Wednesday.
+    // A technical interview on Tuesday last week with one copy; the other, added this week, got a screen on Wednesday.
     const first = await add(1, '2026-10-26T10:00:00.000Z');
-    await move(first.applicationId, 'Technical Interview', '2026-10-27T10:00:00.000Z');
+    await users.john.addStep(first.applicationId, 'Technical Interview', '2026-10-27T10:00:00.000Z');
     const second = await add(2, '2026-11-03T10:00:00.000Z');
-    await move(second.applicationId, 'Recruiter Screen', '2026-11-04T10:00:00.000Z');
+    await users.john.addStep(second.applicationId, 'Recruiter Screen', '2026-11-04T10:00:00.000Z');
     expect((await read()).trends.interviews).toEqual([0, 0, 1, 0, 0, 0, 0]);
 
     sqlite.transaction(() => mergeJobs(sqlite, first.jobId, second.jobId))();
-    // One application now, which got its interview, and Technical, last Tuesday: nothing new this week.
+    // One application now, with both timelines: it got its interview, and Technical, last Tuesday. Nothing new this week.
     const after = await read();
     expect(after.trends.interviews).toEqual([0, 0, 0, 0, 0, 0, 0]);
     expect(after.trends.technical).toEqual([0, 0, 0, 0, 0, 0, 0]);
     expect(after.previousTrends.interviews).toEqual([0, 1, 0, 0, 0, 0, 0]);
     expect(after.previousTrends.technical).toEqual([0, 1, 0, 0, 0, 0, 0]);
+    // It is at the stage of its latest step, the screen, having reached Technical before.
+    expect(sqlite.prepare('SELECT stage, furthest_rank FROM applications WHERE id = ?').get(first.applicationId)).toEqual({ stage: 'Recruiter Screen', furthest_rank: 2 });
   });
 });
 
@@ -196,40 +162,35 @@ async function setUp() {
   const { users } = await createUsers(server.app, 'andy', 'john', 'mia');
   const sqlite = server.ctx.handle.sqlite;
   let n = 0;
+  /** Applies, on the day the person says they did. */
   const apply = async (client: ApiClient, appliedAt: string) => {
     n += 1;
     server.http.serve(`https://careers.example.com/jobs/${n}`, jobPage({ title: `Engineer ${n}`, company: `Company ${n}` }));
     const added = (await client.addJob(`https://careers.example.com/jobs/${n}`)) as Created;
-    sqlite.prepare('UPDATE applications SET applied_at = ? WHERE id = ?').run(appliedAt, added.applicationId);
-    sqlite.prepare('UPDATE application_status_history SET changed_at = ? WHERE application_id = ?').run(appliedAt, added.applicationId);
+    expect((await client.patch(`/api/applications/${added.applicationId}`, { appliedAt })).status).toBe(200);
     return added.applicationId;
-  };
-  /** Sets a status as if on the given moment. */
-  const move = async (client: ApiClient, id: number, status: string, at: string) => {
-    expect((await client.patch(`/api/applications/${id}`, { status })).status).toBe(200);
-    sqlite.prepare('UPDATE application_status_history SET changed_at = ? WHERE id = (SELECT MAX(id) FROM application_status_history WHERE application_id = ?)').run(at, id);
   };
 
   // Andy: an older application that gets a screen last week, then Technical and an offer this week.
   const older = await apply(users.andy, '2026-10-20T10:00:00.000Z');
-  await move(users.andy, older, 'Recruiter Screen', '2026-10-27T10:00:00.000Z');
-  await move(users.andy, older, 'Technical Interview', '2026-11-03T10:00:00.000Z');
-  await move(users.andy, older, 'Offer', '2026-11-05T10:00:00.000Z');
+  await users.andy.addStep(older, 'Recruiter Screen', '2026-10-27T10:00:00.000Z');
+  await users.andy.addStep(older, 'Technical Interview', '2026-11-03T10:00:00.000Z');
+  await users.andy.addStep(older, 'Offer', '2026-11-05T10:00:00.000Z');
   await apply(users.andy, '2026-10-28T10:00:00.000Z');
   const screened = await apply(users.andy, '2026-11-02T10:00:00.000Z');
-  await move(users.andy, screened, 'Recruiter Screen', '2026-11-04T12:00:00.000Z');
-  await move(users.andy, screened, 'Rejected', '2026-11-05T12:00:00.000Z');
-  // A slip of the mouse, put right a minute later: nothing was reached.
+  await users.andy.addStep(screened, 'Recruiter Screen', '2026-11-04T12:00:00.000Z');
+  await users.andy.addStep(screened, 'Rejected', '2026-11-05T12:00:00.000Z');
+  // A step put in by mistake and taken off again: nothing was reached.
   const slip = await apply(users.andy, '2026-11-05T09:00:00.000Z');
-  await move(users.andy, slip, 'Final Interview', '2026-11-05T10:00:00.000Z');
-  await move(users.andy, slip, 'Applied', '2026-11-05T10:01:00.000Z');
+  const mistake = await users.andy.addStep(slip, 'Final Interview', '2026-11-05T10:00:00.000Z');
+  expect((await users.andy.delete(`/api/steps/${mistake.id}`)).status).toBe(200);
 
-  // John: an interview booked on Wednesday for an application still at Applied, and last week one straight to Technical.
+  // John: a screen held on Wednesday, its record written a week before, which never counts; and last week one straight to Technical.
   const booked = await apply(users.john, '2026-11-03T10:00:00.000Z');
-  expect((await users.john.post(`/api/applications/${booked}/interviews`, { stage: 'Recruiter Screen', scheduledAt: '2026-11-10T15:00:00.000Z', timezone: 'UTC' })).status).toBe(201);
-  sqlite.prepare('UPDATE interviews SET created_at = ? WHERE application_id = ?').run('2026-11-04T09:00:00.000Z', booked);
+  const screen = await users.john.addStep(booked, 'Recruiter Screen', '2026-11-04T15:00:00.000Z');
+  sqlite.prepare('UPDATE application_steps SET created_at = ?, updated_at = ? WHERE id = ?').run('2026-10-27T09:00:00.000Z', '2026-10-27T09:00:00.000Z', screen.id);
   const fast = await apply(users.john, '2026-10-29T10:00:00.000Z');
-  await move(users.john, fast, 'Technical Interview', '2026-10-30T12:00:00.000Z');
+  await users.john.addStep(fast, 'Technical Interview', '2026-10-30T12:00:00.000Z');
   // Mia has applied to nothing.
 
   const read = async (client: ApiClient, query: Record<string, string>) => {
@@ -238,7 +199,7 @@ async function setUp() {
     expect(response.status).toBe(200);
     return response.json as ActivityResponse;
   };
-  return { users, read };
+  return { users, read, sqlite, ids: { booked } };
 }
 
 const THIS_WEEK = { from: '2026-11-02', to: '2026-11-08' };
@@ -337,12 +298,66 @@ describe('trends over a range, next to the period before', () => {
   });
 });
 
-describe('a booked interview', () => {
-  it('counts on the day it was booked, not the day it takes place', async () => {
+const NEXT_WEEK = { from: '2026-11-09', to: '2026-11-15', today: '2026-11-15' };
+const NOTHING = [0, 0, 0, 0, 0, 0, 0];
+
+describe('an interview', () => {
+  it('counts on the day it takes place, not the day it was put in', async () => {
+    const { users, read, ids } = await setUp();
+    // John's screen took place on Wednesday; its record says it was written the Tuesday before.
+    const john = byName(await read(users.andy, THIS_WEEK)).john;
+    expect(john.trends.interviews).toEqual([0, 0, 1, 0, 0, 0, 0]);
+    // Last week only has his technical interview, on Friday.
+    expect(john.previousTrends.interviews).toEqual([0, 0, 0, 0, 1, 0, 0]);
+
+    // Booked today, Thursday, for a final next Thursday: nothing this week, and it counts next week.
+    await users.john.addStep(ids.booked, 'Final Interview', '2026-11-12T15:00:00.000Z');
+    const now = byName(await read(users.andy, THIS_WEEK)).john;
+    expect(now.trends.final).toEqual(NOTHING);
+    expect(now.trendTotals.final).toEqual({ current: 0, previous: 0 });
+    const later = byName(await read(users.andy, NEXT_WEEK)).john;
+    expect(later.trends.final).toEqual([0, 0, 0, 1, 0, 0, 0]);
+    // Straight from the screen to a final passes Technical on the way, that same day.
+    expect(later.trends.technical).toEqual([0, 0, 0, 1, 0, 0, 0]);
+    // The application got its first interview the week before: that is not counted again.
+    expect(later.trends.interviews).toEqual(NOTHING);
+  });
+
+  it('reaches a stage once, at the first round, however many rounds there are', async () => {
+    const { users, read, ids } = await setUp();
+    // Three technical rounds, Thursday to Saturday: Technical is reached once, on Thursday.
+    for (const at of ['2026-11-05T09:00:00.000Z', '2026-11-06T09:00:00.000Z', '2026-11-07T09:00:00.000Z']) await users.john.addStep(ids.booked, 'Technical Interview', at);
+    const john = byName(await read(users.andy, THIS_WEEK)).john;
+    expect(john.trends.technical).toEqual([0, 0, 0, 1, 0, 0, 0]);
+    expect(john.trends.interviews).toEqual([0, 0, 1, 0, 0, 0, 0]);
+  });
+});
+
+describe('when records were written or changed', () => {
+  it('changes no number: only the times the person entered count', async () => {
+    const { users, read, sqlite } = await setUp();
+    const ranges = [THIS_WEEK, NEXT_WEEK, { from: '2026-11-01', to: '2026-11-30' }, { from: '2026-11-05', to: '2026-11-05' }];
+    const before: ActivityResponse[] = [];
+    for (const range of ranges) before.push(await read(users.andy, range));
+    // Every record said to be written long ago and changed long after.
+    sqlite.prepare(`UPDATE applications SET created_at = '2019-01-01T00:00:00.000Z', updated_at = '2031-06-01T00:00:00.000Z'`).run();
+    sqlite.prepare(`UPDATE application_steps SET created_at = '2019-01-01T00:00:00.000Z', updated_at = '2031-06-01T00:00:00.000Z'`).run();
+    const after: ActivityResponse[] = [];
+    for (const range of ranges) after.push(await read(users.andy, range));
+    expect(after).toEqual(before);
+    // John's screen still counts on Wednesday, the day it took place.
+    expect(byName(after[0]).john.trends.interviews).toEqual([0, 0, 1, 0, 0, 0, 0]);
+  });
+
+  it('moves a bid when the person corrects the day they applied', async () => {
     const { users, read } = await setUp();
-    // Booked on Wednesday 4 November for Tuesday 10 November: nothing in the week it takes place.
-    const nextWeek = await read(users.andy, { from: '2026-11-09', to: '2026-11-15', today: '2026-11-15' });
-    expect(byName(nextWeek).john.trends.interviews).toEqual([0, 0, 0, 0, 0, 0, 0]);
-    expect(byName(await read(users.andy, THIS_WEEK)).john.trends.interviews).toEqual([0, 0, 1, 0, 0, 0, 0]);
+    const mine = (await users.john.get('/api/jobs?scope=mine&sort=applied')).json as { items: Array<{ applications: Array<{ id: number; isMine: boolean; appliedAt: string }> }> };
+    const tuesday = mine.items.flatMap((job) => job.applications).find((application) => application.isMine && application.appliedAt.startsWith('2026-11-03'));
+    expect(byName(await read(users.andy, THIS_WEEK)).john.trends.bids).toEqual([0, 1, 0, 0, 0, 0, 0]);
+    // Applied on Saturday the 31st after all, only put in on Tuesday.
+    expect((await users.john.patch(`/api/applications/${tuesday?.id}`, { appliedAt: '2026-10-31T18:00:00.000Z' })).status).toBe(200);
+    const week = byName(await read(users.andy, THIS_WEEK)).john;
+    expect(week.trends.bids).toEqual(NOTHING);
+    expect(week.previousTrends.bids).toEqual([0, 0, 0, 1, 0, 1, 0]);
   });
 });

@@ -9,9 +9,10 @@ import { bucketedDays, bucketedRange, bucketsFor, dayBegins, type BucketedRange,
  * What each person did over a range, bucket by bucket, next to the period before it.
  *
  * Bids count on the day they were sent. An interview, Technical, Final and an Offer count on the
- * day the application got there: the day its status moved to that stage or past it (an interview
- * also counts as got on the day one was booked). So a line shows when things happened, not when the
- * job was applied to. Success is offers out of every application ever, as it stood at each point.
+ * day the application got there: the time of its first step at that stage or past it, as entered,
+ * so an interview counts on the day it takes place. When a record was saved or changed never counts.
+ * So a line shows when things happened, not when the job was applied to. Success is offers out of
+ * every application ever, as it stood at each point.
  */
 
 export const rate = (part: number, whole: number): number | null => (whole > 0 ? Math.round((part / whole) * 1000) / 10 : null);
@@ -70,67 +71,22 @@ export function comparedRanges(range: DaySpan, previous: DaySpan, today: string)
   return { current: { first: range.first, last }, previous: { first: previous.first, last: end < previous.last ? end : previous.last } };
 }
 
-interface Thread {
-  status: string | null;
-  current: number;
-  reached: Array<number | null>;
-}
-
 /**
- * When an application got an interview and reached Technical, Final and Offer, as far as is known
- * now, or null for a stage it has not reached. Statuses come in the order they were set. A rejection
- * keeps the stages reached; any other move back corrects a mistake, so the stages above it were not
- * reached until they are set again. The stored furthest stage has the last word.
- *
- * Two applications merged into one keep both histories, mixed together by when each status was set.
- * Each application's first status has no status before it, so one of those part-way through starts
- * the merged-in application's own run: a status carries on the run it moved from. Each run is read
- * on its own, and a stage counts from the first time either application reached it. Without that,
- * the start of the second run would read as a move back, and its later statuses would date stages
- * the first application had reached long before.
+ * When an application got an interview and reached Technical, Final and Offer, from the steps on
+ * its timeline, or null for a stage it has not reached. Each is the time of its first step at that
+ * stage or past it, as the person entered it: three technical rounds reach Technical once, at the
+ * first; going straight to a final has passed Technical too, then. A rejection reaches nothing.
  */
-export function reachTimes(statuses: Array<{ status: string; at: number; old?: string | null }>, furthest: number, booked: number | null): [number | null, number | null, number | null, number | null] {
+export function reachTimes(steps: Array<{ stage: string; at: number }>): [number | null, number | null, number | null, number | null] {
   const first: Array<number | null> = [null, null, null, null, null];
-  const threads: Thread[] = [];
-  let latest: Thread | null = null;
-  for (const { status, at, old } of statuses) {
-    let thread: Thread | null = null;
-    if (old !== null && latest) {
-      if (old === undefined || latest.status === old) thread = latest;
-      else {
-        for (let index = threads.length - 1; index >= 0 && !thread; index -= 1) if (threads[index].status === old) thread = threads[index];
-        thread ??= latest;
-      }
-    }
-    if (!thread) {
-      thread = { status: null, current: 0, reached: [null, null, null, null, null] };
-      threads.push(thread);
-    }
-    thread.status = status;
-    latest = thread;
-    const rank = PIPELINE_STAGES.indexOf(status as PipelineStage);
-    if (rank < 0) continue;
-    for (let stage = 1; stage <= rank; stage += 1) first[stage] = first[stage] === null ? at : Math.min(first[stage] as number, at);
-    if (rank > thread.current) for (let stage = thread.current + 1; stage <= rank; stage += 1) thread.reached[stage] = at;
-    else for (let stage = rank + 1; stage <= thread.current; stage += 1) thread.reached[stage] = null;
-    thread.current = rank;
+  for (const { stage, at } of steps) {
+    const rank = PIPELINE_STAGES.indexOf(stage as PipelineStage);
+    for (let reached = 1; reached <= rank; reached += 1) if (first[reached] === null || at < (first[reached] as number)) first[reached] = at;
   }
-  const reached = (stage: number): number | null => {
-    let earliest: number | null = null;
-    for (const thread of threads) {
-      const value = thread.reached[stage];
-      if (value !== null && (earliest === null || value < earliest)) earliest = value;
-    }
-    return earliest;
-  };
-  // Merging two applications keeps the further one, whatever order their statuses were set in.
-  const at = (stage: number) => (stage <= furthest ? (reached(stage) ?? first[stage]) : null);
-  const screen = at(1);
-  const interview = screen === null ? booked : booked === null ? screen : Math.min(screen, booked);
-  return [interview, at(2), at(3), at(4)];
+  return [first[1], first[2], first[3], first[4]];
 }
 
-/** The statuses that are a stage past Applied, as SQL. */
+/** The steps that are a stage past Applied, as SQL: a rejection dates nothing. */
 const REACHING = PIPELINE_STAGES.slice(1)
   .map((stage) => `'${stage}'`)
   .join(', ');
@@ -144,29 +100,25 @@ export interface StageEvent {
 
 /**
  * The stages reached by every application that could have reached one inside the window: those
- * with a status set or an interview booked in it. Every application that got an offer comes too,
- * whenever it did, since success counts offers from the beginning. Each one's whole history is
- * read, because what a status means depends on the ones set before it.
+ * with a step dated in it. Every application that got an offer comes too, whenever it did, since
+ * success counts offers from the beginning. Steps count by when they take place, never by when they
+ * were saved, so an interview booked today for next week counts next week.
  */
 export function stageEvents(sqlite: Database.Database, window: { from: string; to: string }, only?: number): StageEvent[] {
-  // A stage is only ever reached by a status that is one: Applied and Rejected date nothing. Found
-  // by the days, from the indexes on them; for one person, keeping only theirs. Today's few changes
-  // are quicker to find that way than by looking through all of someone's applications.
+  // Found by the days, from the index on them; for one person, keeping only theirs.
   const ids = (
     only === undefined
       ? prepared(
           sqlite,
-          `SELECT application_id FROM application_status_history WHERE new_status IN (${REACHING}) AND changed_at >= @from AND changed_at < @to
-           UNION SELECT application_id FROM interviews WHERE created_at >= @from AND created_at < @to
+          `SELECT application_id FROM application_steps WHERE stage IN (${REACHING}) AND at >= @from AND at < @to
            UNION SELECT id FROM applications WHERE furthest_rank >= 4`
         )
           .pluck()
           .all(window)
       : prepared(
           sqlite,
-          `SELECT h.application_id FROM application_status_history h JOIN applications a ON a.id = h.application_id
-             WHERE h.new_status IN (${REACHING}) AND h.changed_at >= @from AND h.changed_at < @to AND a.user_id = @only
-           UNION SELECT i.application_id FROM interviews i JOIN applications a ON a.id = i.application_id WHERE i.created_at >= @from AND i.created_at < @to AND a.user_id = @only
+          `SELECT s.application_id FROM application_steps s JOIN applications a ON a.id = s.application_id
+             WHERE s.stage IN (${REACHING}) AND s.at >= @from AND s.at < @to AND a.user_id = @only
            UNION SELECT id FROM applications WHERE furthest_rank >= 4 AND user_id = @only`
         )
           .pluck()
@@ -174,37 +126,19 @@ export function stageEvents(sqlite: Database.Database, window: { from: string; t
   ) as number[];
   if (ids.length === 0) return [];
   const picked = JSON.stringify(ids);
-  const applications = prepared(sqlite, 'SELECT id, user_id, profile_id, furthest_rank FROM applications WHERE id IN (SELECT value FROM json_each(?))').raw(true).all(picked) as Array<
-    [number, number, number, number]
-  >;
-  const booked = new Map(
-    prepared(sqlite, 'SELECT application_id, MIN(created_at) FROM interviews WHERE application_id IN (SELECT value FROM json_each(?)) GROUP BY application_id')
-      .raw(true)
-      .all(picked) as Array<[number, string]>
-  );
-  // Only those past Applied have stages to date. Each one's statuses go in the order they were set.
-  const staged = applications.filter(([, , , furthest]) => furthest >= 1).map(([id]) => id);
-  const histories = new Map<number, Array<{ id: number; status: string; at: number; old: string | null }>>();
-  if (staged.length > 0) {
-    for (const [id, applicationId, old, status, at] of prepared(
-      sqlite,
-      'SELECT id, application_id, old_status, new_status, changed_at FROM application_status_history WHERE application_id IN (SELECT value FROM json_each(?))'
-    )
-      .raw(true)
-      .all(JSON.stringify(staged)) as Array<[number, number, string | null, string, string]>) {
-      let list = histories.get(applicationId);
-      if (!list) {
-        list = [];
-        histories.set(applicationId, list);
-      }
-      list.push({ id, status, at: Date.parse(at), old });
+  const owners = prepared(sqlite, 'SELECT id, user_id, profile_id FROM applications WHERE id IN (SELECT value FROM json_each(?))').raw(true).all(picked) as Array<[number, number, number]>;
+  const stepsOf = new Map<number, Array<{ stage: string; at: number }>>();
+  for (const [applicationId, stage, at] of prepared(sqlite, `SELECT application_id, stage, at FROM application_steps WHERE stage IN (${REACHING}) AND application_id IN (SELECT value FROM json_each(?))`)
+    .raw(true)
+    .all(picked) as Array<[number, string, string]>) {
+    let list = stepsOf.get(applicationId);
+    if (!list) {
+      list = [];
+      stepsOf.set(applicationId, list);
     }
+    list.push({ stage, at: Date.parse(at) });
   }
-  return applications.map(([id, userId, profileId, furthest]) => {
-    const statuses = histories.get(id)?.sort((a, b) => a.id - b.id) ?? [];
-    const first = booked.get(id);
-    return { userId, profileId, times: reachTimes(statuses, furthest, first === undefined ? null : Date.parse(first)) };
-  });
+  return owners.map(([id, userId, profileId]) => ({ userId, profileId, times: reachTimes(stepsOf.get(id) ?? []) }));
 }
 
 interface Counts {

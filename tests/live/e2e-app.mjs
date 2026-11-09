@@ -199,33 +199,38 @@ try {
   const count = await tyler.page.evaluate(async () => (await window.jobTracker.api('GET', '/api/jobs')).data.total);
   check('the database holds one shared job', count === 1, `found ${count}`);
 
-  console.log('\nLive updates and independent statuses');
+  console.log('\nLive updates and independent stages');
   await nav(tyler.page, 'All Jobs');
   await tyler.page.getByRole('img', { name: /John Doe/ }).first().waitFor({ timeout: 10_000 });
   check("John's avatar appeared on Tyler's screen without refreshing", true);
 
+  // A stage comes from the timeline: each person adds a step, at the time it takes place.
+  const addStep = async (page, stage, date, time, note) => {
+    await page.getByRole('button', { name: 'Add a step' }).first().click();
+    const form = page.getByRole('dialog', { name: 'Add a step' });
+    await form.getByRole('combobox', { name: 'Stage' }).click();
+    await page.getByRole('option', { name: stage }).click();
+    await form.getByLabel('Date').fill(date);
+    await form.getByLabel('Time').fill(time);
+    if (note) await form.getByLabel('Note (optional)').fill(note);
+    await form.getByRole('button', { name: 'Save' }).click();
+    await form.waitFor({ state: 'hidden' });
+  };
   await nav(tyler.page, 'My Applications');
-  await tyler.page.getByRole('combobox', { name: 'Application status' }).first().click();
-  await tyler.page.getByRole('option', { name: 'Technical Interview' }).click();
-  await tyler.page.getByRole('combobox', { name: 'Application status' }).first().getByRole('img', { name: 'Technical Interview' }).waitFor();
-  await john.page.getByRole('combobox', { name: 'Application status' }).first().click();
-  await john.page.getByRole('option', { name: 'Recruiter Screen' }).click();
-  await john.page.getByRole('combobox', { name: 'Application status' }).first().getByRole('img', { name: 'Recruiter Screen' }).waitFor();
+  await addStep(tyler.page, 'Technical Interview', '2030-11-13', '14:00', 'Video call with the hiring team');
+  await tyler.page.locator('[data-job-row]').first().getByRole('img', { name: 'Technical Interview' }).waitFor();
+  await nav(john.page, 'My Applications');
+  await addStep(john.page, 'Recruiter Screen', '2030-11-10', '09:30');
+  await john.page.locator('[data-job-row]').first().getByRole('img', { name: 'Recruiter Screen' }).waitFor();
 
-  const statusOf = (instance) => instance.page.evaluate(async () => (await window.jobTracker.api('GET', '/api/jobs')).data.items[0].applications.find((application) => application.isMine).status);
-  check('Tyler is at Technical Interview', (await statusOf(tyler)) === 'Technical Interview');
-  check('John is at Recruiter Screen, independently', (await statusOf(john)) === 'Recruiter Screen');
+  const stageOf = (instance) => instance.page.evaluate(async () => (await window.jobTracker.api('GET', '/api/jobs')).data.items[0].applications.find((application) => application.isMine).stage);
+  check('Tyler is at Technical Interview', (await stageOf(tyler)) === 'Technical Interview');
+  check('John is at Recruiter Screen, independently', (await stageOf(john)) === 'Recruiter Screen');
 
-  console.log('\nTyler schedules an interview');
+  console.log("\nTyler's timeline");
   await tyler.page.getByRole('row').nth(1).click();
-  await tyler.page.getByRole('button', { name: 'Schedule' }).click();
-  const scheduleForm = tyler.page.getByRole('dialog', { name: 'Schedule interview' });
-  await scheduleForm.getByLabel('Date').fill('2030-11-13');
-  await scheduleForm.getByLabel('Time').fill('14:00');
-  await scheduleForm.getByLabel('Note (optional)').fill('Video call with the hiring team');
-  await tyler.page.getByRole('dialog', { name: 'Schedule interview' }).getByRole('button', { name: 'Save' }).click();
-  await tyler.page.getByText('Video call with the hiring team').waitFor();
-  await shot(tyler.page, '10-interview-history');
+  await tyler.page.locator('[data-timeline]').getByText('Video call with the hiring team').waitFor();
+  await shot(tyler.page, '10-timeline');
   await tyler.page.getByRole('button', { name: 'Close', exact: true }).click();
   const shared = await john.page.evaluate(async () => JSON.stringify((await window.jobTracker.api('GET', '/api/jobs')).data) + JSON.stringify((await window.jobTracker.api('GET', '/api/interviews?person=all')).data));
   check("Tyler's memo and interview are visible to John", shared.includes('Recruiter contacted') && shared.includes('Video call'));
@@ -253,14 +258,14 @@ try {
   await tyler.page.getByLabel('Search').fill('recruiter');
   await settle();
   check('memo search finds it', (await results()) === 1);
-  await tyler.page.getByRole('combobox', { name: 'Status filter' }).click();
+  await tyler.page.getByRole('combobox', { name: 'Stage filter' }).click();
   await tyler.page.getByRole('option', { name: 'Technical Interview' }).click();
   await settle();
   await tyler.page.getByLabel('Interviews from').fill('2030-11-01');
   await tyler.page.getByLabel('Interviews to').fill('2030-11-30');
   await settle();
   await shot(tyler.page, '12-combined-filters');
-  check('company + status + memo + interview dates combine', (await results()) === 1);
+  check('company + stage + memo + interview dates combine', (await results()) === 1);
   await tyler.page.getByLabel('Interviews from').fill('2031-01-01');
   await tyler.page.getByLabel('Interviews to').fill('2031-01-30');
   await tyler.page.getByText('Nothing matches these filters').waitFor();
@@ -271,8 +276,15 @@ try {
   await tyler.page.waitForTimeout(400);
   await shot(tyler.page, '13-dashboard');
   await nav(tyler.page, 'Interviews');
-  await tyler.page.getByText('Video call with the hiring team').waitFor();
-  await shot(tyler.page, '14-interviews');
+  // The calendar opens on this month: forward to the interview's, then its day.
+  for (let step = 0; step < 120 && !(await tyler.page.locator('[data-month="2030-11"]').count()); step += 1) await tyler.page.getByRole('button', { name: 'Next month' }).click();
+  await tyler.page.locator('[data-day="2030-11-13"][data-count="1"]').click();
+  await tyler.page.locator('[data-day-list]').getByText('Video call with the hiring team').waitFor();
+  await shot(tyler.page, '14-interviews-calendar');
+  await tyler.page.getByRole('button', { name: "The team's interviews" }).click();
+  await tyler.page.locator('[data-calendar="team"] [data-day="2030-11-10"][data-count="1"]').waitFor();
+  check("the team calendar shows John's interview beside Tyler's", (await tyler.page.locator('[data-calendar="team"] [data-day="2030-11-13"][data-count="1"]').count()) === 1);
+  await shot(tyler.page, '14b-team-calendar');
   await nav(tyler.page, 'All Jobs');
   const background = () => tyler.page.evaluate(() => getComputedStyle(document.body).backgroundColor);
   await tyler.page.evaluate(() => window.jobTracker.setTheme('dark'));
@@ -333,7 +345,7 @@ try {
   const johnCanEdit = await john.page.evaluate(async () => {
     const list = (await window.jobTracker.api('GET', '/api/jobs')).data;
     const theirs = list.items[0].applications.find((application) => !application.isMine);
-    return (await window.jobTracker.api('PATCH', `/api/applications/${theirs.id}`, { status: 'Rejected' })).status;
+    return (await window.jobTracker.api('POST', `/api/applications/${theirs.id}/steps`, { stage: 'Rejected', at: new Date().toISOString(), timezone: 'UTC' })).status;
   });
   check("John still cannot change Tyler's application", johnCanEdit === 404, String(johnCanEdit));
   await john.page.getByRole('button', { name: 'Close', exact: true }).click();
@@ -398,11 +410,11 @@ db.close();`
       const applied = list.items.find((item) => item.applications.length > 0);
       const detail = (await window.jobTracker.api('GET', `/api/jobs/${applied.id}`)).data;
       const first = detail.applications.find((application) => application.isMine);
-      return { total: list.total, applications: detail.applications.length, highlighted: detail.isHighlighted, status: first.status, memo: first.memo, interviews: first.interviews.length, urls: detail.urls.length };
+      return { total: list.total, applications: detail.applications.length, highlighted: detail.isHighlighted, stage: first.stage, memo: first.memo, steps: first.steps.length, urls: detail.urls.length };
     });
   const after = await persisted();
   console.log(`  after restart: ${JSON.stringify(after)}`);
-  check('job, applications, highlight, status, memo and interview all persisted', after.applications === 3 && after.highlighted && after.status === 'Technical Interview' && after.memo === MEMO && after.interviews === 1 && after.urls >= 2);
+  check('job, applications, highlight, stage, memo and timeline all persisted', after.applications === 3 && after.highlighted && after.stage === 'Technical Interview' && after.memo === MEMO && after.steps === 1 && after.urls >= 2);
 
   console.log('\nA saved duplicate waits for review');
   const badge = tylerAgain.page.locator('[data-duplicate-count]');

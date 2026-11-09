@@ -1,31 +1,28 @@
-export const APPLICATION_STATUSES = [
-  'Applied',
-  'Recruiter Screen',
-  'Technical Interview',
-  'Final Interview',
-  'Offer',
-  'Rejected'
-] as const;
-export type ApplicationStatus = (typeof APPLICATION_STATUSES)[number];
+/**
+ * Where an application is. One idea, used everywhere: each step on an application's timeline is at
+ * a stage, and the application is at the stage of its latest step, or Applied before it has any.
+ */
+export const STAGES = ['Applied', 'Recruiter Screen', 'Technical Interview', 'Final Interview', 'Offer', 'Rejected'] as const;
+export type Stage = (typeof STAGES)[number];
 
-export const DEFAULT_STATUS: ApplicationStatus = 'Applied';
+/** What a step on the timeline can be: Applied is the application itself, with its own date. */
+export const STEP_STAGES = ['Recruiter Screen', 'Technical Interview', 'Final Interview', 'Offer', 'Rejected'] as const;
+export type StepStage = (typeof STEP_STAGES)[number];
 
-/** Statuses that no longer count as an "active" application on the dashboard. */
-export const CLOSED_STATUSES: readonly ApplicationStatus[] = ['Rejected'];
-
-export const INTERVIEW_STAGES = [
-  'Recruiter Screen',
-  'Technical Interview',
-  'Hiring Manager',
-  'Final Interview',
-  'Other'
-] as const;
+/** Steps that are meetings, booked for a time: what the calendars show. Three technical rounds are three steps. */
+export const INTERVIEW_STAGES = ['Recruiter Screen', 'Technical Interview', 'Final Interview'] as const;
 export type InterviewStage = (typeof INTERVIEW_STAGES)[number];
+
+/** Steps that end the process. Interviews after one will not happen, so saving one removes them. */
+export const OUTCOME_STAGES = ['Offer', 'Rejected'] as const;
+
+export const isInterviewStage = (stage: string): stage is InterviewStage => (INTERVIEW_STAGES as readonly string[]).includes(stage);
+export const isOutcomeStage = (stage: string): boolean => (OUTCOME_STAGES as readonly string[]).includes(stage);
 
 export const USER_ROLES = ['admin', 'user'] as const;
 export type UserRole = (typeof USER_ROLES)[number];
 
-export const JOB_SORTS = ['recent', 'applied', 'updated', 'company', 'interview', 'status', 'applicants'] as const;
+export const JOB_SORTS = ['recent', 'applied', 'updated', 'company', 'interview', 'stage', 'applicants'] as const;
 export type JobSort = (typeof JOB_SORTS)[number];
 
 export const JOB_SCOPES = ['all', 'mine', 'others'] as const;

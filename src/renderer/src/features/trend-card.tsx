@@ -10,11 +10,11 @@ import { bucketLabel, bucketStart, count, GROUP_LABELS, Legend, LineChart, OTHER
  */
 
 export const TREND_INFO: Record<TrendMetric, { label: string; rate?: boolean; about: string }> = {
-  bids: { label: 'Bids', about: 'Applications sent, on the day they were sent.' },
-  interviews: { label: 'Interviews', about: 'Applications that got an interview (moved to Recruiter Screen or later, or had one booked), on the day that happened.' },
-  technical: { label: 'Technical', about: 'Applications that reached Technical Interview, on the day they did.' },
-  final: { label: 'Final', about: 'Applications that reached Final Interview, on the day they did.' },
-  offers: { label: 'Offers', about: 'Applications that reached Offer, on the day they did.' },
+  bids: { label: 'Bids', about: 'Applications sent, on the day they were applied.' },
+  interviews: { label: 'Interviews', about: 'Applications that got an interview, on the day of their first one: the time entered for it, not when it was saved.' },
+  technical: { label: 'Technical', about: 'Applications that reached Technical Interview, on the day of their first technical round (or a later stage).' },
+  final: { label: 'Final', about: 'Applications that reached Final Interview, on the day of their final interview (or offer).' },
+  offers: { label: 'Offers', about: 'Applications that got an offer, on the day it came.' },
   success: { label: 'Success rate', rate: true, about: 'Offers out of every application up to that point, all time.' }
 };
 

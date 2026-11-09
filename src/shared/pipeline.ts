@@ -1,6 +1,6 @@
-import type { ApplicationStatus } from './constants';
+import { isInterviewStage, isOutcomeStage, type Stage } from './constants';
 
-/** The stages an application moves through. Rejected ends the journey but is not a stage. */
+/** The stages an application moves through, in order. Rejected ends the journey but is not a step forward. */
 export const PIPELINE_STAGES = ['Applied', 'Recruiter Screen', 'Technical Interview', 'Final Interview', 'Offer'] as const;
 export type PipelineStage = (typeof PIPELINE_STAGES)[number];
 
@@ -12,22 +12,39 @@ export const PIPELINE_SHORT_LABELS: Record<PipelineStage, string> = {
   Offer: 'Offer'
 };
 
+/** How far along a stage is: 0 for Applied up to 4 for Offer. Rejected moves nothing forward, so it is 0. */
+export function stageRank(stage: Stage | string): number {
+  return Math.max(0, PIPELINE_STAGES.indexOf(stage as PipelineStage));
+}
+
 /**
- * The highest stage an application ever reached, from its status history. A job that got to
- * Technical Interview and was later rejected still reached it, and going straight from Applied
- * to Technical Interview also counts as having passed Recruiter Screen.
+ * The furthest stage reached, from the stages of an application's steps, in any order. A rejection
+ * keeps what was reached, and going straight to Technical Interview has passed Recruiter Screen too.
+ * A step put in by mistake is corrected by removing it, so every step there counts.
  */
-/**
- * The furthest stage reached, from the statuses in the order they were set. A rejection keeps
- * the furthest stage. Any other move back is a correction: a misclicked stage was never reached.
- */
-export function furthestStage(statuses: Iterable<ApplicationStatus>): PipelineStage {
+export function furthestStage(stages: Iterable<Stage | string>): PipelineStage {
   let furthest = 0;
-  for (const status of statuses) {
-    if (status === 'Rejected') continue;
-    furthest = Math.max(0, PIPELINE_STAGES.indexOf(status as PipelineStage));
-  }
+  for (const stage of stages) furthest = Math.max(furthest, stageRank(stage));
   return PIPELINE_STAGES[furthest];
+}
+
+/**
+ * The stage an application is at: its latest step's, by when each takes place, or Applied before it
+ * has any. Two at the same moment go by the one put in later.
+ */
+export function currentStage(steps: Iterable<{ stage: Stage | string; at: string; id: number }>): Stage {
+  let latest: { stage: Stage | string; at: string; id: number } | null = null;
+  for (const step of steps) if (!latest || step.at > latest.at || (step.at === latest.at && step.id > latest.id)) latest = step;
+  return (latest?.stage as Stage | undefined) ?? 'Applied';
+}
+
+/**
+ * The interviews an offer or a rejection takes off a timeline when saved: those after it, which
+ * will not happen now. The host removes the same ones; the form names them first.
+ */
+export function interviewsEndedBy<T extends { id: number; stage: string; at: string }>(steps: T[], outcome: { stage: string; at: string; id?: number }): T[] {
+  if (!isOutcomeStage(outcome.stage)) return [];
+  return steps.filter((step) => step.id !== outcome.id && isInterviewStage(step.stage) && step.at > outcome.at);
 }
 
 export interface PassRate {

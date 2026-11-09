@@ -31,18 +31,18 @@
   --ring: #3b5bdb66;
   --shadow: 0 1px 2px #0000000d, 0 8px 24px #0000000f;
 
-  --status-applied-bg: #e8edf6;
-  --status-applied-ink: #39507c;
-  --status-recruiter-bg: #eee9fb;
-  --status-recruiter-ink: #5a3fb0;
-  --status-technical-bg: #fdf0d7;
-  --status-technical-ink: #84590a;
-  --status-final-bg: #fde8da;
-  --status-final-ink: #a34a12;
-  --status-offer-bg: #dff5e6;
-  --status-offer-ink: #17703a;
-  --status-rejected-bg: #f4e6e6;
-  --status-rejected-ink: #9c3535;
+  --stage-applied-bg: #e8edf6;
+  --stage-applied-ink: #39507c;
+  --stage-recruiter-bg: #eee9fb;
+  --stage-recruiter-ink: #5a3fb0;
+  --stage-technical-bg: #fdf0d7;
+  --stage-technical-ink: #84590a;
+  --stage-final-bg: #fde8da;
+  --stage-final-ink: #a34a12;
+  --stage-offer-bg: #dff5e6;
+  --stage-offer-ink: #17703a;
+  --stage-rejected-bg: #f4e6e6;
+  --stage-rejected-ink: #9c3535;
   /* Chart series, one per person, in a fixed order that stays apart for color-blind viewers too. */
   --series-1: #2a78d6;
   --series-2: #eb6834;
@@ -112,18 +112,18 @@
     --ring: #5c7cfa66;
     --shadow: 0 1px 2px #00000066, 0 8px 24px #00000059;
 
-    --status-applied-bg: #232b3b;
-    --status-applied-ink: #a9bbdc;
-    --status-recruiter-bg: #2c2545;
-    --status-recruiter-ink: #bfaef5;
-    --status-technical-bg: #3a2e12;
-    --status-technical-ink: #eec766;
-    --status-final-bg: #3b2616;
-    --status-final-ink: #f3b083;
-    --status-offer-bg: #16301f;
-    --status-offer-ink: #7ad79c;
-    --status-rejected-bg: #352021;
-    --status-rejected-ink: #e6a0a0;
+    --stage-applied-bg: #232b3b;
+    --stage-applied-ink: #a9bbdc;
+    --stage-recruiter-bg: #2c2545;
+    --stage-recruiter-ink: #bfaef5;
+    --stage-technical-bg: #3a2e12;
+    --stage-technical-ink: #eec766;
+    --stage-final-bg: #3b2616;
+    --stage-final-ink: #f3b083;
+    --stage-offer-bg: #16301f;
+    --stage-offer-ink: #7ad79c;
+    --stage-rejected-bg: #352021;
+    --stage-rejected-ink: #e6a0a0;
   }
 }
 

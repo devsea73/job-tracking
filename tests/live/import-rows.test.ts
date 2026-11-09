@@ -216,7 +216,6 @@ test('import rows into one profile', async () => {
   const year = Number(option('--year') ?? new Date().getFullYear());
   const application = sqlite.prepare('SELECT id FROM applications WHERE job_id = ? AND profile_id = ?');
   const setApplication = sqlite.prepare('UPDATE applications SET memo = ?, applied_at = COALESCE(?, applied_at) WHERE id = ?');
-  const setFirstHistory = sqlite.prepare('UPDATE application_status_history SET changed_at = ? WHERE id = (SELECT MIN(id) FROM application_status_history WHERE application_id = ?)');
   const jobRow = sqlite.prepare('SELECT title, application_count AS count FROM jobs WHERE id = ?');
   const setTitle = sqlite.prepare('UPDATE jobs SET title = ?, title_key = ? WHERE id = ?');
   const setCompany = sqlite.prepare('UPDATE jobs SET company_name = ?, company_key = ? WHERE id = ?');
@@ -242,11 +241,9 @@ test('import rows into one profile', async () => {
         }
       }
       const days = jobRows.map((row) => isoDay(row.date, year)).filter((day): day is string => !!day).sort();
+      // The applied date is what bids are counted by; when the record was written stays as it is.
       setApplication.run(terms.join(', '), days[0] ?? null, app.id);
-      if (days[0]) {
-        setFirstHistory.run(days[0], app.id);
-        dated += 1;
-      }
+      if (days[0]) dated += 1;
       const job = jobRow.get(jobId) as { title: string; count: number };
       const detail = jobRows.map((row) => row.detail.trim()).find(Boolean);
       if (sheetFirst && createdHere.has(jobId) && job.count === 1) {

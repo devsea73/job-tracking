@@ -1,4 +1,4 @@
-import type { ApplicationStatus, InterviewStage, JobScope, JobSort, UserRole } from './constants';
+import type { InterviewStage, JobScope, JobSort, Stage, StepStage, UserRole } from './constants';
 import type { ActivityGroup } from './calendar';
 import type { PipelineStage, ProcessStats } from './pipeline';
 
@@ -84,13 +84,18 @@ export interface ApplicationSummary {
   profile: ProfileRef;
   /** Whether the person asking owns it. Only the owner can change it. */
   isMine: boolean;
-  status: ApplicationStatus;
-  /** The highest stage it ever reached, which stays put after a rejection. */
+  /** Where it is: the stage of the latest step on its timeline, or Applied before it has any. */
+  stage: Stage;
+  /** The highest stage any step reached, which stays put after a rejection. */
   furthestStage: PipelineStage;
   memoPreview: string;
   nextInterviewAt: string | null;
+  /** Interviews on its timeline, past and booked. */
   interviewCount: number;
+  /** When the person applied: the first entry on the timeline. */
   appliedAt: string;
+  /** When the record was written, and last changed. Bookkeeping: nothing is counted by these. */
+  createdAt: string;
   updatedAt: string;
   /** The link this application was added with, when it was added with one. */
   link: ApplicationLink | null;
@@ -117,8 +122,9 @@ export interface JobListItem {
 export interface JobListQuery {
   q?: string;
   company?: string;
-  status?: ApplicationStatus;
-  stage?: InterviewStage;
+  /** Applications at this stage now. */
+  stage?: Stage;
+  /** With an interview between these instants. */
   interviewFrom?: string;
   interviewTo?: string;
   highlighted?: boolean;
@@ -146,30 +152,28 @@ export interface JobUrl {
   createdAt: string;
 }
 
-export interface Interview {
+/**
+ * One step on an application's timeline: a stage, and when it takes place, as entered. An
+ * interview is a step at an interview stage, so three technical rounds are three steps.
+ */
+export interface Step {
   id: number;
   applicationId: number;
-  stage: InterviewStage;
-  /** UTC instant, ISO 8601. */
-  scheduledAt: string;
-  /** IANA zone in which the user scheduled the event. */
+  stage: StepStage;
+  /** UTC instant, ISO 8601: when the interview is, or when the offer or rejection came. */
+  at: string;
+  /** IANA zone it was entered in. */
   timezone: string;
   note: string | null;
+  /** Bookkeeping only. */
   createdAt: string;
   updatedAt: string;
 }
 
-export interface StatusHistoryEntry {
-  id: number;
-  oldStatus: ApplicationStatus | null;
-  newStatus: ApplicationStatus;
-  changedAt: string;
-}
-
 export interface ApplicationDetail extends ApplicationSummary {
   memo: string;
-  interviews: Interview[];
-  history: StatusHistoryEntry[];
+  /** The timeline after Applied, oldest first. */
+  steps: Step[];
 }
 
 export interface JobDetail {
@@ -337,18 +341,26 @@ export type CheckLinkResponse =
   | { status: 'unreadable'; draftId: string; reason: ExtractionFailureReason; message: string; description: string; job: CheckedJobSummary };
 
 export interface UpdateApplicationRequest {
-  status?: ApplicationStatus;
   memo?: string;
+  /** When the person applied, if it was not when they added it. */
+  appliedAt?: string;
 }
 
-export interface InterviewInput {
-  stage: InterviewStage;
-  scheduledAt: string;
+export interface StepInput {
+  stage: StepStage;
+  at: string;
   timezone: string;
   note?: string | null;
 }
 
-export interface InterviewListItem extends Interview {
+/** What saving a step did besides: an offer or a rejection takes away the interviews after it. */
+export interface StepSaved extends Step {
+  removed: Step[];
+}
+
+/** An interview on a calendar, with the job and who it is for. */
+export interface InterviewListItem extends Step {
+  stage: InterviewStage;
   jobId: number;
   title: string;
   company: string;
@@ -438,7 +450,7 @@ export interface ActivityCounts {
   week: number;
   month: number;
   inRange: number;
-  /** Applications made in the range that got an interview so far: Recruiter Screen or later, or one scheduled. */
+  /** Applications made in the range that got an interview so far: a step past Applied on their timeline. */
   interviews: number;
   /** Percent, one decimal. Null when nothing was applied in the range: no rate, rather than 0%. */
   interviewRate: number | null;
@@ -454,10 +466,12 @@ export const TREND_METRICS = ['bids', 'interviews', 'technical', 'final', 'offer
 export type TrendMetric = (typeof TREND_METRICS)[number];
 
 /**
- * Each measure per bucket. The counts are of what happened in that bucket: applications sent, and
- * applications getting an interview (Recruiter Screen or later, or one booked) or reaching
- * Technical, Final or Offer, on the day that happened. Success is a percentage as it stood at the
- * end of each bucket: offers out of every application up to then, all time; null before the first.
+ * Each measure per bucket. The counts are of what happened in that bucket: applications sent, on the
+ * day they were applied; and applications getting an interview or reaching Technical, Final or
+ * Offer, on the day of their first step at that stage or past it, as the person entered it (an
+ * interview on the day it takes place). Never by when anything was saved. Success is a percentage
+ * as it stood at the end of each bucket: offers out of every application up to then, all time;
+ * null before the first.
  */
 export type TrendSeries = Record<TrendMetric, Array<number | null>>;
 
@@ -538,7 +552,8 @@ export interface TeamApplicationsQuery {
   to?: string;
   /** One member's user id. Left out: everyone. */
   person?: number;
-  status?: ApplicationStatus;
+  /** At this stage now. */
+  stage?: Stage;
   q?: string;
   sort?: TeamApplicationSort;
   limit?: number;
@@ -555,8 +570,9 @@ export interface TeamBoardRow {
   isMe: boolean;
   isActive: boolean;
   total: number;
-  statuses: Record<ApplicationStatus, number>;
-  /** Got an interview: Recruiter Screen or later, or one booked. */
+  /** Applications at each stage now. */
+  stages: Record<Stage, number>;
+  /** Got an interview: a step past Applied. */
   interviews: number;
   interviewRate: number | null;
 }

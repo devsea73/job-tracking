@@ -81,7 +81,7 @@ test('speed with 10,000 jobs', async () => {
   await measure(rows, 'list: sort updated', list('?sort=updated&limit=100'));
   await measure(rows, 'list: sort company', list('?sort=company&limit=100'));
   await measure(rows, 'list: sort interview', list('?sort=interview&limit=100'));
-  await measure(rows, 'list: sort status', list('?sort=status&limit=100'));
+  await measure(rows, 'list: sort stage', list('?sort=stage&limit=100'));
   await measure(rows, 'list: sort most applied', list('?sort=applicants&limit=100'));
   await measure(rows, 'list: starred first', list('?highlightFirst=true&limit=100'));
   await measure(rows, 'list: highlighted only', list('?highlighted=true&limit=100'));
@@ -89,11 +89,11 @@ test('speed with 10,000 jobs', async () => {
   await measure(rows, 'list: search rare word', list('?q=principal%20robotics&limit=100'));
   await measure(rows, 'list: search memo text', list('?q=referred&limit=100'));
   await measure(rows, 'list: company filter', list('?company=acme&limit=100'));
-  await measure(rows, 'list: status filter', list('?status=Offer&limit=100'));
+  await measure(rows, 'list: stage filter', list('?stage=Offer&limit=100'));
   await measure(rows, 'list: person filter', list(`?personId=${me.id}&limit=100`));
   await measure(rows, 'list: profile filter', list(`?profileId=${profileId}&limit=100`));
   await measure(rows, 'list: interview date range', list(`?interviewFrom=${encodeURIComponent(new Date().toISOString())}&limit=100`));
-  await measure(rows, 'list: everything combined', list(`?q=data&status=Applied&personId=${me.id}&sort=applicants&limit=100`));
+  await measure(rows, 'list: everything combined', list(`?q=data&stage=Applied&personId=${me.id}&sort=applicants&limit=100`));
   await measure(rows, 'list: deep page (offset 9900)', list('?offset=9900&limit=100'));
   await measure(rows, 'list: 1,000 rows at once', list('?limit=1000'), 5);
   await measure(rows, 'list: 5,000 rows at once', list('?limit=5000'), 3);
@@ -109,7 +109,9 @@ test('speed with 10,000 jobs', async () => {
 
   // Writes, including duplicate detection against everything already there.
   const applications = (await user.get('/api/jobs?scope=mine&limit=20')).json.items.flatMap((job: any) => job.applications.filter((item: any) => item.isMine).map((item: any) => item.id));
-  await measure(rows, 'change a status', (run) => user.patch(`/api/applications/${applications[run % applications.length]}`, { status: run % 2 ? 'Applied' : 'Recruiter Screen' }));
+  await measure(rows, 'add a step', (run) =>
+    user.post(`/api/applications/${applications[run % applications.length]}/steps`, { stage: run % 2 ? 'Technical Interview' : 'Recruiter Screen', at: new Date(Date.now() + run * 3_600_000).toISOString(), timezone: 'UTC' })
+  );
   await measure(rows, 'add a job: link already known', async (run) => {
     const url = (await user.get(`/api/jobs/${jobId + 100 + run}`)).json.urls[0].originalUrl;
     return user.post('/api/applications', { url, profileId });

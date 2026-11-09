@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { JobListResponse, TeamMember } from '../src/shared/api';
+import type { ActivityResponse, ApplicationSummary, JobListResponse, TeamMember } from '../src/shared/api';
 import { furthestStage } from '../src/shared/pipeline';
 import { isUnreadableNote, UNREADABLE_NOTES, unreadableReason } from '../src/shared/unreadable';
 import { compareJobs } from '../src/server/dedupe/scoring';
@@ -7,46 +7,95 @@ import { htmlToText, looksLikeHtml } from '../src/server/extraction/text';
 import { repairHtmlDescriptions } from '../src/server/services/job-facts-store';
 import { createTestServer, createUsers, jobPage } from './helpers';
 
-describe('a status set back by mistake', () => {
+/**
+ * Where an application is comes from its timeline, never from a status set by hand. A step put in
+ * by mistake is corrected by removing it or changing it, and everything counted follows at once.
+ */
+describe('a step put in by mistake', () => {
   async function applied() {
     const server = await createTestServer();
     const { users } = await createUsers(server.app, 'andy');
     server.http.serve('https://careers.example.com/jobs/1', jobPage({ title: 'Data Engineer', company: 'Acme' }));
     const added = await users.andy.addJob('https://careers.example.com/jobs/1');
     if (added.outcome !== 'created') throw new Error(added.outcome);
-    const setStatus = (status: string) => users.andy.patch(`/api/applications/${added.applicationId}`, { status });
-    const furthest = async () => ((await users.andy.get('/api/jobs?scope=mine')).json as JobListResponse).items[0].applications[0].furthestStage;
-    const team = async () => ((await users.andy.get('/api/team')).json as TeamMember[]).find((member) => member.user.username === 'andy');
-    return { setStatus, furthest, team };
+    const andy = users.andy;
+    const add = (stage: Parameters<typeof andy.addStep>[1], at: string) => andy.addStep(added.applicationId, stage, at);
+    const change = (stepId: number, stage: string, at: string) => andy.patch(`/api/steps/${stepId}`, { stage, at, timezone: 'UTC' });
+    const remove = (stepId: number) => andy.delete(`/api/steps/${stepId}`);
+    const mine = async () => ((await andy.get('/api/jobs?scope=mine')).json as JobListResponse).items[0].applications[0] as ApplicationSummary;
+    const team = async () => ((await andy.get('/api/team')).json as TeamMember[]).find((member) => member.user.username === 'andy')?.stats;
+    // October 2026, in UTC: what the trend lines count, bucket by bucket.
+    const trends = async () => ((await andy.get('/api/activity?tz=UTC&today=2026-10-31&from=2026-10-01&to=2026-10-31&scope=me')).json as ActivityResponse).people[0].trends;
+    const sum = (values: Array<number | null>) => values.reduce<number>((total, value) => total + (value ?? 0), 0);
+    return { add, change, remove, mine, team, trends, sum, applicationId: added.applicationId, andy };
   }
 
-  it('no longer counts the stages clicked by mistake', async () => {
-    const { setStatus, furthest, team } = await applied();
-    await setStatus('Final Interview');
-    expect(await furthest()).toBe('Final Interview');
-    await setStatus('Applied');
-    expect(await furthest()).toBe('Applied');
-    expect(JSON.stringify(await team())).not.toContain('"final":1');
+  it('no longer counts anywhere once it is removed', async () => {
+    const { add, remove, mine, team, trends, sum } = await applied();
+    const final = await add('Final Interview', '2026-10-05T10:00:00Z');
+    expect(await mine()).toMatchObject({ stage: 'Final Interview', furthestStage: 'Final Interview', interviewCount: 1 });
+    expect(await team()).toMatchObject({ interviews: 1, technical: 1, interviewPass: { reached: 1 } });
+    expect(sum((await trends()).final)).toBe(1);
+
+    expect((await remove(final.id)).status).toBe(200);
+    expect(await mine()).toMatchObject({ stage: 'Applied', furthestStage: 'Applied', interviewCount: 0 });
+    expect(await team()).toMatchObject({ interviews: 0, technical: 0, screenPass: { reached: 0 }, interviewPass: { reached: 0 } });
+    const after = await trends();
+    expect(sum(after.interviews)).toBe(0);
+    expect(sum(after.technical)).toBe(0);
+    expect(sum(after.final)).toBe(0);
   });
 
-  it('keeps the furthest stage when a job is rejected', async () => {
-    const { setStatus, furthest } = await applied();
-    await setStatus('Technical Interview');
-    await setStatus('Rejected');
-    expect(await furthest()).toBe('Technical Interview');
+  it('sets the stage again when its stage or time is changed', async () => {
+    const { add, change, mine, trends, sum } = await applied();
+    const screen = await add('Recruiter Screen', '2026-10-03T10:00:00Z');
+    const technical = await add('Technical Interview', '2026-10-05T10:00:00Z');
+    expect(await mine()).toMatchObject({ stage: 'Technical Interview', furthestStage: 'Technical Interview' });
+
+    // Entered as a technical round, but it was a second screen.
+    expect((await change(technical.id, 'Recruiter Screen', '2026-10-05T10:00:00Z')).status).toBe(200);
+    expect(await mine()).toMatchObject({ stage: 'Recruiter Screen', furthestStage: 'Recruiter Screen' });
+    expect(sum((await trends()).technical)).toBe(0);
+
+    // The first screen was really later than the second step: the stage is the latest one's.
+    expect((await change(technical.id, 'Technical Interview', '2026-10-05T10:00:00Z')).status).toBe(200);
+    expect((await change(screen.id, 'Recruiter Screen', '2026-10-07T10:00:00Z')).status).toBe(200);
+    expect(await mine()).toMatchObject({ stage: 'Recruiter Screen', furthestStage: 'Technical Interview' });
+    // Each stage counts on the day of its first step, as entered.
+    const lines = await trends();
+    expect(lines.technical[4]).toBe(1);
+    expect(lines.interviews[4]).toBe(1);
+    expect(sum(lines.interviews)).toBe(1);
   });
 
-  it('counts the stage it was moved back to', async () => {
-    const { setStatus, furthest } = await applied();
-    await setStatus('Offer');
-    await setStatus('Recruiter Screen');
-    expect(await furthest()).toBe('Recruiter Screen');
+  it('keeps the furthest stage reached when the job is rejected', async () => {
+    const { add, mine } = await applied();
+    await add('Technical Interview', '2026-10-05T10:00:00Z');
+    await add('Rejected', '2026-10-06T10:00:00Z');
+    expect(await mine()).toMatchObject({ stage: 'Rejected', furthestStage: 'Technical Interview' });
   });
 
-  it('follows the same rule when stages are read from history', () => {
-    expect(furthestStage(['Applied', 'Final Interview', 'Applied'])).toBe('Applied');
-    expect(furthestStage(['Applied', 'Technical Interview', 'Rejected'])).toBe('Technical Interview');
-    expect(furthestStage(['Applied', 'Recruiter Screen', 'Technical Interview'])).toBe('Technical Interview');
+  it('takes the interviews after an offer or rejection off the timeline, and nothing before it', async () => {
+    const { add, mine, andy, applicationId } = await applied();
+    const first = await add('Technical Interview', '2026-10-05T10:00:00Z');
+    const third = await add('Technical Interview', '2026-10-12T10:00:00Z');
+    const rejected = await add('Rejected', '2026-10-08T10:00:00Z');
+    expect(rejected.removed.map((step) => step.id)).toEqual([third.id]);
+    const steps = (await andy.get(`/api/jobs/${(await andy.get('/api/jobs?scope=mine')).json.items[0].id}`)).json.applications[0].steps;
+    expect(steps.map((step: { id: number }) => step.id)).toEqual([first.id, rejected.id]);
+    expect(await mine()).toMatchObject({ stage: 'Rejected', furthestStage: 'Technical Interview', interviewCount: 1 });
+
+    // Asked back after all: an interview after the rejection stays, and is where it is now.
+    const again = await add('Final Interview', '2026-10-20T10:00:00Z');
+    expect(again.removed).toEqual([]);
+    expect(await mine()).toMatchObject({ stage: 'Final Interview', furthestStage: 'Final Interview' });
+    expect(applicationId).toBe(again.applicationId);
+  });
+
+  it('counts every step there, whatever order they are in', () => {
+    expect(furthestStage(['Final Interview', 'Recruiter Screen'])).toBe('Final Interview');
+    expect(furthestStage(['Technical Interview', 'Rejected'])).toBe('Technical Interview');
+    expect(furthestStage(['Rejected'])).toBe('Applied');
   });
 });
 

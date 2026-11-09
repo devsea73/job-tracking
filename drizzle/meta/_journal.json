@@ -64,6 +64,20 @@
       "when": 1794200000000,
       "tag": "0008_analytics_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1794300000000,
+      "tag": "0009_application_steps",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1794300000001,
+      "tag": "0010_one_stage",
+      "breakpoints": true
     }
   ]
 }

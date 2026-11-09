@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3';
 import type { ActivityCounts, ActivityPerson, ActivityProfile, ActivityQuery, ActivityResponse, DaySpan, TrendSeries, TrendTotals } from '../../shared/api';
 import { addDays, autoGroup, monthEnd, monthStart, weekStart, type ActivityGroup } from '../../shared/calendar';
 import { prepared } from '../db/client';
+import { INTERVIEWS_SQL } from './job-queries';
 import { comparedRanges, previousRange, rate, stageEvents, TrendTally, type EntityTrends } from './trends';
 import { toUserRef } from './users';
 import { dayBegins, zoneClock } from './zone';
@@ -46,14 +47,13 @@ const noCounts = (): ProfileCounts => ({ today: 0, yesterday: 0, week: 0, month:
 
 interface AllTime {
   applications: number;
-  /** Reached Recruiter Screen or later, or has an interview booked. */
+  /** Has a step past Applied: an interview, or an offer. */
   interviews: number;
 }
 
 /**
  * Every profile's applications, and how many got an interview: whatever the range, so worked out
- * once while the data stays the same. Those past Applied are counted from the furthest stage kept on
- * each; the rest only need looking up when an interview was booked for one.
+ * once while the data stays the same, from the furthest stage kept on each.
  */
 function allTimeCounts(sqlite: Database.Database): Map<number, AllTime> {
   const counts = new Map<number, AllTime>();
@@ -64,13 +64,6 @@ function allTimeCounts(sqlite: Database.Database): Map<number, AllTime> {
   for (const row of prepared(sqlite, `SELECT profile_id, COUNT(*) AS screened FROM applications WHERE furthest_rank >= 1 GROUP BY profile_id`).all() as Array<{ profile_id: number; screened: number }>) {
     const found = counts.get(row.profile_id);
     if (found) found.interviews += row.screened;
-  }
-  for (const row of prepared(
-    sqlite,
-    `SELECT a.profile_id, COUNT(*) AS booked FROM (SELECT DISTINCT application_id AS id FROM interviews) i JOIN applications a ON a.id = i.id WHERE a.furthest_rank = 0 GROUP BY a.profile_id`
-  ).all() as Array<{ profile_id: number; booked: number }>) {
-    const found = counts.get(row.profile_id);
-    if (found) found.interviews += row.booked;
   }
   return counts;
 }
@@ -154,16 +147,16 @@ function buildModel(sqlite: Database.Database, query: ActivityQuery, group: Acti
   };
   const since = new Map<number, number>();
   const earliest = Math.min(window.from, yesterday.from, thisWeek.from, thisMonth.from);
+  // By the day each was applied, as the person says, never by when it was saved.
   const rows = prepared(
     sqlite,
-    // Whether one got an interview only matters for the range's, and only takes looking up for those still at Applied.
-    `SELECT a.user_id, a.profile_id, a.applied_at, a.furthest_rank, a.status = 'Rejected',
-            CASE WHEN a.furthest_rank >= 1 THEN 1 WHEN a.applied_at >= @from AND a.applied_at < @to THEN EXISTS (SELECT 1 FROM interviews iv WHERE iv.application_id = a.id) ELSE 0 END
+    `SELECT a.user_id, a.profile_id, a.applied_at, a.furthest_rank, a.stage = 'Rejected'
      FROM applications a WHERE a.applied_at >= @earliest${only === undefined ? '' : ' AND a.user_id = @only'}`
   )
     .raw(true)
-    .all({ earliest: iso(earliest), from: iso(range.from), to: iso(range.to), ...(only === undefined ? {} : { only }) }) as Array<[number, number, string, number, number, number]>;
-  for (const [userId, profileId, appliedAt, furthest, rejected, interviewed] of rows) {
+    .all({ earliest: iso(earliest), ...(only === undefined ? {} : { only }) }) as Array<[number, number, string, number, number]>;
+  for (const [userId, profileId, appliedAt, furthest, rejected] of rows) {
+    const interviewed = furthest >= 1;
     const at = Date.parse(appliedAt);
     const own = countsFor(profileId);
     if (at >= today.from && at < today.to) own.today += 1;
@@ -201,10 +194,10 @@ function buildModel(sqlite: Database.Database, query: ActivityQuery, group: Acti
   for (const row of prepared(
     sqlite,
     `SELECT a.profile_id,
-            SUM(i.scheduled_at >= @from AND i.scheduled_at < @to) AS scheduled,
-            SUM(i.scheduled_at >= @todayFrom AND i.scheduled_at < @todayTo) AS scheduled_today
-     FROM interviews i JOIN applications a ON a.id = i.application_id
-     WHERE ((i.scheduled_at >= @from AND i.scheduled_at < @to) OR (i.scheduled_at >= @todayFrom AND i.scheduled_at < @todayTo))${only === undefined ? '' : ' AND a.user_id = @only'}
+            SUM(i.at >= @from AND i.at < @to) AS scheduled,
+            SUM(i.at >= @todayFrom AND i.at < @todayTo) AS scheduled_today
+     FROM application_steps i JOIN applications a ON a.id = i.application_id
+     WHERE i.stage IN (${INTERVIEWS_SQL}) AND ((i.at >= @from AND i.at < @to) OR (i.at >= @todayFrom AND i.at < @todayTo))${only === undefined ? '' : ' AND a.user_id = @only'}
      GROUP BY a.profile_id`
   ).all({ from: iso(range.from), to: iso(range.to), todayFrom: iso(today.from), todayTo: iso(today.to), ...(only === undefined ? {} : { only }) }) as Array<{ profile_id: number; scheduled: number; scheduled_today: number }>) {
     const own = countsFor(row.profile_id);

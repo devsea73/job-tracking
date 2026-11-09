@@ -16,49 +16,148 @@ async function jobWithTwoApplicants(server: TestServer) {
 /** The signed-in user's application within a job's details. */
 const mine = (job: any) => job.applications.find((application: any) => application.isMine);
 
-const INTERVIEW = { stage: 'Technical Interview', scheduledAt: '2030-11-13T14:00:00-05:00', timezone: 'America/New_York' };
+const INTERVIEW = { stage: 'Technical Interview', at: '2030-11-13T14:00:00-05:00', timezone: 'America/New_York' };
 
-describe('application status', () => {
-  it('starts as Applied and stays independent per user', async () => {
+/** One person's application within a job's details, as they see it. */
+const myApplication = async (client: ApiClient, jobId: number) => mine((await client.get(`/api/jobs/${jobId}`)).json);
+
+describe('the stage of an application', () => {
+  it('starts as Applied and follows each person’s own timeline', async () => {
     const server = await createTestServer();
     const { tyler, john, jobId, tylerApp, johnApp } = await jobWithTwoApplicants(server);
-    expect(mine((await tyler.get(`/api/jobs/${jobId}`)).json).status).toBe('Applied');
+    expect(await myApplication(tyler, jobId)).toMatchObject({ stage: 'Applied', furthestStage: 'Applied', steps: [], interviewCount: 0 });
 
-    await tyler.patch(`/api/applications/${tylerApp}`, { status: 'Technical Interview' });
-    await john.patch(`/api/applications/${johnApp}`, { status: 'Recruiter Screen' });
+    await tyler.addStep(tylerApp, 'Technical Interview', '2030-11-13T14:00:00Z');
+    await john.addStep(johnApp, 'Recruiter Screen', '2030-11-10T10:00:00Z');
 
-    expect(mine((await tyler.get(`/api/jobs/${jobId}`)).json).status).toBe('Technical Interview');
-    expect(mine((await john.get(`/api/jobs/${jobId}`)).json).status).toBe('Recruiter Screen');
+    expect((await myApplication(tyler, jobId)).stage).toBe('Technical Interview');
+    expect((await myApplication(john, jobId)).stage).toBe('Recruiter Screen');
   });
 
-  it('records history, including the first status', async () => {
+  it('is the stage of the latest step by when it takes place, not by when it was put in', async () => {
     const server = await createTestServer();
     const { tyler, jobId, tylerApp } = await jobWithTwoApplicants(server);
-    await tyler.patch(`/api/applications/${tylerApp}`, { status: 'Recruiter Screen' });
-    await tyler.patch(`/api/applications/${tylerApp}`, { status: 'Recruiter Screen' }); // no change, no entry
-    await tyler.patch(`/api/applications/${tylerApp}`, { status: 'Offer' });
-    const history = mine((await tyler.get(`/api/jobs/${jobId}`)).json).history;
-    expect(history.map((entry: any) => [entry.oldStatus, entry.newStatus])).toEqual([
-      ['Recruiter Screen', 'Offer'],
-      ['Applied', 'Recruiter Screen'],
-      [null, 'Applied']
-    ]);
+    await tyler.addStep(tylerApp, 'Final Interview', '2030-11-18T11:00:00Z');
+    await tyler.addStep(tylerApp, 'Recruiter Screen', '2030-11-10T10:00:00Z');
+    const application = await myApplication(tyler, jobId);
+    expect(application).toMatchObject({ stage: 'Final Interview', furthestStage: 'Final Interview' });
+    // The timeline reads oldest first.
+    expect(application.steps.map((step: any) => step.stage)).toEqual(['Recruiter Screen', 'Final Interview']);
   });
 
-  it('rejects statuses that do not exist', async () => {
+  it('stays at Technical Interview through three technical rounds, each one an interview', async () => {
+    const server = await createTestServer();
+    const { tyler, jobId, tylerApp } = await jobWithTwoApplicants(server);
+    for (const day of ['2030-11-10', '2030-11-12', '2030-11-15']) await tyler.addStep(tylerApp, 'Technical Interview', `${day}T15:00:00Z`);
+    const application = await myApplication(tyler, jobId);
+    expect(application).toMatchObject({ stage: 'Technical Interview', furthestStage: 'Technical Interview', interviewCount: 3 });
+    expect(application.steps).toHaveLength(3);
+    expect((await tyler.get('/api/interviews')).json).toHaveLength(3);
+  });
+
+  it('ends at an offer or a rejection, which takes the interviews after it off the timeline', async () => {
+    const server = await createTestServer();
+    const { tyler, jobId, tylerApp } = await jobWithTwoApplicants(server);
+    await tyler.addStep(tylerApp, 'Recruiter Screen', '2030-11-01T10:00:00Z');
+    await tyler.addStep(tylerApp, 'Technical Interview', '2030-11-05T10:00:00Z');
+    const third = await tyler.addStep(tylerApp, 'Technical Interview', '2030-11-20T10:00:00Z');
+
+    const rejected = await tyler.addStep(tylerApp, 'Rejected', '2030-11-10T09:00:00Z');
+    expect(rejected.removed.map((step) => step.id)).toEqual([third.id]);
+    const application = await myApplication(tyler, jobId);
+    expect(application.steps.map((step: any) => [step.stage, step.at.slice(0, 10)])).toEqual([
+      ['Recruiter Screen', '2030-11-01'],
+      ['Technical Interview', '2030-11-05'],
+      ['Rejected', '2030-11-10']
+    ]);
+    // Rejected, having reached Technical Interview.
+    expect(application).toMatchObject({ stage: 'Rejected', furthestStage: 'Technical Interview', interviewCount: 2 });
+    expect((await tyler.get('/api/interviews')).json.map((item: any) => item.at.slice(0, 10))).toEqual(['2030-11-01', '2030-11-05']);
+
+    // An interview after the rejection is a second chance: the stage moves on to it.
+    await tyler.addStep(tylerApp, 'Final Interview', '2030-11-25T10:00:00Z');
+    expect((await myApplication(tyler, jobId)).stage).toBe('Final Interview');
+  });
+
+  it('takes later interviews off when a step is changed into an outcome too, and leaves other outcomes alone', async () => {
+    const server = await createTestServer();
+    const { tyler, jobId, tylerApp } = await jobWithTwoApplicants(server);
+    const final = await tyler.addStep(tylerApp, 'Final Interview', '2030-11-05T10:00:00Z');
+    const later = await tyler.addStep(tylerApp, 'Final Interview', '2030-11-12T10:00:00Z');
+    const changed = await tyler.patch(`/api/steps/${final.id}`, { stage: 'Offer', at: '2030-11-06T10:00:00Z', timezone: 'UTC' });
+    expect(changed.status).toBe(200);
+    expect(changed.json.removed.map((step: any) => step.id)).toEqual([later.id]);
+    // An offer taken back is a rejection after it: the offer stays on the timeline.
+    const rejected = await tyler.addStep(tylerApp, 'Rejected', '2030-11-20T10:00:00Z');
+    expect(rejected.removed).toEqual([]);
+    const application = await myApplication(tyler, jobId);
+    expect(application.steps.map((step: any) => step.stage)).toEqual(['Offer', 'Rejected']);
+    expect(application).toMatchObject({ stage: 'Rejected', furthestStage: 'Offer' });
+  });
+
+  it('goes back to the step before when the latest is removed', async () => {
+    const server = await createTestServer();
+    const { tyler, jobId, tylerApp } = await jobWithTwoApplicants(server);
+    await tyler.addStep(tylerApp, 'Technical Interview', '2030-11-05T10:00:00Z');
+    const rejected = await tyler.addStep(tylerApp, 'Rejected', '2030-11-10T10:00:00Z');
+    expect((await tyler.delete(`/api/steps/${rejected.id}`)).status).toBe(200);
+    expect(await myApplication(tyler, jobId)).toMatchObject({ stage: 'Technical Interview', furthestStage: 'Technical Interview' });
+  });
+
+  it('cannot be set by hand: only steps move it', async () => {
+    const server = await createTestServer();
+    const { tyler, jobId, tylerApp } = await jobWithTwoApplicants(server);
+    expect((await tyler.patch(`/api/applications/${tylerApp}`, { status: 'Offer' })).status).toBe(400);
+    expect((await tyler.patch(`/api/applications/${tylerApp}`, { stage: 'Offer' })).status).toBe(400);
+    expect((await myApplication(tyler, jobId)).stage).toBe('Applied');
+  });
+
+  it('rejects steps at stages that are not steps', async () => {
     const server = await createTestServer();
     const { tyler, tylerApp } = await jobWithTwoApplicants(server);
-    expect((await tyler.patch(`/api/applications/${tylerApp}`, { status: 'Hired!' })).status).toBe(400);
+    for (const stage of ['Applied', 'Hiring Manager', 'Other', 'Hired!']) {
+      expect((await tyler.post(`/api/applications/${tylerApp}/steps`, { ...INTERVIEW, stage })).status, stage).toBe(400);
+    }
+  });
+
+  it('keeps when a step takes place apart from when it was saved', async () => {
+    const server = await createTestServer();
+    const { tyler, tylerApp } = await jobWithTwoApplicants(server);
+    const step = await tyler.addStep(tylerApp, 'Recruiter Screen', '2020-03-01T10:00:00Z');
+    expect(step.at).toBe('2020-03-01T10:00:00.000Z');
+    expect(step.createdAt > '2025-01-01').toBe(true);
+    const changed = (await tyler.patch(`/api/steps/${step.id}`, { stage: 'Recruiter Screen', at: '2020-03-02T10:00:00Z', timezone: 'UTC' })).json;
+    expect(changed).toMatchObject({ at: '2020-03-02T10:00:00.000Z', createdAt: step.createdAt });
+    expect(changed.updatedAt >= step.createdAt).toBe(true);
+  });
+
+  it('starts from the applied date, which only the owner can change', async () => {
+    const server = await createTestServer();
+    const { tyler, john, jobId, tylerApp } = await jobWithTwoApplicants(server);
+    const before = await myApplication(tyler, jobId);
+    expect(before.appliedAt).toBe(before.createdAt);
+
+    const changed = await tyler.patch(`/api/applications/${tylerApp}`, { appliedAt: '2026-10-01T09:30:00-04:00' });
+    expect(changed.status).toBe(200);
+    expect(changed.json).toMatchObject({ appliedAt: '2026-10-01T13:30:00.000Z', createdAt: before.createdAt });
+    expect((await john.patch(`/api/applications/${tylerApp}`, { appliedAt: '2026-01-01T00:00:00Z' })).status).toBe(404);
+    expect((await tyler.patch(`/api/applications/${tylerApp}`, { appliedAt: '2026-10-01T09:30:00' })).status).toBe(400);
+    expect((await myApplication(tyler, jobId)).appliedAt).toBe('2026-10-01T13:30:00.000Z');
   });
 
   it("cannot touch another user's application", async () => {
     const server = await createTestServer();
     const { john, jobId, tyler, tylerApp } = await jobWithTwoApplicants(server);
-    expect((await john.patch(`/api/applications/${tylerApp}`, { status: 'Rejected' })).status).toBe(404);
+    const step = await tyler.addStep(tylerApp, 'Recruiter Screen', '2030-11-10T10:00:00Z');
     expect((await john.patch(`/api/applications/${tylerApp}`, { memo: 'hacked' })).status).toBe(404);
     expect((await john.delete(`/api/applications/${tylerApp}`)).status).toBe(404);
-    expect((await john.post(`/api/applications/${tylerApp}/interviews`, INTERVIEW)).status).toBe(404);
-    expect(mine((await tyler.get(`/api/jobs/${jobId}`)).json)).toMatchObject({ status: 'Applied', memo: 'tyler memo' });
+    expect((await john.post(`/api/applications/${tylerApp}/steps`, INTERVIEW)).status).toBe(404);
+    expect((await john.post(`/api/applications/${tylerApp}/steps`, { ...INTERVIEW, stage: 'Rejected' })).status).toBe(404);
+    expect((await john.patch(`/api/steps/${step.id}`, { ...INTERVIEW, stage: 'Rejected' })).status).toBe(404);
+    expect((await john.delete(`/api/steps/${step.id}`)).status).toBe(404);
+    const application = await myApplication(tyler, jobId);
+    expect(application).toMatchObject({ stage: 'Recruiter Screen', memo: 'tyler memo' });
+    expect(application.steps).toHaveLength(1);
   });
 });
 
@@ -70,14 +169,14 @@ describe('memos', () => {
     expect(mine((await tyler.get(`/api/jobs/${jobId}`)).json).memo).toBe('updated');
   });
 
-  it('are shared with everyone, along with interview notes', async () => {
+  it('are shared with everyone, along with the notes on each step', async () => {
     const server = await createTestServer();
     const { john, jobId, tylerApp, tyler } = await jobWithTwoApplicants(server);
-    await tyler.post(`/api/applications/${tylerApp}/interviews`, { ...INTERVIEW, note: 'tyler note' });
+    await tyler.post(`/api/applications/${tylerApp}/steps`, { ...INTERVIEW, note: 'tyler note' });
     const job = (await john.get(`/api/jobs/${jobId}`)).json;
     const tylers = job.applications.find((application: any) => application.owner.username === 'tyler');
-    expect(tylers).toMatchObject({ memo: 'tyler memo', isMine: false });
-    expect(tylers.interviews[0].note).toBe('tyler note');
+    expect(tylers).toMatchObject({ memo: 'tyler memo', isMine: false, stage: 'Technical Interview' });
+    expect(tylers.steps[0].note).toBe('tyler note');
     expect((await john.get('/api/jobs')).json.items[0].applications[0].memoPreview).toBe('tyler memo');
     // Anyone's memo can be found by searching.
     expect((await john.get('/api/jobs?q=tyler%20memo')).json.total).toBe(1);
@@ -88,43 +187,62 @@ describe('interviews', () => {
   it('supports several per application, stored in UTC with their timezone', async () => {
     const server = await createTestServer();
     const { tyler, jobId, tylerApp } = await jobWithTwoApplicants(server);
-    const created = await tyler.post(`/api/applications/${tylerApp}/interviews`, INTERVIEW);
+    const created = await tyler.post(`/api/applications/${tylerApp}/steps`, INTERVIEW);
     expect(created.status).toBe(201);
-    expect(created.json).toMatchObject({ scheduledAt: '2030-11-13T19:00:00.000Z', timezone: 'America/New_York', stage: 'Technical Interview' });
-    await tyler.post(`/api/applications/${tylerApp}/interviews`, { stage: 'Recruiter Screen', scheduledAt: '2030-11-10T10:00:00Z', timezone: 'UTC', note: 'Call' });
-    await tyler.post(`/api/applications/${tylerApp}/interviews`, { stage: 'Final Interview', scheduledAt: '2030-11-18T11:00:00Z', timezone: 'UTC' });
-    const list = mine((await tyler.get(`/api/jobs/${jobId}`)).json).interviews;
+    expect(created.json).toMatchObject({ at: '2030-11-13T19:00:00.000Z', timezone: 'America/New_York', stage: 'Technical Interview', removed: [] });
+    await tyler.post(`/api/applications/${tylerApp}/steps`, { stage: 'Recruiter Screen', at: '2030-11-10T10:00:00Z', timezone: 'UTC', note: 'Call' });
+    await tyler.post(`/api/applications/${tylerApp}/steps`, { stage: 'Final Interview', at: '2030-11-18T11:00:00Z', timezone: 'UTC' });
+    const list = (await myApplication(tyler, jobId)).steps;
     expect(list.map((item: any) => item.stage)).toEqual(['Recruiter Screen', 'Technical Interview', 'Final Interview']);
   });
 
   it('rejects ambiguous times and unknown timezones', async () => {
     const server = await createTestServer();
     const { tyler, tylerApp } = await jobWithTwoApplicants(server);
-    expect((await tyler.post(`/api/applications/${tylerApp}/interviews`, { ...INTERVIEW, scheduledAt: '2030-11-13T14:00:00' })).status).toBe(400);
-    expect((await tyler.post(`/api/applications/${tylerApp}/interviews`, { ...INTERVIEW, timezone: 'Mars/Olympus' })).status).toBe(400);
-    expect((await tyler.post(`/api/applications/${tylerApp}/interviews`, { ...INTERVIEW, stage: 'Coffee' })).status).toBe(400);
+    expect((await tyler.post(`/api/applications/${tylerApp}/steps`, { ...INTERVIEW, at: '2030-11-13T14:00:00' })).status).toBe(400);
+    expect((await tyler.post(`/api/applications/${tylerApp}/steps`, { ...INTERVIEW, timezone: 'Mars/Olympus' })).status).toBe(400);
+    expect((await tyler.post(`/api/applications/${tylerApp}/steps`, { ...INTERVIEW, stage: 'Coffee' })).status).toBe(400);
   });
 
   it('can be edited and removed by their owner only', async () => {
     const server = await createTestServer();
     const { tyler, john, tylerApp } = await jobWithTwoApplicants(server);
-    const { id } = (await tyler.post(`/api/applications/${tylerApp}/interviews`, INTERVIEW)).json;
+    const { id } = (await tyler.post(`/api/applications/${tylerApp}/steps`, INTERVIEW)).json;
 
-    expect((await john.patch(`/api/interviews/${id}`, INTERVIEW)).status).toBe(404);
-    expect((await john.delete(`/api/interviews/${id}`)).status).toBe(404);
+    expect((await john.patch(`/api/steps/${id}`, INTERVIEW)).status).toBe(404);
+    expect((await john.delete(`/api/steps/${id}`)).status).toBe(404);
 
-    const updated = await tyler.patch(`/api/interviews/${id}`, { ...INTERVIEW, stage: 'Final Interview', note: 'moved' });
+    const updated = await tyler.patch(`/api/steps/${id}`, { ...INTERVIEW, stage: 'Final Interview', note: 'moved' });
     expect(updated.json).toMatchObject({ stage: 'Final Interview', note: 'moved' });
-    expect((await tyler.delete(`/api/interviews/${id}`)).status).toBe(200);
+    expect((await tyler.delete(`/api/steps/${id}`)).status).toBe(200);
     expect((await tyler.get('/api/interviews')).json).toEqual([]);
+  });
+
+  it('are what the calendars list: offers and rejections are not interviews', async () => {
+    const server = await createTestServer();
+    const { tyler, john, tylerApp, johnApp } = await jobWithTwoApplicants(server);
+    await tyler.addStep(tylerApp, 'Recruiter Screen', '2030-11-10T10:00:00Z');
+    await tyler.addStep(tylerApp, 'Offer', '2030-11-20T10:00:00Z');
+    await john.addStep(johnApp, 'Technical Interview', '2030-11-12T10:00:00Z');
+    await john.addStep(johnApp, 'Rejected', '2030-11-14T10:00:00Z');
+
+    // My own by default; the whole team's on request, each marked as mine or not.
+    expect((await tyler.get('/api/interviews')).json.map((item: any) => item.stage)).toEqual(['Recruiter Screen']);
+    const everyone = (await tyler.get('/api/interviews?person=all')).json;
+    expect(everyone.map((item: any) => [item.owner.username, item.stage, item.isMine])).toEqual([
+      ['tyler', 'Recruiter Screen', true],
+      ['john', 'Technical Interview', false]
+    ]);
+    expect(everyone[1]).toMatchObject({ company: 'Stripe', title: 'Engineer', at: '2030-11-12T10:00:00.000Z', applicationId: johnApp });
+    expect((await tyler.get('/api/interviews?person=all&stage=Offer')).status).toBe(400);
   });
 
   it('shows upcoming interviews on the dashboard, and filters by date and stage', async () => {
     const server = await createTestServer();
     const { tyler, tylerApp } = await jobWithTwoApplicants(server);
-    await tyler.post(`/api/applications/${tylerApp}/interviews`, { stage: 'Recruiter Screen', scheduledAt: '2020-01-01T10:00:00Z', timezone: 'UTC' });
-    await tyler.post(`/api/applications/${tylerApp}/interviews`, { stage: 'Technical Interview', scheduledAt: '2030-11-13T10:00:00Z', timezone: 'UTC' });
-    await tyler.post(`/api/applications/${tylerApp}/interviews`, { stage: 'Final Interview', scheduledAt: '2031-01-13T10:00:00Z', timezone: 'UTC' });
+    await tyler.post(`/api/applications/${tylerApp}/steps`, { stage: 'Recruiter Screen', at: '2020-01-01T10:00:00Z', timezone: 'UTC' });
+    await tyler.post(`/api/applications/${tylerApp}/steps`, { stage: 'Technical Interview', at: '2030-11-13T10:00:00Z', timezone: 'UTC' });
+    await tyler.post(`/api/applications/${tylerApp}/steps`, { stage: 'Final Interview', at: '2031-01-13T10:00:00Z', timezone: 'UTC' });
 
     const dashboard = (await tyler.get('/api/dashboard')).json;
     expect(dashboard.upcomingInterviews).toBe(2);
@@ -140,10 +258,10 @@ describe('interviews', () => {
     const server = await createTestServer();
     const { tyler, tylerApp } = await jobWithTwoApplicants(server);
     for (const day of ['2020-01-01', '2020-02-01', '2020-03-01']) {
-      expect((await tyler.post(`/api/applications/${tylerApp}/interviews`, { stage: 'Recruiter Screen', scheduledAt: `${day}T10:00:00Z`, timezone: 'UTC' })).status).toBe(201);
+      expect((await tyler.post(`/api/applications/${tylerApp}/steps`, { stage: 'Recruiter Screen', at: `${day}T10:00:00Z`, timezone: 'UTC' })).status).toBe(201);
     }
     const before = encodeURIComponent('2025-01-01T00:00:00Z');
-    const days = (items: any[]) => items.map((item) => item.scheduledAt.slice(0, 10));
+    const days = (items: any[]) => items.map((item) => item.at.slice(0, 10));
     expect(days((await tyler.get(`/api/interviews?to=${before}&order=desc&limit=2`)).json)).toEqual(['2020-03-01', '2020-02-01']);
     expect(days((await tyler.get(`/api/interviews?to=${before}&limit=2`)).json)).toEqual(['2020-01-01', '2020-02-01']);
     expect((await tyler.get('/api/interviews?order=sideways')).status).toBe(400);
@@ -254,8 +372,7 @@ describe('search and filtering', () => {
     const stripe = await add(users.tyler, 'stripe', 'Backend Engineer', 'Stripe', 'Work on payments with Kubernetes.', 'recruiter called me');
     const figma = await add(users.tyler, 'figma', 'Data Analyst', 'Figma', 'Design tooling analytics in Snowflake.', 'applied via referral');
     const notion = await add(users.john, 'notion', 'Product Manager', 'Notion', 'Own the docs roadmap.', 'john note');
-    await users.tyler.patch(`/api/applications/${stripe.applicationId}`, { status: 'Technical Interview' });
-    await users.tyler.post(`/api/applications/${stripe.applicationId}/interviews`, { stage: 'Technical Interview', scheduledAt: '2030-11-13T14:00:00Z', timezone: 'UTC' });
+    await users.tyler.addStep(stripe.applicationId, 'Technical Interview', '2030-11-13T14:00:00Z');
     return { server, admin, tyler: users.tyler, john: users.john, stripe, figma, notion };
   }
   const titles = (response: any) => response.json.items.map((job: any) => job.company);
@@ -286,8 +403,8 @@ describe('search and filtering', () => {
 
   it('combines filters', async () => {
     const { tyler } = await catalog();
-    expect(titles(await tyler.get('/api/jobs?company=stripe&status=Technical%20Interview&q=recruiter'))).toEqual(['Stripe']);
-    expect(titles(await tyler.get('/api/jobs?company=stripe&status=Applied'))).toEqual([]);
+    expect(titles(await tyler.get('/api/jobs?company=stripe&stage=Technical%20Interview&q=recruiter'))).toEqual(['Stripe']);
+    expect(titles(await tyler.get('/api/jobs?company=stripe&stage=Applied'))).toEqual([]);
     expect(titles(await tyler.get('/api/jobs?company=figma&q=recruiter'))).toEqual([]);
   });
 
@@ -299,18 +416,19 @@ describe('search and filtering', () => {
     expect(titles(await john.get('/api/jobs?scope=mine'))).toEqual(['Notion']);
   });
 
-  it("matches status and stage on anyone's application, unless narrowed to your own", async () => {
+  it("matches the stage on anyone's application, unless narrowed to your own", async () => {
     const { tyler, john } = await catalog();
-    expect(titles(await john.get('/api/jobs?status=Technical%20Interview'))).toEqual(['Stripe']);
     expect(titles(await john.get('/api/jobs?stage=Technical%20Interview'))).toEqual(['Stripe']);
-    expect(titles(await john.get('/api/jobs?status=Technical%20Interview&scope=mine'))).toEqual([]);
-    expect(titles(await tyler.get('/api/jobs?status=Technical%20Interview&scope=mine'))).toEqual(['Stripe']);
+    expect(titles(await john.get('/api/jobs?stage=Technical%20Interview&scope=mine'))).toEqual([]);
+    expect(titles(await tyler.get('/api/jobs?stage=Technical%20Interview&scope=mine'))).toEqual(['Stripe']);
+    expect((await tyler.get('/api/jobs?stage=Hiring%20Manager')).status).toBe(400);
   });
 
-  it('filters by interview stage and date range', async () => {
+  it('filters by the stage each is at now, and by interview dates', async () => {
     const { tyler } = await catalog();
     expect(titles(await tyler.get('/api/jobs?stage=Technical%20Interview'))).toEqual(['Stripe']);
     expect(titles(await tyler.get('/api/jobs?stage=Final%20Interview'))).toEqual([]);
+    expect(titles(await tyler.get('/api/jobs?stage=Applied&sort=company'))).toEqual(['Figma', 'Notion']);
     const from = encodeURIComponent('2030-11-01T00:00:00Z');
     const to = encodeURIComponent('2030-11-30T00:00:00Z');
     expect(titles(await tyler.get(`/api/jobs?interviewFrom=${from}&interviewTo=${to}`))).toEqual(['Stripe']);
@@ -322,7 +440,8 @@ describe('search and filtering', () => {
     expect(titles(await tyler.get('/api/jobs?sort=company'))).toEqual(['Figma', 'Notion', 'Stripe']);
     expect(titles(await tyler.get('/api/jobs?sort=recent'))).toEqual(['Notion', 'Figma', 'Stripe']);
     expect(titles(await tyler.get('/api/jobs?sort=interview'))[0]).toBe('Stripe');
-    expect(titles(await tyler.get('/api/jobs?scope=mine&sort=status'))).toEqual(['Figma', 'Stripe']);
+    expect(titles(await tyler.get('/api/jobs?scope=mine&sort=stage'))).toEqual(['Figma', 'Stripe']);
+    expect((await tyler.get('/api/jobs?sort=status')).status).toBe(400);
     expect((await tyler.get('/api/jobs?sort=updated')).status).toBe(200);
     expect((await tyler.get('/api/jobs?sort=nonsense')).status).toBe(400);
   });
@@ -336,7 +455,7 @@ describe('search and filtering', () => {
 
   it('counts a user’s dashboard numbers correctly', async () => {
     const { tyler, figma } = await catalog();
-    await tyler.patch(`/api/applications/${figma.applicationId}`, { status: 'Rejected' });
+    await tyler.addStep(figma.applicationId, 'Rejected', '2026-10-01T10:00:00Z');
     const dashboard = (await tyler.get('/api/dashboard')).json;
     expect(dashboard).toMatchObject({ totalApplications: 2, activeApplications: 1, rejectedApplications: 1, upcomingInterviews: 1 });
   });
@@ -409,7 +528,8 @@ describe('persistence and backups', () => {
     const { admin, users } = await createUsers(first.app, 'tyler');
     first.http.serve('https://company.com/jobs/1', jobPage({ title: 'Engineer', company: 'Acme' }));
     const added: any = await users.tyler.addJob('https://company.com/jobs/1', { memo: 'keep me' });
-    await users.tyler.patch(`/api/applications/${added.applicationId}`, { status: 'Offer' });
+    await users.tyler.addStep(added.applicationId, 'Recruiter Screen', '2026-10-01T10:00:00Z', { note: 'first call' });
+    await users.tyler.addStep(added.applicationId, 'Offer', '2026-10-20T10:00:00Z');
     await admin.post(`/api/jobs/${added.jobId}/highlight`, { highlighted: true });
     await first.app.close();
     (await import('../src/server/db/client')).closeDatabase(first.ctx.handle);
@@ -419,7 +539,11 @@ describe('persistence and backups', () => {
     await tyler.login('tyler', 'tyler-password');
     const kept = (await tyler.get(`/api/jobs/${added.jobId}`)).json;
     expect(kept).toMatchObject({ title: 'Engineer', isHighlighted: true });
-    expect(mine(kept)).toMatchObject({ status: 'Offer', memo: 'keep me' });
+    expect(mine(kept)).toMatchObject({ stage: 'Offer', furthestStage: 'Offer', memo: 'keep me' });
+    expect(mine(kept).steps.map((step: any) => [step.stage, step.at, step.note])).toEqual([
+      ['Recruiter Screen', '2026-10-01T10:00:00.000Z', 'first call'],
+      ['Offer', '2026-10-20T10:00:00.000Z', null]
+    ]);
   });
 
   it('uses WAL mode and enforces foreign keys', async () => {

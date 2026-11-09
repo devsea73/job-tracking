@@ -9,7 +9,8 @@ import { pathToFileURL } from 'node:url';
 
 export const LOAD_PASSWORD = 'load-password';
 
-const STATUS_PATHS = [
+// Each path is an application's timeline: Applied, then a step at each stage after it.
+const STAGE_PATHS = [
   { weight: 45, path: ['Applied'] },
   { weight: 15, path: ['Applied', 'Rejected'] },
   { weight: 14, path: ['Applied', 'Recruiter Screen'] },
@@ -20,7 +21,7 @@ const STATUS_PATHS = [
   { weight: 1, path: ['Applied', 'Recruiter Screen', 'Technical Interview', 'Final Interview', 'Rejected'] },
   { weight: 2, path: ['Applied', 'Recruiter Screen', 'Technical Interview', 'Final Interview', 'Offer'] }
 ];
-const STAGE_FOR_STATUS = { 'Recruiter Screen': 'Recruiter Screen', 'Technical Interview': 'Technical Interview', 'Final Interview': 'Final Interview' };
+const INTERVIEW_STAGES = new Set(['Recruiter Screen', 'Technical Interview', 'Final Interview']);
 
 const WORDS =
   'data platform pipeline warehouse snowflake python spark kafka airflow dbt aws azure kubernetes terraform reliability analytics streaming governance modeling lakehouse batch orchestration observability engineers stakeholders customers roadmap architecture design review mentoring production quality security compliance healthcare finance retail logistics growth distributed systems latency throughput scale'.split(' ');
@@ -80,14 +81,14 @@ export function seedLoadData(sqlite, { passwordHash, jobs = 10_000, users = 10, 
   const now = Date.now();
   const iso = (ms) => new Date(ms).toISOString();
   const DAY = 86_400_000;
-  const weightTotal = STATUS_PATHS.reduce((sum, item) => sum + item.weight, 0);
+  const weightTotal = STAGE_PATHS.reduce((sum, item) => sum + item.weight, 0);
   const pickPath = () => {
     let roll = random.int(weightTotal);
-    for (const item of STATUS_PATHS) {
+    for (const item of STAGE_PATHS) {
       roll -= item.weight;
       if (roll < 0) return item.path;
     }
-    return STATUS_PATHS[0].path;
+    return STAGE_PATHS[0].path;
   };
 
   const insertUser = sqlite.prepare('INSERT INTO users (username, display_name, password_hash) VALUES (?, ?, ?)');
@@ -98,11 +99,11 @@ export function seedLoadData(sqlite, { passwordHash, jobs = 10_000, users = 10, 
   );
   const insertUrl = sqlite.prepare('INSERT INTO job_urls (job_id, original_url, normalized_url, source_platform, external_job_id, kind) VALUES (?, ?, ?, ?, ?, ?)');
   const insertIdentifier = sqlite.prepare('INSERT INTO job_identifiers (job_id, provider, external_id) VALUES (?, ?, ?)');
-  const insertApplication = sqlite.prepare('INSERT INTO applications (user_id, profile_id, job_id, status, memo, applied_at, updated_at, job_url_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
-  const insertHistory = sqlite.prepare('INSERT INTO application_status_history (application_id, old_status, new_status, changed_at) VALUES (?, ?, ?, ?)');
-  const insertInterview = sqlite.prepare('INSERT INTO interviews (application_id, stage, scheduled_at, timezone, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+  // The stage and furthest stage are worked out from the steps by the database's own triggers.
+  const insertApplication = sqlite.prepare('INSERT INTO applications (user_id, profile_id, job_id, memo, applied_at, created_at, updated_at, job_url_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+  const insertStep = sqlite.prepare('INSERT INTO application_steps (application_id, stage, at, timezone, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
 
-  const counts = { users: 0, profiles: 0, jobs: 0, urls: 0, applications: 0, interviews: 0, history: 0 };
+  const counts = { users: 0, profiles: 0, jobs: 0, urls: 0, applications: 0, interviews: 0, steps: 0 };
 
   sqlite.transaction(() => {
     const people = [];
@@ -166,20 +167,28 @@ export function seedLoadData(sqlite, { passwordHash, jobs = 10_000, users = 10, 
         // Each came with one of the job's links, taking turns; now and then someone joined without one.
         const link = (index + a) % 10 === 9 ? null : links[a % links.length];
         const applicationId = Number(
-          insertApplication.run(userId, profileId, jobId, path[path.length - 1], random.next() < 0.6 ? random.pick(MEMOS) : '', iso(applied), iso(steps[steps.length - 1]), link).lastInsertRowid
+          insertApplication.run(userId, profileId, jobId, random.next() < 0.6 ? random.pick(MEMOS) : '', iso(applied), iso(applied), iso(Math.min(steps[steps.length - 1], now)), link).lastInsertRowid
         );
         counts.applications += 1;
-        path.forEach((status, step) => {
-          insertHistory.run(applicationId, step === 0 ? null : path[step - 1], status, iso(steps[step]));
-          counts.history += 1;
-          const stage = STAGE_FOR_STATUS[status];
-          if (stage) {
-            // About a third of interviews are still to come.
-            const when = random.next() < 0.33 ? now + random.int(45) * DAY : steps[step] + DAY;
-            // Booked when the application got to that stage, as people do.
-            const booked = iso(Math.min(steps[step], now));
-            insertInterview.run(applicationId, stage, iso(when), 'America/New_York', random.next() < 0.3 ? 'Video call with the team' : null, booked, booked);
-            counts.interviews += 1;
+        path.forEach((stage, step) => {
+          if (step === 0) return;
+          // Saved around when the application got there, as people do: bookkeeping only.
+          const saved = iso(Math.min(steps[step], now));
+          if (INTERVIEW_STAGES.has(stage)) {
+            // The latest interview of one still going is often still to come.
+            const last = step === path.length - 1;
+            const first = last && random.next() < 0.33 ? now + random.int(45) * DAY : steps[step] + DAY;
+            // A technical stage is often more than one round.
+            const rounds = stage === 'Technical Interview' && random.next() < 0.4 ? 2 + random.int(2) : 1;
+            for (let round = 0; round < rounds; round += 1) {
+              insertStep.run(applicationId, stage, iso(first + round * 2 * 3_600_000), 'America/New_York', random.next() < 0.3 ? 'Video call with the team' : null, saved, saved);
+              counts.interviews += 1;
+              counts.steps += 1;
+            }
+          } else {
+            // An offer or a rejection, on the day it came.
+            insertStep.run(applicationId, stage, iso(steps[step] + 2 * DAY), 'America/New_York', null, saved, saved);
+            counts.steps += 1;
           }
         });
       }
