@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent } from 'react';
-import { AlertTriangle, CalendarClock, Check, CheckCircle2, CircleSlash, Copy, ExternalLink, Link2, Loader2, StickyNote, User } from 'lucide-react';
+import { AlertTriangle, Briefcase, Building2, CalendarClock, Check, CheckCircle2, CircleSlash, Copy, ExternalLink, FileText, FileWarning, Link2, Loader2, StickyNote, User } from 'lucide-react';
 import type { ApplicationSummary, CheckLinkResponse, CreateApplicationRequest, CreateApplicationResponse, DuplicateCandidate } from '@shared/api';
 import { unreadableNote } from '@shared/unreadable';
 import { applicationLabel, Avatar, StageBadge } from '@/components/job-bits';
 import { JobTags } from '@/components/job-tags';
+import { Symbol } from '@/components/symbols';
 import { Input, Textarea } from '@/components/ui/field';
 import { Select } from '@/components/ui/select';
 import { Tooltip } from '@/components/ui/misc';
@@ -357,33 +358,42 @@ export function AddBar({ onOpenJob }: { onOpenJob: (id: number) => void }) {
       </div>
     ) : null;
   if (result?.status === 'unreadable') {
+    // The page could not be read: a title and company are needed (*), the posting's text is optional.
+    const required = (value: string) => (value.trim() ? null : <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 font-semibold text-danger-ink" aria-hidden>*</span>);
     alert = (
-      <div className="space-y-1.5" data-add-manual>
-        <Line tone="warn" icon={AlertTriangle}>
-          <span className="shrink-0 font-medium text-warning-ink">Can't read the page</span>
-          <span className="min-w-0 shrink truncate text-ink-3">{REASONS[result.reason] ?? result.message}</span>
-          <Input aria-label="Job title" placeholder="Job title" className="h-7 w-[200px] shrink-0 text-[12.5px]" value={manual.title} onChange={(event) => setManual({ ...manual, title: event.target.value })} onKeyDown={onKeyDown} />
-          <Input aria-label="Company" placeholder="Company" className="h-7 w-[160px] shrink-0 text-[12.5px]" value={manual.company} onChange={(event) => setManual({ ...manual, company: event.target.value })} onKeyDown={onKeyDown} />
-        </Line>
-        {/* The posting's text, copied from the page by hand: the job then reads in full and is compared with the rest by it. */}
-        <div className="ml-6">
-          <Textarea
-            aria-label="Job description"
-            rows={5}
-            className="text-[12.5px]"
-            placeholder="Job description: copy it from the posting and paste it here, so the job reads in full and duplicates are found by it. Ctrl+Enter saves."
-            value={manual.description}
-            onChange={(event) => setManual({ ...manual, description: event.target.value })}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
-                event.preventDefault();
-                void save();
-              }
-            }}
-          />
-          <p className="mt-0.5 text-[11.5px] text-ink-3" data-description-length>
-            {manual.description.trim() ? `${manual.description.trim().length.toLocaleString()} characters` : 'Optional. Without it, the job is saved with a note saying the page could not be read.'}
-          </p>
+      <div className="flex items-start gap-2" data-add-manual>
+        <Symbol icon={FileWarning} label={`Can't read the page: ${REASONS[result.reason] ?? result.message}`} className="mt-1.5 text-warning-ink" />
+        <div className="min-w-0 flex-1 space-y-1.5">
+          <div className="flex gap-2">
+            <div className="relative w-[280px]">
+              <Briefcase className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-ink-3" aria-hidden />
+              <Input aria-label="Job title" aria-required placeholder="Job title" className="h-7 pl-8 pr-6 text-[12.5px]" value={manual.title} onChange={(event) => setManual({ ...manual, title: event.target.value })} onKeyDown={onKeyDown} />
+              {required(manual.title)}
+            </div>
+            <div className="relative w-[220px]">
+              <Building2 className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-ink-3" aria-hidden />
+              <Input aria-label="Company" aria-required placeholder="Company" className="h-7 pl-8 pr-6 text-[12.5px]" value={manual.company} onChange={(event) => setManual({ ...manual, company: event.target.value })} onKeyDown={onKeyDown} />
+              {required(manual.company)}
+            </div>
+          </div>
+          <div className="relative">
+            <FileText className="pointer-events-none absolute left-2.5 top-2 size-3.5 text-ink-3" aria-hidden />
+            <Textarea
+              aria-label="Job description"
+              rows={4}
+              className="pl-8 text-[12.5px]"
+              placeholder="Job description"
+              value={manual.description}
+              onChange={(event) => setManual({ ...manual, description: event.target.value })}
+              onKeyDown={(event) => {
+                // Enter makes a new line here; Ctrl+Enter saves.
+                if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+                  event.preventDefault();
+                  void save();
+                }
+              }}
+            />
+          </div>
         </div>
       </div>
     );
