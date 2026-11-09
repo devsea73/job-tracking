@@ -80,13 +80,11 @@ interface Filters {
   sort: JobSort;
 }
 
-const DEFAULT_FILTERS: Filters = { q: '', company: '', stage: ANY, from: '', to: '', scope: 'all', person: ANY, profile: ANY, highlightedOnly: false, highlightFirst: false, sort: 'recent' };
+/** Every list starts in applied-date order, latest first: mine by when I applied, the shared ones by when anyone first did. */
+const DEFAULT_FILTERS: Filters = { q: '', company: '', stage: ANY, from: '', to: '', scope: 'all', person: ANY, profile: ANY, highlightedOnly: false, highlightFirst: false, sort: 'applied' };
 
-/** My Applications is about when I applied; the shared lists about when jobs arrived. */
-const defaultsFor = (view: JobsView): Filters => (view === 'mine' ? { ...DEFAULT_FILTERS, sort: 'applied' } : DEFAULT_FILTERS);
-
-/** Applied date only makes sense for my own applications, and there it replaces "recently added". */
-const sortsFor = (view: JobsView) => SORT_OPTIONS.filter(({ value }) => (view === 'mine' ? value !== 'recent' : value !== 'applied'));
+/** "Recently added" is when a job reached the shared list; for my own, the applied date says it better. */
+const sortsFor = (view: JobsView) => SORT_OPTIONS.filter(({ value }) => view !== 'mine' || value !== 'recent');
 
 function useDebounced<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -324,7 +322,7 @@ function Pager({ page, size, total, onPage, onSize }: { page: number; size: Page
 }
 
 export function JobsPage({ view, user, onOpenJob, onAddJob, focusSearchSignal }: { view: JobsView; user: CurrentUser; onOpenJob: (id: number) => void; onAddJob: () => void; focusSearchSignal: number }) {
-  const [filters, setFilters] = useState<Filters>(() => defaultsFor(view));
+  const [filters, setFilters] = useState<Filters>(DEFAULT_FILTERS);
   const [showFilters, setShowFilters] = useState(false);
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set());
   const [expandAll, setExpandAll] = useState(false);
@@ -339,7 +337,7 @@ export function JobsPage({ view, user, onOpenJob, onAddJob, focusSearchSignal }:
   const set = (patch: Partial<Filters>) => setFilters((current) => ({ ...current, ...patch }));
 
   useEffect(() => {
-    setFilters(defaultsFor(view));
+    setFilters(DEFAULT_FILTERS);
     setShowFilters(false);
     setExpanded(new Set());
     setExpandAll(false);
@@ -424,7 +422,15 @@ export function JobsPage({ view, user, onOpenJob, onAddJob, focusSearchSignal }:
           </span>
           <div className="relative ml-1 min-w-[160px] flex-1">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-ink-3" aria-hidden />
-            <Input ref={searchInput} aria-label="Search" className="pl-8" placeholder="Search" value={filters.q} onChange={(event) => set({ q: event.target.value })} />
+            <Input
+              ref={searchInput}
+              aria-label="Search"
+              title="Matches in the company name come first, then in the title, then in the description or a memo; each group in the order chosen"
+              className="pl-8"
+              placeholder="Search"
+              value={filters.q}
+              onChange={(event) => set({ q: event.target.value })}
+            />
           </div>
           {view !== 'mine' ? (
             <div className="inline-flex shrink-0 rounded-md border border-border-strong p-0.5" role="group" aria-label="Who applied">

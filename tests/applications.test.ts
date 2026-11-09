@@ -386,6 +386,35 @@ describe('search and filtering', () => {
     expect(titles(await tyler.get('/api/jobs?q=zzzz'))).toEqual([]);
   });
 
+  it('puts company matches first, then title matches, then description and memo matches, each group by applied date', async () => {
+    const server = await createTestServer();
+    const { users } = await createUsers(server.app, 'tyler');
+    const add = async (slug: string, title: string, company: string, description: string, appliedAt: string, memo = '') => {
+      server.http.serve(`https://${slug}.com/jobs/1`, jobPage({ title, company, description: `${description} ${'filler words for this particular posting number '.repeat(8)}${slug}` }));
+      const added = (await users.tyler.addJob(`https://${slug}.com/jobs/1`, { memo })) as any;
+      expect(added.outcome, slug).toBe('created');
+      expect((await users.tyler.patch(`/api/applications/${added.applicationId}`, { appliedAt })).status).toBe(200);
+    };
+    // Applied in this order: the newest first within each group.
+    await add('a', 'Data Engineer', 'Atlas Health', 'Pipelines for Snowflake users.', '2026-10-01T10:00:00.000Z');
+    await add('b', 'Snowflake Administrator', 'Beacon Retail', 'Run the warehouse.', '2026-10-02T10:00:00.000Z');
+    await add('c', 'Platform Engineer', 'Snowflake', 'Build the data cloud.', '2026-10-03T10:00:00.000Z');
+    await add('d', 'Analyst', 'Delta Media', 'Dashboards and reports.', '2026-10-04T10:00:00.000Z', 'asked about snowflake');
+    await add('e', 'Snowflake Data Engineer', 'Evergreen Labs', 'Streaming work.', '2026-10-05T10:00:00.000Z');
+    await add('f', 'Lead', 'Snowflake Partners', 'Consulting.', '2026-10-06T10:00:00.000Z');
+    await add('g', 'Engineer', 'Granite', 'We use Snowflake daily.', '2026-10-07T10:00:00.000Z');
+
+    const order = async (q: string, sort = 'applied') => ((await users.tyler.get(`/api/jobs?q=${encodeURIComponent(q)}&sort=${sort}`)).json.items as any[]).map((job) => job.company);
+    expect(await order('snowflake')).toEqual(['Snowflake Partners', 'Snowflake', 'Evergreen Labs', 'Beacon Retail', 'Granite', 'Delta Media', 'Atlas Health']);
+    // Another order keeps the groups, and sorts inside each.
+    expect(await order('snowflake', 'company')).toEqual(['Snowflake', 'Snowflake Partners', 'Beacon Retail', 'Evergreen Labs', 'Atlas Health', 'Delta Media', 'Granite']);
+    // Several words: each counts where it is found best, the job by its worst.
+    // Snowflake (company) + Engineer (title) is a title match, like Evergreen's title holding both.
+    expect(await order('snowflake engineer')).toEqual(['Evergreen Labs', 'Snowflake', 'Granite', 'Atlas Health']);
+    // No search: the applied date alone.
+    expect(((await users.tyler.get('/api/jobs?scope=mine&sort=applied')).json.items as any[]).map((job) => job.company)[0]).toBe('Granite');
+  });
+
   it("searches everyone's memos", async () => {
     const { tyler, john } = await catalog();
     expect(titles(await tyler.get('/api/jobs?q=recruiter'))).toEqual(['Stripe']);

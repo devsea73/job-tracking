@@ -109,6 +109,24 @@ function sortPlan(userId: number, query: JobListQuery, now: string): SortPlan {
 }
 
 /**
+ * How well a job matches a search, best first: the words in the company name (0), else in the
+ * title (1), else only in its description or a memo (2). With several words, each counts where it
+ * is found best, and the job by its worst: "acme engineer" with Acme in the company and Engineer in
+ * the title is a title match. Jobs that match equally keep the order chosen, by default the applied date.
+ */
+function searchRelevance(tokens: string[]): { order: string; params: unknown[] } | null {
+  if (tokens.length === 0) return null;
+  const params: unknown[] = [];
+  const places = tokens.map((token) => {
+    const like = `%${escapeLike(token)}%`;
+    params.push(like, like);
+    return `CASE WHEN j.company_name LIKE ? ESCAPE '\\' THEN 0 WHEN j.title LIKE ? ESCAPE '\\' THEN 1 ELSE 2 END`;
+  });
+  // max() with one argument would add up rows; one word needs none.
+  return { order: places.length === 1 ? `${places[0]} ASC` : `MAX(${places.join(', ')}) ASC`, params };
+}
+
+/**
  * The shared list of jobs. Every filter that looks at applications has to match on one and the
  * same application: "Technical Interview" and "Tyler" together mean Tyler is at that stage, not
  * that Tyler applied while somebody else is.
@@ -117,7 +135,8 @@ export function listJobs(db: Db, userId: number, query: JobListQuery): JobListRe
   const where: string[] = [];
   const params: unknown[] = [];
 
-  for (const token of searchTokens(query.q ?? '')) {
+  const tokens = searchTokens(query.q ?? '');
+  for (const token of tokens) {
     const like = `%${escapeLike(token)}%`;
     const match = `"${token.replace(/"/g, '""')}"*`;
     where.push(`(
@@ -130,6 +149,7 @@ export function listJobs(db: Db, userId: number, query: JobListQuery): JobListRe
     )`);
     params.push(match, match, like, like);
   }
+  const relevance = searchRelevance(tokens);
   if (query.company) {
     where.push(`j.company_name LIKE ? ESCAPE '\\'`);
     params.push(`%${escapeLike(query.company)}%`);
@@ -181,12 +201,13 @@ export function listJobs(db: Db, userId: number, query: JobListQuery): JobListRe
   const total = prepared(sqlite, `SELECT COUNT(*) AS total FROM jobs j ${filter}`).get(...params) as { total: number };
 
   const plan = sortPlan(userId, query, new Date().toISOString());
-  const order = [query.highlightFirst ? 'j.is_highlighted DESC' : null, plan.order, 'j.id DESC'].filter(Boolean).join(', ');
+  // A search puts the best matches first, and only then the chosen order: see searchRelevance.
+  const order = [relevance?.order ?? null, query.highlightFirst ? 'j.is_highlighted DESC' : null, plan.order, 'j.id DESC'].filter(Boolean).join(', ');
   const rows = prepared(
     sqlite,
     `SELECT j.id, j.title, j.company_name, j.location, j.is_highlighted, j.created_at, j.updated_at, ${FACTS_COLUMNS}
      FROM jobs j LEFT JOIN job_facts f ON f.job_id = j.id ${plan.join} ${filter} ORDER BY ${order} LIMIT ? OFFSET ?`
-  ).all(...plan.joinParams, ...params, query.limit ?? 100, query.offset ?? 0) as JobRow[];
+  ).all(...plan.joinParams, ...params, ...(relevance?.params ?? []), query.limit ?? 100, query.offset ?? 0) as JobRow[];
 
   const byJob = listApplicationsForJobs(
     db,
