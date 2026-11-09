@@ -328,6 +328,8 @@ export interface KnownJobSummary {
   applicationCount: number;
   /** The checking person's own profiles that applied already. */
   myProfileIds: number[];
+  /** Everyone who applied, earliest first: who, under which profile, when, with which link, and the stage each is at. */
+  applications: ApplicationSummary[];
 }
 
 export type CheckLinkResponse =

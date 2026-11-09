@@ -483,11 +483,21 @@ function usableTitle(title: string | null | undefined, company: string | null | 
   return title.trim();
 }
 
+/** A job already in the list, with everyone who applied to it: who, under which profile, when, with which link, and where it is now. */
 function knownJob(ctx: AppContext, userId: number, jobId: number): KnownJobSummary {
   const sqlite = ctx.handle.sqlite;
   const job = sqlite.prepare('SELECT id, title, company_name, location, application_count FROM jobs WHERE id = ?').get(jobId) as { id: number; title: string; company_name: string; location: string | null; application_count: number };
-  const mine = sqlite.prepare('SELECT profile_id FROM applications WHERE job_id = ? AND user_id = ?').all(jobId, userId) as Array<{ profile_id: number }>;
-  return { id: job.id, title: job.title, company: job.company_name, location: job.location, facts: readJobFacts(sqlite, jobId), applicationCount: job.application_count, myProfileIds: mine.map((row) => row.profile_id) };
+  const applications = listApplicationsForJobs(ctx.db, userId, [jobId]).get(jobId) ?? [];
+  return {
+    id: job.id,
+    title: job.title,
+    company: job.company_name,
+    location: job.location,
+    facts: readJobFacts(sqlite, jobId),
+    applicationCount: job.application_count,
+    myProfileIds: applications.filter((application) => application.isMine).map((application) => application.profile.id),
+    applications
+  };
 }
 
 /**

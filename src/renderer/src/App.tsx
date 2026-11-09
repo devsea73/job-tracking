@@ -134,7 +134,7 @@ function Shell({ state, user }: { state: BridgeState; user: CurrentUser }) {
       <Sidebar page={page} onNavigate={navigate} user={user} state={state} />
       <main className="flex min-w-0 flex-1 flex-col">
         {state.connection === 'offline' ? <OfflineBanner state={state} /> : null}
-        <AddBar />
+        <AddBar onOpenJob={setOpenJob} />
         <div className="min-h-0 flex-1">
           {page === 'dashboard' ? <DashboardPage onOpenJob={setOpenJob} onNavigate={navigate} onAddJob={addJob} /> : null}
           {page === 'mine' || page === 'all' || page === 'highlighted' ? <JobsPage view={page} user={user} onOpenJob={setOpenJob} onAddJob={addJob} focusSearchSignal={focusSearch} /> : null}

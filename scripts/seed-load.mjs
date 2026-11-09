@@ -167,7 +167,7 @@ export function seedLoadData(sqlite, { passwordHash, jobs = 10_000, users = 10, 
         // Each came with one of the job's links, taking turns; now and then someone joined without one.
         const link = (index + a) % 10 === 9 ? null : links[a % links.length];
         const applicationId = Number(
-          insertApplication.run(userId, profileId, jobId, random.next() < 0.6 ? random.pick(MEMOS) : '', iso(applied), iso(applied), iso(Math.min(steps[steps.length - 1], now)), link).lastInsertRowid
+          insertApplication.run(userId, profileId, jobId, random.next() < 0.6 ? random.pick(MEMOS) : '', iso(applied), iso(Math.min(applied, now)), iso(Math.min(steps[steps.length - 1], now)), link).lastInsertRowid
         );
         counts.applications += 1;
         path.forEach((stage, step) => {

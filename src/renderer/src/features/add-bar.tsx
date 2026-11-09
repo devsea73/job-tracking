@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent } from 'react';
-import { AlertTriangle, Check, CheckCircle2, CircleSlash, Copy, Link2, Loader2, StickyNote, User } from 'lucide-react';
-import type { CheckLinkResponse, CreateApplicationRequest, CreateApplicationResponse, DuplicateCandidate } from '@shared/api';
+import { AlertTriangle, CalendarClock, Check, CheckCircle2, CircleSlash, Copy, ExternalLink, Link2, Loader2, StickyNote, User } from 'lucide-react';
+import type { ApplicationSummary, CheckLinkResponse, CreateApplicationRequest, CreateApplicationResponse, DuplicateCandidate } from '@shared/api';
 import { unreadableNote } from '@shared/unreadable';
+import { applicationLabel, Avatar, StageBadge } from '@/components/job-bits';
 import { JobTags } from '@/components/job-tags';
-import { Input } from '@/components/ui/field';
+import { Input, Textarea } from '@/components/ui/field';
 import { Select } from '@/components/ui/select';
 import { Tooltip } from '@/components/ui/misc';
 import { useToast } from '@/components/ui/toast';
 import { focusAddBar, registerAddBarInput } from '@/lib/add-bar-focus';
 import { call, errorMessage, useCreateApplication, useProfiles } from '@/lib/api';
-import { cn } from '@/lib/utils';
+import { cn, formatDateTime, formatRelative } from '@/lib/utils';
 
 /** Enough of a link to be worth reading: "https://…" or "company.com/…". */
 const looksLikeLink = (text: string) => /^https?:\/\/\S+\.\S+/i.test(text) || /^[a-z0-9-]+(\.[a-z0-9-]+)+\/\S*/i.test(text);
@@ -36,17 +37,87 @@ function Line({ tone, icon: Icon, children }: { tone: 'good' | 'warn' | 'bad'; i
   );
 }
 
+const SHOWN_APPLICATIONS = 5;
+
+const linkHost = (url: string) => {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return url;
+  }
+};
+
+/**
+ * What the list already knows about a job someone has pasted the link of: everyone who applied,
+ * earliest first, with when, under which profile, with which link, and where each is now.
+ */
+function AppliedList({ applications }: { applications: ApplicationSummary[] }) {
+  if (applications.length === 0) return <p className="ml-6 text-ink-3">Nobody has applied to it yet.</p>;
+  return (
+    <ul className="ml-6 divide-y divide-border overflow-hidden rounded-md border border-border bg-surface-2/40" aria-label="Who applied to this job" data-add-applied>
+      {applications.slice(0, SHOWN_APPLICATIONS).map((application) => (
+        <li key={application.id} className="flex items-center gap-2.5 px-2.5 py-1" data-applied-by={application.owner.username}>
+          <Avatar subject={application.profile} label={applicationLabel(application)} ring={false} />
+          <span className="w-[210px] min-w-0 truncate font-medium" title={applicationLabel(application)}>
+            {application.isMine ? (
+              <>
+                {application.profile.name} <span className="font-normal text-accent-soft-ink">(you)</span>
+              </>
+            ) : (
+              applicationLabel(application)
+            )}
+          </span>
+          <span className="shrink-0 tabular-nums text-ink-2" title={`Applied ${formatDateTime(application.appliedAt)}`}>
+            Applied {formatDateTime(application.appliedAt)} <span className="text-ink-3">· {formatRelative(application.appliedAt)}</span>
+          </span>
+          <span className="min-w-0 flex-1 truncate text-ink-3" title={application.link ? `Applied with ${application.link.url}` : 'Joined the job without a link of their own'}>
+            {application.link ? (
+              <>
+                <Link2 className="mr-1 inline size-3" aria-hidden />
+                {linkHost(application.link.url)}
+              </>
+            ) : (
+              'from the shared list'
+            )}
+          </span>
+          {application.nextInterviewAt ? (
+            <span className="inline-flex shrink-0 items-center gap-1 tabular-nums text-ink-2" title="Next interview">
+              <CalendarClock className="size-3.5 text-ink-3" aria-hidden />
+              {formatDateTime(application.nextInterviewAt)}
+            </span>
+          ) : null}
+          <span className="inline-flex w-[150px] shrink-0 items-center gap-1.5">
+            <StageBadge stage={application.stage} className="size-5" />
+            <span className="truncate text-ink-2">{application.stage}</span>
+          </span>
+        </li>
+      ))}
+      {applications.length > SHOWN_APPLICATIONS ? <li className="px-2.5 py-1 text-ink-3">+{applications.length - SHOWN_APPLICATIONS} more: open the job to see everyone</li> : null}
+    </ul>
+  );
+}
+
+function OpenJobButton({ jobId, onOpenJob }: { jobId: number; onOpenJob: (id: number) => void }) {
+  return (
+    <button type="button" onClick={() => onOpenJob(jobId)} className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-border-strong px-2 text-[12px] text-ink-2 hover:bg-surface-2 hover:text-ink">
+      <ExternalLink className="size-3" aria-hidden />
+      Open job
+    </button>
+  );
+}
+
 /**
  * Adding a job in one row on every page: paste a link and it is checked straight away, saying
- * whether it is new or a duplicate; ✓ then saves it without asking anything more.
+ * whether it is new or a duplicate; ✓ then saves it without asking anything more. A job already in
+ * the list shows who applied to it, when and how, for as long as its link is in the box.
  */
-export function AddBar() {
+export function AddBar({ onOpenJob }: { onOpenJob: (id: number) => void }) {
   const [url, setUrl] = useState('');
   const [memo, setMemo] = useState('');
   const [profileId, setProfileId] = useState<number | null>(null);
   const [check, setCheck] = useState<Check | null>(null);
   const [sameAs, setSameAs] = useState<number | null>(null);
-  const [manual, setManual] = useState({ title: '', company: '' });
+  const [manual, setManual] = useState({ title: '', company: '', description: '' });
   const [saving, setSaving] = useState(false);
   /** A likely duplicate found only when saving (someone saved it meanwhile): shown, for the person to decide. */
   const [asked, setAsked] = useState<{ url: string; draftId: string; candidates: DuplicateCandidate[] } | null>(null);
@@ -93,7 +164,7 @@ export function AddBar() {
     const promise = call<CheckLinkResponse>('POST', '/api/applications/check', { url: text })
       .then((result) => {
         setCheck((current) => (current?.url === text ? { url: text, state: 'done', result } : current));
-        if (result.status === 'unreadable') setManual({ title: result.job.title ?? '', company: result.job.company ?? '' });
+        if (result.status === 'unreadable') setManual({ title: result.job.title ?? '', company: result.job.company ?? '', description: '' });
         return result;
       })
       .catch((error: unknown) => {
@@ -132,7 +203,7 @@ export function AddBar() {
     setCheck(null);
     setSameAs(null);
     setAsked(null);
-    setManual({ title: '', company: '' });
+    setManual({ title: '', company: '', description: '' });
     pending.current = null;
     focusAddBar({ force: true });
   };
@@ -158,11 +229,13 @@ export function AddBar() {
       // Not "Same job": a new job, as far as the one on show goes. The others shown as "+N more"
       // were not looked at, so they wait on the Duplicates page instead of being called different.
       if (candidates?.length) base.resolution = sameAs ? { action: 'merge', jobId: sameAs } : { action: 'new', seen: [candidates[0].jobId] };
-      if (checked?.status === 'unreadable') base.manual = { title: manual.title.trim(), company: manual.company.trim(), description: checked.description, location: checked.job.location };
+      // The description typed in, when the page could not be read; otherwise a note saying why it is missing.
+      const typed = manual.description.trim();
+      if (checked?.status === 'unreadable') base.manual = { title: manual.title.trim(), company: manual.company.trim(), description: typed || checked.description, location: checked.job.location };
       let response: CreateApplicationResponse = await create.mutateAsync(base);
       // The page could not be read this time, although the check could: saved with what is known.
       if (response.outcome === 'needs_manual' && response.extracted.title && response.extracted.company) {
-        const description = !response.missing.includes('description') && response.extracted.description ? response.extracted.description : unreadableNote(response.reason, response.message);
+        const description = !response.missing.includes('description') && response.extracted.description ? response.extracted.description : typed || unreadableNote(response.reason, response.message);
         response = await create.mutateAsync({ ...base, draftId: response.draftId, manual: { title: response.extracted.title, company: response.extracted.company, description, location: response.extracted.location } });
       }
       if (response.outcome === 'possible_duplicate') {
@@ -227,57 +300,92 @@ export function AddBar() {
     );
   } else if (result?.status === 'known') {
     const job = result.job;
-    alert = alreadyMine ? (
-      <Line tone="bad" icon={CircleSlash}>
-        <span className="shrink-0 font-medium text-danger-ink">Already applied as {chosen?.name}</span>
-        <span className="truncate text-ink-2">
-          {job.title} · {job.company}
-        </span>
-      </Line>
-    ) : (
-      <Line tone="warn" icon={Copy}>
-        <span className="shrink-0 font-medium text-warning-ink">Duplicate</span>
-        <span className="truncate text-ink-2">
-          Already in the list: {job.title} · {job.company} · {job.applicationCount} applied
-        </span>
-        <JobTags facts={job.facts} className="shrink-0" />
-      </Line>
+    const applied = job.applications ?? [];
+    alert = (
+      <div className="space-y-1" data-add-known={job.id}>
+        {alreadyMine ? (
+          <Line tone="bad" icon={CircleSlash}>
+            <span className="shrink-0 font-medium text-danger-ink">Already applied as {chosen?.name}</span>
+            <span className="truncate text-ink-2">
+              {job.title} · {job.company}
+            </span>
+            <JobTags facts={job.facts} className="shrink-0" />
+            <OpenJobButton jobId={job.id} onOpenJob={onOpenJob} />
+          </Line>
+        ) : (
+          <Line tone="warn" icon={Copy}>
+            <span className="shrink-0 font-medium text-warning-ink">Already in the list</span>
+            <span className="truncate text-ink-2">
+              {job.title} · {job.company} · {applied.length === 1 ? '1 application' : `${applied.length} applications`}
+            </span>
+            <JobTags facts={job.facts} className="shrink-0" />
+            <OpenJobButton jobId={job.id} onOpenJob={onOpenJob} />
+          </Line>
+        )}
+        <AppliedList applications={applied} />
+      </div>
     );
   }
   // Shown with whatever else is still true, like a page that could not be read.
   const best = offered?.[0] ?? null;
   const duplicateLine =
     best && offered ? (
-      <Line tone="warn" icon={AlertTriangle}>
-        <span className="shrink-0 font-medium text-warning-ink">Maybe a duplicate</span>
-        <span className="truncate text-ink-2">
-          {best.title} · {best.company}
-          {best.reasons.length ? ` (${best.reasons.slice(0, 3).join(', ')})` : ''}
-          {offered.length > 1 ? ` +${offered.length - 1} more` : ''}
-        </span>
-        <button
-          type="button"
-          aria-pressed={sameAs === best.jobId}
-          onClick={() => {
-            setSameAs(sameAs === best.jobId ? null : best.jobId);
-            focusAddBar({ force: true });
-          }}
-          className={cn('h-6 shrink-0 rounded-md border px-2 text-[12px]', sameAs === best.jobId ? 'border-accent bg-accent-soft text-accent-soft-ink' : 'border-border-strong text-ink-2 hover:bg-surface-2')}
-          title="Save it under that job instead of as a new one"
-        >
-          {sameAs === best.jobId ? <Check className="mr-1 inline size-3" aria-hidden /> : null}
-          Same job
-        </button>
-      </Line>
+      <div className="space-y-1" data-add-possible={best.jobId}>
+        <Line tone="warn" icon={AlertTriangle}>
+          <span className="shrink-0 font-medium text-warning-ink">Maybe a duplicate</span>
+          <span className="truncate text-ink-2">
+            {best.title} · {best.company}
+            {best.reasons.length ? ` (${best.reasons.slice(0, 3).join(', ')})` : ''}
+            {offered.length > 1 ? ` +${offered.length - 1} more` : ''}
+          </span>
+          <button
+            type="button"
+            aria-pressed={sameAs === best.jobId}
+            onClick={() => {
+              setSameAs(sameAs === best.jobId ? null : best.jobId);
+              focusAddBar({ force: true });
+            }}
+            className={cn('h-6 shrink-0 rounded-md border px-2 text-[12px]', sameAs === best.jobId ? 'border-accent bg-accent-soft text-accent-soft-ink' : 'border-border-strong text-ink-2 hover:bg-surface-2')}
+            title="Save it under that job instead of as a new one"
+          >
+            {sameAs === best.jobId ? <Check className="mr-1 inline size-3" aria-hidden /> : null}
+            Same job
+          </button>
+          <OpenJobButton jobId={best.jobId} onOpenJob={onOpenJob} />
+        </Line>
+        <AppliedList applications={best.applications} />
+      </div>
     ) : null;
   if (result?.status === 'unreadable') {
     alert = (
-      <Line tone="warn" icon={AlertTriangle}>
-        <span className="shrink-0 font-medium text-warning-ink">Can't read the page</span>
-        <span className="min-w-0 shrink truncate text-ink-3">{REASONS[result.reason] ?? result.message}</span>
-        <Input aria-label="Job title" placeholder="Job title" className="h-7 w-[200px] shrink-0 text-[12.5px]" value={manual.title} onChange={(event) => setManual({ ...manual, title: event.target.value })} onKeyDown={onKeyDown} />
-        <Input aria-label="Company" placeholder="Company" className="h-7 w-[160px] shrink-0 text-[12.5px]" value={manual.company} onChange={(event) => setManual({ ...manual, company: event.target.value })} onKeyDown={onKeyDown} />
-      </Line>
+      <div className="space-y-1.5" data-add-manual>
+        <Line tone="warn" icon={AlertTriangle}>
+          <span className="shrink-0 font-medium text-warning-ink">Can't read the page</span>
+          <span className="min-w-0 shrink truncate text-ink-3">{REASONS[result.reason] ?? result.message}</span>
+          <Input aria-label="Job title" placeholder="Job title" className="h-7 w-[200px] shrink-0 text-[12.5px]" value={manual.title} onChange={(event) => setManual({ ...manual, title: event.target.value })} onKeyDown={onKeyDown} />
+          <Input aria-label="Company" placeholder="Company" className="h-7 w-[160px] shrink-0 text-[12.5px]" value={manual.company} onChange={(event) => setManual({ ...manual, company: event.target.value })} onKeyDown={onKeyDown} />
+        </Line>
+        {/* The posting's text, copied from the page by hand: the job then reads in full and is compared with the rest by it. */}
+        <div className="ml-6">
+          <Textarea
+            aria-label="Job description"
+            rows={5}
+            className="text-[12.5px]"
+            placeholder="Job description: copy it from the posting and paste it here, so the job reads in full and duplicates are found by it. Ctrl+Enter saves."
+            value={manual.description}
+            onChange={(event) => setManual({ ...manual, description: event.target.value })}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+                event.preventDefault();
+                void save();
+              }
+            }}
+          />
+          <p className="mt-0.5 text-[11.5px] text-ink-3" data-description-length>
+            {manual.description.trim() ? `${manual.description.trim().length.toLocaleString()} characters` : 'Optional. Without it, the job is saved with a note saying the page could not be read.'}
+          </p>
+        </div>
+      </div>
     );
   }
 

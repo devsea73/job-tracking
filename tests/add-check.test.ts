@@ -46,6 +46,40 @@ describe('checking a pasted link before saving it', () => {
     expect(saved).toMatchObject({ outcome: 'created', jobWasNew: false, jobId: added.jobId });
   });
 
+  it('shows who applied to a job already in the list: when, under which profile, with which link, and where each is now', async () => {
+    const { server, users, check } = await setUp();
+    server.http.serve('https://careers.example.com/jobs/12', jobPage({ title: 'Analytics Engineer', company: 'Acme' }));
+    const johns = (await users.john.addJob('https://careers.example.com/jobs/12')) as Created;
+    await users.john.patch(`/api/applications/${johns.applicationId}`, { appliedAt: '2026-10-02T15:30:00.000Z' });
+    await users.john.addStep(johns.applicationId, 'Recruiter Screen', '2026-10-06T14:00:00.000Z');
+    await users.john.addStep(johns.applicationId, 'Technical Interview', '2030-01-10T16:00:00.000Z');
+    const second = (await users.john.post('/api/profiles', { name: 'Backend' })).json.id;
+    await users.john.post(`/api/jobs/${johns.jobId}/apply`, { profileId: second });
+
+    const checked = await check(users.andy, 'https://careers.example.com/jobs/12');
+    if (checked.status !== 'known') throw new Error(checked.status);
+    expect(checked.job.applications).toHaveLength(2);
+    // Earliest first, each with its own story.
+    expect(checked.job.applications[0]).toMatchObject({
+      owner: { username: 'john' },
+      profile: { name: 'john' },
+      isMine: false,
+      appliedAt: '2026-10-02T15:30:00.000Z',
+      stage: 'Technical Interview',
+      furthestStage: 'Technical Interview',
+      nextInterviewAt: '2030-01-10T16:00:00.000Z',
+      link: { url: 'https://careers.example.com/jobs/12' }
+    });
+    expect(checked.job.applications[1]).toMatchObject({ profile: { name: 'Backend' }, stage: 'Applied', link: null });
+
+    // For John, his own are marked as his.
+    const forJohn = await check(users.john, 'https://careers.example.com/jobs/12?ref=x');
+    if (forJohn.status !== 'known') throw new Error(forJohn.status);
+    expect(forJohn.job.applications.every((application) => application.isMine)).toBe(true);
+    expect(forJohn.job.myProfileIds.sort()).toEqual([await users.john.defaultProfileId(), second].sort());
+    expect(server.ctx.handle.sqlite.prepare('SELECT COUNT(*) AS n FROM applications').get()).toEqual({ n: 2 });
+  });
+
   it('finds a duplicate by content too, under another link', async () => {
     const { server, users, check } = await setUp();
     server.http.serve('https://careers.example.com/jobs/3', jobPage({ title: 'Platform Engineer', company: 'Acme', description: LONG_DESCRIPTION, location: 'Austin, TX' }));
@@ -125,6 +159,17 @@ describe('checking a pasted link before saving it', () => {
     expect(saved.outcome).toBe('created');
     const detail = (await users.andy.get(`/api/jobs/${saved.jobId}`)).json as JobDetail;
     expect(detail).toMatchObject({ title: 'Data Engineer', company: 'Acme', description: UNREADABLE_NOTES.closed });
+  });
+
+  it('keeps a job description typed in by hand for a page that cannot be read', async () => {
+    const { users, check } = await setUp();
+    const checked = await check(users.andy, 'https://careers.example.com/jobs/gone-456');
+    if (checked.status !== 'unreadable') throw new Error(checked.status);
+    const typed = 'We are hiring a data engineer to build streaming pipelines with Kafka and Snowflake. '.repeat(8).trim();
+    const saved = (await users.andy.addJob('https://careers.example.com/jobs/gone-456', { draftId: checked.draftId, manual: { title: 'Data Engineer', company: 'Acme', description: typed } })) as Created;
+    expect(saved.outcome).toBe('created');
+    const detail = (await users.andy.get(`/api/jobs/${saved.jobId}`)).json as JobDetail;
+    expect(detail).toMatchObject({ title: 'Data Engineer', company: 'Acme', description: typed });
   });
 
   it('refuses what is not a link, and needs a signed-in person', async () => {
