@@ -19,6 +19,17 @@ export const formatShortDate = (iso: string, now = new Date()): string => (new D
 export const formatTime = (iso: string): string => timeOnly.format(new Date(iso));
 export const formatLongDate = (iso: string): string => longDate.format(new Date(iso));
 
+/** "3:26p", for where every character counts, like a calendar day. "15:26" stays as it is. */
+export function formatCompactTime(iso: string): string {
+  const date = new Date(iso);
+  const parts = timeOnly.formatToParts(date);
+  const period = parts.find((part) => part.type === 'dayPeriod')?.value;
+  if (!period || !/^[ap]/i.test(period)) return timeOnly.format(date);
+  const hour = parts.find((part) => part.type === 'hour')?.value ?? '';
+  const minute = parts.find((part) => part.type === 'minute')?.value ?? '';
+  return `${hour}:${minute}${period[0].toLowerCase()}`;
+}
+
 const relative = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
 
 export function formatRelative(iso: string, now = Date.now()): string {

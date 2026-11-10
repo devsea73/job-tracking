@@ -279,7 +279,7 @@ try {
   // The calendar opens on this month: forward to the interview's, then its day.
   for (let step = 0; step < 120 && !(await tyler.page.locator('[data-month="2030-11"]').count()); step += 1) await tyler.page.getByRole('button', { name: 'Next month' }).click();
   await tyler.page.locator('[data-day="2030-11-13"][data-count="1"]').click();
-  await tyler.page.locator('[data-day-list]').getByText('Video call with the hiring team').waitFor();
+  await tyler.page.locator('[data-day-list]').getByRole('img', { name: 'Video call with the hiring team' }).waitFor();
   await shot(tyler.page, '14-interviews-calendar');
   await tyler.page.getByRole('button', { name: "The team's interviews" }).click();
   await tyler.page.locator('[data-calendar="team"] [data-day="2030-11-10"][data-count="1"]').waitFor();

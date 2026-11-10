@@ -1,6 +1,6 @@
 # Job Tracker
 
-A desktop app for tracking job applications across several people on the same local network. One computer hosts the data, the others connect to it, and everyone shares everything: one list of jobs, and each other's profiles, statuses, memos and interviews. Each person can only change their own.
+A desktop app for tracking job applications across several people on the same local network. One computer hosts the data, the others connect to it, and everyone shares everything: one list of jobs, and each other's profiles, stages, memos and interviews. Each person can only change their own.
 
 Nothing leaves your network except requests to read the job postings you add. There are no cloud databases and no accounts with anyone else.
 
@@ -75,7 +75,7 @@ If the connection fails, see [Network setup](#network-setup).
    | **Can't read the page** | Says why (closed, bot check…). Type a title and company in the bar to save it |
 
 3. Choose **✓**, or press Enter. It saves without any more questions, the bar clears, and the cursor is back in the URL box for the next job. The host fills in the title, company, location and description, plus the tags, salary and posting date when the posting states them.
-4. Open the job to change your status, edit your memo, or schedule interviews. Changes save as you make them.
+4. Open the job to add a step to its timeline (an interview, an offer or a rejection), or to edit your memo. Changes save as you make them.
 
 Links in the app are **copied**, never opened: click a job's link (next to the number of applicants in the job panel), or a link anywhere else, and it is on your clipboard to paste where you like.
 
@@ -89,7 +89,7 @@ Each profile can apply to a job once, so one person can apply to the same job un
 
 ### 7. See how everyone is doing
 
-**All Jobs** shows every job with an avatar per profile that applied, marked with its current stage. Use the arrow on a row, or the expand button at the top, to see each profile's stages and next interview. The filter button opens filters for **Person**, **Profile**, status and dates, and the sort menu includes **Most applied**, to see which jobs the most people went for.
+**All Jobs** shows every job with an avatar per profile that applied, marked with its current stage. Use the arrow on a row, or the expand button at the top, to see each profile's stages and next interview. The filter button opens filters for **Person**, **Profile**, stage and dates, and the sort menu includes **Most applied**, to see which jobs the most people went for.
 
 **Team** has a summary table and a chart per person, for all their profiles together or one at a time:
 
@@ -101,7 +101,7 @@ Each profile can apply to a job once, so one person can apply to the same job un
 | Offer pass | Reached Offer ÷ reached Final Interview |
 | Success | Reached Offer ÷ all applications |
 
-"Reached" means the highest stage in the status history. A job that got to Technical Interview and was later rejected still counts as reaching it, and a skipped stage counts as passed. A rate shows **–** when nothing reached the stage before it.
+"Reached" means the highest stage on the application's timeline. A job that got to Technical Interview and was later rejected still counts as reaching it, and a skipped stage counts as passed. A rate shows **–** when nothing reached the stage before it.
 
 | What happens | When |
 | --- | --- |
@@ -258,14 +258,16 @@ These rules are backed by database constraints: one application per profile per 
 
 ## Who can see what
 
-Everything about applications is shared with everyone who can sign in. Only the owner can change it.
+Everything about applications is shared with everyone who can sign in. Only the owner can change it. A job's own details are shared too: anyone whose profile applied to the job can correct them, even if other people applied as well.
 
-| | Everyone | Only you | Administrator only |
-| --- | --- | --- | --- |
-| Job title, company, description, links | See | | Correct or delete |
-| Highlights | See and change | | |
-| Statuses, memos, interviews, history, profiles, photos, statistics | See | Change your own | Remove any photo |
-| User accounts and backups | | | Manage |
+| | Everyone | If your profile applied | Only you | Administrator only |
+| --- | --- | --- | --- | --- |
+| Job title, company, location, description | See | Correct | | Correct any job |
+| Links | See | | | |
+| Deleting a job | | When only your own profiles applied | | Delete any job |
+| Highlights | See and change | | | |
+| Stages, timelines, memos, profiles, photos, statistics | See | | Change your own | Remove any photo |
+| User accounts and backups | | | | Manage |
 
 Memos and interview notes are visible to everyone on the host, so keep anything truly private out of them. Passwords and sessions are never shown to anyone.
 

@@ -65,6 +65,11 @@ export function applicationLabel(application: Pick<ApplicationSummary, 'profile'
   return application.profile.name === owner ? owner : `${application.profile.name} (${owner})`;
 }
 
+/** A job's details can be corrected by anyone with a profile on it, whoever else applied, and by the administrator. */
+export function canEditJob(applications: Array<Pick<ApplicationSummary, 'isMine'>>, user: Pick<CurrentUser, 'role'>): boolean {
+  return user.role === 'admin' || applications.some((application) => application.isMine);
+}
+
 /** Someone's own profiles are the only ones that applied, so deleting it takes nothing from anyone else. */
 export function canDeleteJob(applications: Array<Pick<ApplicationSummary, 'isMine'>>, user: Pick<CurrentUser, 'role'>): boolean {
   if (user.role === 'admin') return true;
@@ -110,6 +115,16 @@ export function Avatar({
         {stage ? <span aria-hidden className="absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full ring-2 ring-surface" style={{ backgroundColor: stageInk(stage) }} /> : null}
       </span>
     </Tooltip>
+  );
+}
+
+/** An avatar small enough for a calendar day: the picture or initials, with nothing of its own to hover or tab to. */
+export function MiniAvatar({ subject, className }: { subject: AvatarSubject; className?: string }) {
+  const image = useAvatarImage(subject);
+  return (
+    <span aria-hidden className={cn('inline-flex size-3.5 shrink-0 select-none items-center justify-center overflow-hidden rounded-full text-[7.5px] font-semibold leading-none text-white', className)} style={{ backgroundColor: subject.color }}>
+      {image ? <img src={image} alt="" className="size-full object-cover" /> : subject.initials}
+    </span>
   );
 }
 

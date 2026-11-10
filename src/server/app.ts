@@ -258,10 +258,11 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
     return applyToExistingJob(ctx, requireSession(request).user.id, id, body.profileId, body.memo ?? '', body.urlId ?? null, { unlessApplied: body.unlessApplied });
   });
 
-  // Job details are shared by everyone, so corrections go through the administrator.
-  // Deleting has its own rule, in the service: see deleteJob.
-  app.patch('/api/jobs/:id', admin, async (request) => {
+  // Anyone whose profile applied to a job can correct its details, as can the administrator: see
+  // assertCanEditJob. Deleting has its own rule, in the service: see deleteJob.
+  app.patch('/api/jobs/:id', async (request) => {
     const { id } = v.parse(v.idParam, request.params);
+    applicationsService.assertCanEditJob(ctx, requireSession(request).user, id);
     const body = v.parse(v.updateJobBody, request.body);
     const result = ctx.db
       .update(jobs)

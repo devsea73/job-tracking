@@ -4,7 +4,7 @@ import { Banknote, CalendarCheck, CalendarDays, CalendarPlus, Clock, Copy, Info,
 import type { ApplicationDetail, CurrentUser, JobDetail, Step } from '@shared/api';
 import type { StepStage } from '@shared/constants';
 import { isUnreadableNote } from '@shared/unreadable';
-import { applicationLabel, Avatar, canDeleteJob, HighlightButton, ProcessSteps, StageBadge, userName } from '@/components/job-bits';
+import { applicationLabel, Avatar, canDeleteJob, canEditJob, HighlightButton, ProcessSteps, StageBadge, userName } from '@/components/job-bits';
 import { formatSalary, JobTags } from '@/components/job-tags';
 import { useCopyLink } from '@/lib/copy-link';
 import { Symbol } from '@/components/symbols';
@@ -524,7 +524,7 @@ export function JobDetailSheet({ jobId, user, onClose }: { jobId: number | null;
               </Button>
             </Tooltip>
           ) : null}
-          {job && user.role === 'admin' ? (
+          {job && canEditJob(job.applications, user) ? (
             <Tooltip content="Correct details">
               <Button size="icon" variant="ghost" aria-label="Correct details" onClick={() => setEditing(true)}>
                 <Pencil />
@@ -582,7 +582,7 @@ export function JobDetailSheet({ jobId, user, onClose }: { jobId: number | null;
             </Section>
 
 
-            {user.role === 'admin' ? <EditJobDialog job={job} open={editing} onOpenChange={setEditing} /> : null}
+            {canEditJob(job.applications, user) ? <EditJobDialog job={job} open={editing} onOpenChange={setEditing} /> : null}
             <ConfirmDialog
               open={deleting}
               onOpenChange={setDeleting}

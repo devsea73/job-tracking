@@ -498,9 +498,38 @@ describe('search and filtering', () => {
     expect(titles(await tyler.get('/api/jobs?q=wizard'))).toEqual([]);
   });
 
-  it('lets only the administrator change shared job details', async () => {
-    const { tyler, stripe } = await catalog();
-    expect((await tyler.patch(`/api/jobs/${stripe.jobId}`, { title: 'Mine now' })).status).toBe(403);
+  it('lets anyone whose profile applied change a job’s details, even with others on it, and nobody else but the administrator', async () => {
+    const { admin, tyler, john, stripe, server } = await catalog();
+    const job = `/api/jobs/${stripe.jobId}`;
+
+    // John has not applied to it: he can read it, not change it.
+    expect((await john.patch(job, { title: 'Not mine' })).status).toBe(403);
+    expect((await john.get(job)).json.title).toBe('Backend Engineer');
+
+    // Tyler's own, with nobody else on it.
+    const changed = await tyler.patch(job, { title: 'Payments Engineer', company: 'Stripe Inc', location: 'Remote' });
+    expect(changed.status).toBe(200);
+    expect(changed.json).toMatchObject({ title: 'Payments Engineer', company: 'Stripe Inc', location: 'Remote' });
+
+    // Once John applies too, either of them can, and each sees the other's correction.
+    const joined = await john.post(`${job}/apply`, { profileId: await john.defaultProfileId() });
+    expect(joined.json).toMatchObject({ outcome: 'created' });
+    expect((await john.patch(job, { title: 'Senior Payments Engineer' })).status).toBe(200);
+    expect((await tyler.get(job)).json.title).toBe('Senior Payments Engineer');
+    expect((await tyler.patch(job, { description: 'Corrected by hand: payments work on Kubernetes.' })).status).toBe(200);
+    expect((await john.get(job)).json.description).toBe('Corrected by hand: payments work on Kubernetes.');
+
+    // Only the job's details are shared: each application is still its owner's alone.
+    expect((await john.patch(`/api/applications/${stripe.applicationId}`, { memo: 'not my memo' })).status).toBe(404);
+
+    // Withdrawing takes the right away again.
+    expect((await john.delete(`/api/applications/${joined.json.applicationId}`)).status).toBe(200);
+    expect((await john.patch(job, { title: 'Too late' })).status).toBe(403);
+
+    // The administrator can without having applied, and a job that is gone says so.
+    expect(server.ctx.handle.sqlite.prepare('SELECT COUNT(*) AS n FROM applications a JOIN users u ON u.id = a.user_id WHERE u.role = ?').get('admin')).toEqual({ n: 0 });
+    expect((await admin.patch(job, { title: 'Backend Engineer' })).status).toBe(200);
+    expect((await tyler.patch('/api/jobs/999999', { title: 'Nothing' })).status).toBe(404);
   });
 });
 

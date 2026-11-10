@@ -127,6 +127,19 @@ export function deleteStep(ctx: AppContext, userId: number, stepId: number): voi
 }
 
 /**
+ * A job's title, company, location and description are shared, and anyone with a stake in the job
+ * can put them right: someone one of whose profiles applied to it, whoever else applied too, and
+ * the administrator. Someone who has not applied can read them but not change them.
+ */
+export function assertCanEditJob(ctx: AppContext, user: { id: number; role: string }, jobId: number): void {
+  const job = ctx.db.select({ id: jobs.id }).from(jobs).where(eq(jobs.id, jobId)).get();
+  if (!job) throw notFound('That job no longer exists.');
+  if (user.role === 'admin') return;
+  const applied = ctx.db.select({ id: applications.id }).from(applications).where(and(eq(applications.jobId, jobId), eq(applications.userId, user.id))).limit(1).get();
+  if (!applied) throw forbidden('You can only change a job one of your profiles applied to.');
+}
+
+/**
  * A job can be deleted by the administrator, or by someone whose own profiles are the only ones
  * that applied to it, since then nobody else loses anything. The checks and the delete run
  * together, so nobody can apply in between.
