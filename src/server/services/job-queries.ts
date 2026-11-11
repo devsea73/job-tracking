@@ -3,6 +3,7 @@ import { asc, eq, sql } from 'drizzle-orm';
 import type {
   ApplicationDetail,
   ApplicationSummary,
+  CompanyJobsResponse,
   DashboardResponse,
   InterviewListItem,
   InterviewQuery,
@@ -23,6 +24,7 @@ import { PIPELINE_STAGES, statsFromCounts, type ReachedCounts } from '../../shar
 import type { AppContext } from '../context';
 import { prepared, type Db } from '../db/client';
 import { applicationSteps, jobs, jobUrls, users } from '../db/schema';
+import { normalizeCompany } from '../dedupe/text-normalize';
 import { notFound } from '../errors';
 import { FACTS_COLUMNS, readJobFacts, toJobFacts, type FactsRow } from './job-facts-store';
 import { toProfileRef } from './profiles';
@@ -341,6 +343,38 @@ export function listCompanies(db: Db): string[] {
     .limit(2_000)
     .all()
     .map((row) => row.company);
+}
+
+const COMPANY_JOBS_SHOWN = 30;
+
+/**
+ * The jobs the list has at a company, under its name once "Inc.", "LLC" and the like are set aside,
+ * with everyone's applications to each. Those the asker applied to come first, so they are never
+ * left out at a company with many jobs, then the most recently applied to.
+ */
+export function listCompanyJobs(db: Db, viewerId: number, company: string): CompanyJobsResponse {
+  const key = normalizeCompany(company);
+  if (!key) return { company, jobs: [], jobCount: 0 };
+  const sqlite = db.$client;
+  const { total } = prepared(sqlite, 'SELECT COUNT(*) AS total FROM jobs WHERE company_key = ?').get(key) as { total: number };
+  const rows = prepared(
+    sqlite,
+    `SELECT j.id, j.title, j.company_name, j.location,
+       EXISTS (SELECT 1 FROM applications m WHERE m.job_id = j.id AND m.user_id = @viewer) AS mine,
+       (SELECT MAX(a.applied_at) FROM applications a WHERE a.job_id = j.id) AS latest
+     FROM jobs j WHERE j.company_key = @key
+     ORDER BY mine DESC, latest DESC, j.id DESC LIMIT ${COMPANY_JOBS_SHOWN}`
+  ).all({ viewer: viewerId, key }) as Array<{ id: number; title: string; company_name: string; location: string | null }>;
+  const byJob = listApplicationsForJobs(
+    db,
+    viewerId,
+    rows.map((row) => row.id)
+  );
+  return {
+    company: rows[0]?.company_name ?? company,
+    jobCount: total,
+    jobs: rows.map((row) => ({ id: row.id, title: row.title, company: row.company_name, location: row.location, applications: byJob.get(row.id) ?? [] }))
+  };
 }
 
 export function getJobDetail(ctx: AppContext, viewerId: number, jobId: number): JobDetail {

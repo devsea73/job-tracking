@@ -7,6 +7,7 @@ import type {
   ApplicationDetail,
   AvatarSubject,
   BackupInfo,
+  CompanyJobsResponse,
   CreateApplicationRequest,
   CreateApplicationResponse,
   CurrentUser,
@@ -120,6 +121,16 @@ export function useJobPage(query: JobListQuery, page: number, size: PageSize): U
 
 export function useCompanies(): UseQueryResult<string[]> {
   return useQuery({ queryKey: ['companies'], queryFn: () => call<string[]>('GET', '/api/jobs/companies'), staleTime: 30_000 });
+}
+
+/** The list's jobs at a company, and who applied to each. Nothing is asked without a name. */
+export function useCompanyJobs(company: string | null): UseQueryResult<CompanyJobsResponse> {
+  const name = company?.trim() ?? '';
+  return useQuery({
+    queryKey: ['company-jobs', name.toLowerCase()],
+    queryFn: () => call<CompanyJobsResponse>('GET', `/api/jobs/company?name=${encodeURIComponent(name)}`),
+    enabled: name.length > 0
+  });
 }
 
 export function useJob(id: number | null): UseQueryResult<JobDetail> {

@@ -43,7 +43,7 @@ import { EmptyState, Notice, Skeleton, Tooltip } from '@/components/ui/misc';
 import { ANY, Select } from '@/components/ui/select';
 import { useToast } from '@/components/ui/toast';
 import { errorMessage, PAGE_SIZES, useCompanies, useDeleteJob, useJobPage, useTeam, type PageSize } from '@/lib/api';
-import { cn, dayBoundary, formatDate, formatDateTime, formatShortAgo, formatShortDate } from '@/lib/utils';
+import { cn, dayBoundary, formatDate, formatDateTime, formatShortAgo, formatShortDate, useDebounced } from '@/lib/utils';
 import { AddStepButton } from './step-form';
 
 export type JobsView = 'mine' | 'all' | 'highlighted';
@@ -85,15 +85,6 @@ const DEFAULT_FILTERS: Filters = { q: '', company: '', stage: ANY, from: '', to:
 
 /** "Recently added" is when a job reached the shared list; for my own, the applied date says it better. */
 const sortsFor = (view: JobsView) => SORT_OPTIONS.filter(({ value }) => view !== 'mine' || value !== 'recent');
-
-function useDebounced<T>(value: T, delayMs: number): T {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const timer = setTimeout(() => setDebounced(value), delayMs);
-    return () => clearTimeout(timer);
-  }, [value, delayMs]);
-  return debounced;
-}
 
 function ToolButton({ active, onClick, icon: Icon, label, badge }: { active?: boolean; onClick: () => void; icon: LucideIcon; label: string; badge?: number }) {
   return (

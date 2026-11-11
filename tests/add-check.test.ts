@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { CheckLinkResponse, CreateApplicationResponse, JobDetail } from '../src/shared/api';
+import type { CheckLinkResponse, CompanyJobsResponse, CreateApplicationResponse, JobDetail } from '../src/shared/api';
 import { UNREADABLE_NOTES } from '../src/shared/unreadable';
 import { createTestServer, createUsers, jobPage, LONG_DESCRIPTION, type ApiClient } from './helpers';
 
@@ -177,6 +177,54 @@ describe('checking a pasted link before saving it', () => {
     expect((await users.andy.post('/api/applications/check', { url: 'not a link' })).status).toBe(400);
     expect((await users.andy.post('/api/applications/check', { url: 'http://127.0.0.1/admin' })).status).toBe(400);
     expect((await server.app.inject({ method: 'POST', url: '/api/applications/check', payload: { url: 'https://careers.example.com/x' } })).statusCode).toBe(401);
+  });
+
+  /** Text no other posting shares, so that only the company connects two jobs. */
+  const postingAbout = (topic: string) => `About the ${topic} team\n\n${`We build ${topic} systems and look after them every day of the year. `.repeat(12)}`;
+  const companyJobs = async (client: ApiClient, name: string) => (await client.get(`/api/jobs/company?name=${encodeURIComponent(name)}`)).json as CompanyJobsResponse;
+
+  it('finds a fresh job\'s company under any spelling, with each application\'s step and memo, mine first', async () => {
+    const { server, users, check } = await setUp();
+    server.http.serve('https://careers.example.com/jobs/30', jobPage({ title: 'Backend Engineer', company: 'Acme, Inc.', description: postingAbout('payments') }));
+    server.http.serve('https://careers.example.com/jobs/31', jobPage({ title: 'Data Analyst', company: 'Acme', description: postingAbout('reporting') }));
+    server.http.serve('https://careers.example.com/jobs/32', jobPage({ title: 'Platform Engineer', company: 'Acme LLC', description: postingAbout('kubernetes') }));
+    const johns = (await users.john.addJob('https://careers.example.com/jobs/30', { memo: 'Resume B' })) as Created;
+    await users.john.addStep(johns.applicationId, 'Recruiter Screen', '2026-10-06T14:00:00.000Z');
+    await users.andy.addJob('https://careers.example.com/jobs/31', { memo: 'Resume A' });
+
+    expect(await check(users.andy, 'https://careers.example.com/jobs/32')).toMatchObject({ status: 'fresh', job: { company: 'Acme LLC' } });
+    const found = await companyJobs(users.andy, 'Acme LLC');
+    expect(found.jobCount).toBe(2);
+    expect(found.jobs.map((job) => job.title)).toEqual(['Data Analyst', 'Backend Engineer']);
+    expect(found.jobs[0].applications[0]).toMatchObject({ isMine: true, memoPreview: 'Resume A', stage: 'Applied' });
+    expect(found.jobs[1].applications[0]).toMatchObject({ isMine: false, owner: { username: 'john' }, memoPreview: 'Resume B', stage: 'Recruiter Screen' });
+  });
+
+  it('applies to a new role at a company the profile already applied to', async () => {
+    const { server, users, check } = await setUp();
+    server.http.serve('https://careers.example.com/jobs/33', jobPage({ title: 'Backend Engineer', company: 'Acme', description: postingAbout('payments') }));
+    server.http.serve('https://careers.example.com/jobs/34', jobPage({ title: 'Data Analyst', company: 'Acme', description: postingAbout('reporting') }));
+    await users.andy.addJob('https://careers.example.com/jobs/33', { memo: 'Resume A' });
+    expect((await companyJobs(users.andy, 'Acme')).jobs).toHaveLength(1);
+
+    const checked = await check(users.andy, 'https://careers.example.com/jobs/34');
+    expect(checked.status).toBe('fresh');
+    const saved = await users.andy.addJob('https://careers.example.com/jobs/34', { draftId: checked.draftId, memo: 'Resume B' });
+    expect(saved).toMatchObject({ outcome: 'created', jobWasNew: true });
+
+    const profile = await users.andy.defaultProfileId();
+    const found = await companyJobs(users.andy, 'Acme');
+    expect(found.jobs.flatMap((job) => job.applications.map((application) => [job.title, application.profile.id, application.memoPreview])).sort()).toEqual([
+      ['Backend Engineer', profile, 'Resume A'],
+      ['Data Analyst', profile, 'Resume B']
+    ]);
+  });
+
+  it('finds nothing at a company the list has no job at, and needs a signed-in person', async () => {
+    const { server, users } = await setUp();
+    expect(await companyJobs(users.andy, 'Nobody Corp')).toEqual({ company: 'Nobody Corp', jobs: [], jobCount: 0 });
+    expect((await users.andy.get('/api/jobs/company')).status).toBe(400);
+    expect((await server.app.inject({ method: 'GET', url: '/api/jobs/company?name=Acme' })).statusCode).toBe(401);
   });
 
   it('saves nothing at all when only checking', async () => {

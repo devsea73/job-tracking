@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent } from 'react';
-import { AlertTriangle, Briefcase, Building2, CalendarClock, Check, CheckCircle2, CircleSlash, Copy, ExternalLink, FileText, FileWarning, Link2, Loader2, StickyNote, User } from 'lucide-react';
+import { AlertTriangle, BellRing, Briefcase, Building2, CalendarClock, Check, CheckCircle2, CircleSlash, Copy, ExternalLink, FileText, FileWarning, Link2, Loader2, StickyNote, User } from 'lucide-react';
 import type { ApplicationSummary, CheckLinkResponse, CreateApplicationRequest, CreateApplicationResponse, DuplicateCandidate } from '@shared/api';
 import { unreadableNote } from '@shared/unreadable';
 import { applicationLabel, Avatar, StageBadge } from '@/components/job-bits';
@@ -10,8 +10,8 @@ import { Select } from '@/components/ui/select';
 import { Tooltip } from '@/components/ui/misc';
 import { useToast } from '@/components/ui/toast';
 import { focusAddBar, registerAddBarInput } from '@/lib/add-bar-focus';
-import { call, errorMessage, useCreateApplication, useProfiles } from '@/lib/api';
-import { cn, formatDateTime, formatRelative } from '@/lib/utils';
+import { call, errorMessage, useCompanyJobs, useCreateApplication, useProfiles } from '@/lib/api';
+import { cn, formatDateTime, formatRelative, formatShortDate, useDebounced } from '@/lib/utils';
 
 /** Enough of a link to be worth reading: "https://…" or "company.com/…". */
 const looksLikeLink = (text: string) => /^https?:\/\/\S+\.\S+/i.test(text) || /^[a-z0-9-]+(\.[a-z0-9-]+)+\/\S*/i.test(text);
@@ -38,28 +38,30 @@ function Line({ tone, icon: Icon, children }: { tone: 'good' | 'warn' | 'bad'; i
   );
 }
 
-const SHOWN_APPLICATIONS = 5;
+/** An application a pasted link turned up, with the job it is for. */
+interface FoundApplication {
+  job: { id: number; title: string; company: string };
+  application: ApplicationSummary;
+}
 
-const linkHost = (url: string) => {
-  try {
-    return new URL(url).hostname.replace(/^www\./, '');
-  } catch {
-    return url;
-  }
-};
+const foundFor = (job: FoundApplication['job'], applications: ApplicationSummary[]): FoundApplication[] => applications.map((application) => ({ job, application }));
 
 /**
- * What the list already knows about a job someone has pasted the link of: everyone who applied,
- * earliest first, with when, under which profile, with which link, and where each is now.
+ * What the list already knows about a pasted link, one application a row: whose it is, the job,
+ * where it is now and its memo, which says which resume went in. The profile being used comes
+ * first, then the person's other profiles, then everyone else's.
  */
-function AppliedList({ applications }: { applications: ApplicationSummary[] }) {
-  if (applications.length === 0) return <p className="ml-6 text-ink-3">Nobody has applied to it yet.</p>;
+function AppliedList({ found, profileId, label, onOpenJob }: { found: FoundApplication[]; profileId: number | undefined; label: string; onOpenJob: (id: number) => void }) {
+  if (found.length === 0) return <p className="ml-6 text-ink-3">Nobody has applied to it yet.</p>;
+  const rank = ({ application }: FoundApplication) => (application.profile.id === profileId ? 0 : application.isMine ? 1 : 2);
+  // Within each of the three, in the order found.
+  const ordered = [...found].sort((a, b) => rank(a) - rank(b));
   return (
-    <ul className="ml-6 divide-y divide-border overflow-hidden rounded-md border border-border bg-surface-2/40" aria-label="Who applied to this job" data-add-applied>
-      {applications.slice(0, SHOWN_APPLICATIONS).map((application) => (
-        <li key={application.id} className="flex items-center gap-2.5 px-2.5 py-1" data-applied-by={application.owner.username}>
+    <ul className="ml-6 max-h-44 divide-y divide-border overflow-y-auto rounded-md border border-border bg-surface-2/40" aria-label={label} data-add-applied>
+      {ordered.map(({ job, application }) => (
+        <li key={application.id} className={cn('flex items-center gap-2.5 px-2.5 py-1', application.profile.id === profileId && 'bg-accent-soft/60')} data-applied-by={application.owner.username} data-applied-profile={application.profile.name}>
           <Avatar subject={application.profile} label={applicationLabel(application)} ring={false} />
-          <span className="w-[210px] min-w-0 truncate font-medium" title={applicationLabel(application)}>
+          <span className="w-[150px] min-w-0 shrink-0 truncate font-medium" title={applicationLabel(application)}>
             {application.isMine ? (
               <>
                 {application.profile.name} <span className="font-normal text-accent-soft-ink">(you)</span>
@@ -68,32 +70,26 @@ function AppliedList({ applications }: { applications: ApplicationSummary[] }) {
               applicationLabel(application)
             )}
           </span>
-          <span className="shrink-0 tabular-nums text-ink-2" title={`Applied ${formatDateTime(application.appliedAt)}`}>
-            Applied {formatDateTime(application.appliedAt)} <span className="text-ink-3">· {formatRelative(application.appliedAt)}</span>
-          </span>
-          <span className="min-w-0 flex-1 truncate text-ink-3" title={application.link ? `Applied with ${application.link.url}` : 'Joined the job without a link of their own'}>
-            {application.link ? (
-              <>
-                <Link2 className="mr-1 inline size-3" aria-hidden />
-                {linkHost(application.link.url)}
-              </>
-            ) : (
-              'from the shared list'
-            )}
-          </span>
-          {application.nextInterviewAt ? (
-            <span className="inline-flex shrink-0 items-center gap-1 tabular-nums text-ink-2" title="Next interview">
-              <CalendarClock className="size-3.5 text-ink-3" aria-hidden />
-              {formatDateTime(application.nextInterviewAt)}
-            </span>
-          ) : null}
+          <button type="button" onClick={() => onOpenJob(job.id)} className="min-w-0 flex-[3] truncate text-left hover:underline" title={`${job.title} · ${job.company}`}>
+            {job.title} <span className="text-ink-3">· {job.company}</span>
+          </button>
           <span className="inline-flex w-[150px] shrink-0 items-center gap-1.5">
             <StageBadge stage={application.stage} className="size-5" />
             <span className="truncate text-ink-2">{application.stage}</span>
           </span>
+          <span className="inline-flex min-w-0 flex-[2] items-center gap-1 text-ink-2" title={application.memoPreview} data-applied-memo>
+            <StickyNote className="size-3 shrink-0 text-ink-3" aria-label="Memo" />
+            <span className="truncate">{application.memoPreview}</span>
+          </span>
+          <span className="w-[76px] shrink-0 truncate text-right tabular-nums text-ink-3" title={`Applied ${formatDateTime(application.appliedAt)} · ${formatRelative(application.appliedAt)}`}>
+            {formatShortDate(application.appliedAt)}
+          </span>
+          <span className="inline-flex w-9 shrink-0 items-center justify-end gap-1 text-ink-3">
+            {application.nextInterviewAt ? <Symbol icon={CalendarClock} label={`Next interview: ${formatDateTime(application.nextInterviewAt)}`} size="size-3.5" /> : null}
+            {application.link ? <Symbol icon={Link2} label={application.link.url} size="size-3.5" /> : null}
+          </span>
         </li>
       ))}
-      {applications.length > SHOWN_APPLICATIONS ? <li className="px-2.5 py-1 text-ink-3">+{applications.length - SHOWN_APPLICATIONS} more: open the job to see everyone</li> : null}
     </ul>
   );
 }
@@ -108,9 +104,10 @@ function OpenJobButton({ jobId, onOpenJob }: { jobId: number; onOpenJob: (id: nu
 }
 
 /**
- * Adding a job in one row on every page: paste a link and it is checked straight away, saying
- * whether it is new or a duplicate; ✓ then saves it without asking anything more. A job already in
- * the list shows who applied to it, when and how, for as long as its link is in the box.
+ * Adding a job in one row on every page: paste a link and it is checked straight away, first for
+ * a duplicate, then against the company's other jobs, and only then called fresh; ✓ then saves it
+ * without asking anything more, whatever else the profile applied to there. What the list knows
+ * stays on show for as long as the link is in the box.
  */
 export function AddBar({ onOpenJob }: { onOpenJob: (id: number) => void }) {
   const [url, setUrl] = useState('');
@@ -217,6 +214,15 @@ export function AddBar({ onOpenJob }: { onOpenJob: (id: number) => void }) {
   const needsDetails = result?.status === 'unreadable' && (!manual.title.trim() || !manual.company.trim());
   const canSave = !!url.trim() && !!chosen && !saving && !alreadyMine && !needsDetails;
 
+  // A job not in the list is compared with the company's others. A name typed in is looked up once the typing stops.
+  const typedCompany = useDebounced(manual.company, 400);
+  const companyName = result?.status === 'fresh' || result?.status === 'possible' ? result.job.company : result?.status === 'unreadable' ? typedCompany : null;
+  const company = useCompanyJobs(companyName);
+  const atCompany = (company.data?.jobs ?? []).flatMap((job) => foundFor(job, job.applications));
+  const appliedThere = atCompany.filter(({ application }) => application.profile.id === chosen?.id);
+  const appliedRoles = [...new Set(appliedThere.map(({ job }) => job.title))];
+  const checking = (check?.state === 'checking' && check.url === url.trim()) || (result?.status === 'fresh' && company.isLoading);
+
   const save = async () => {
     if (!canSave || !chosen) return;
     const link = url.trim();
@@ -274,7 +280,7 @@ export function AddBar({ onOpenJob }: { onOpenJob: (id: number) => void }) {
   };
 
   let alert: React.ReactNode = null;
-  if (check?.state === 'checking' && check.url === url.trim()) {
+  if (checking) {
     alert = (
       <p className="text-ink-3" role="status" data-add-check="checking">
         Checking this link…
@@ -289,10 +295,17 @@ export function AddBar({ onOpenJob }: { onOpenJob: (id: number) => void }) {
   } else if (askedNow) {
     // Found when saving, so newer than what the check said: only the reading problem, if any, still applies.
     alert = null;
-  } else if (result?.status === 'fresh') {
+  } else if (result?.status === 'fresh' && company.isLoadingError) {
     alert = (
-      <Line tone="good" icon={CheckCircle2}>
-        <span className="shrink-0 font-medium text-success-ink">Fresh job</span>
+      <Line tone="bad" icon={AlertTriangle}>
+        <span className="truncate">Could not check this company: {errorMessage(company.error)}</span>
+      </Line>
+    );
+  } else if (result?.status === 'fresh') {
+    const clear = appliedRoles.length === 0;
+    alert = (
+      <Line tone={clear ? 'good' : 'warn'} icon={clear ? CheckCircle2 : Building2}>
+        <span className={cn('shrink-0 font-medium', clear ? 'text-success-ink' : 'text-warning-ink')}>{clear ? 'Fresh job' : 'Same company'}</span>
         <span className="truncate text-ink-2">
           {result.job.title} · {result.job.company}
         </span>
@@ -323,7 +336,7 @@ export function AddBar({ onOpenJob }: { onOpenJob: (id: number) => void }) {
             <OpenJobButton jobId={job.id} onOpenJob={onOpenJob} />
           </Line>
         )}
-        <AppliedList applications={applied} />
+        <AppliedList found={foundFor(job, applied)} profileId={chosen?.id} label="Who applied to this job" onOpenJob={onOpenJob} />
       </div>
     );
   }
@@ -354,7 +367,34 @@ export function AddBar({ onOpenJob }: { onOpenJob: (id: number) => void }) {
           </button>
           <OpenJobButton jobId={best.jobId} onOpenJob={onOpenJob} />
         </Line>
-        <AppliedList applications={best.applications} />
+        <AppliedList found={foundFor({ id: best.jobId, title: best.title, company: best.company }, best.applications)} profileId={chosen?.id} label="Who applied to this job" onOpenJob={onOpenJob} />
+      </div>
+    ) : null;
+  // The likely duplicate has its own list just above.
+  const elsewhere = atCompany.filter(({ job }) => job.id !== best?.jobId);
+  const companyPanel =
+    company.data && (appliedRoles.length > 0 || elsewhere.length > 0) ? (
+      <div className="space-y-1" data-add-company={company.data.company}>
+        {appliedRoles.length > 0 ? (
+          <div className="flex min-w-0 items-center gap-2" role="alert" data-add-company-alarm>
+            <BellRing className="size-4 shrink-0 text-warning-ink" aria-hidden />
+            <span className="truncate font-medium text-warning-ink" title={appliedRoles.join(', ')}>
+              {chosen?.name} already applied to {appliedRoles[0]}
+              {appliedRoles.length > 1 ? ` +${appliedRoles.length - 1} more` : ''} at {appliedThere[0].job.company}
+            </span>
+          </div>
+        ) : null}
+        {elsewhere.length > 0 ? (
+          <>
+            <div className="flex min-w-0 items-center gap-2 text-ink-2">
+              <Symbol icon={Building2} label="Jobs at this company" className="text-ink-3" />
+              <span className="truncate">
+                {company.data.company} · {company.data.jobCount === 1 ? '1 job' : `${company.data.jobCount} jobs`}
+              </span>
+            </div>
+            <AppliedList found={elsewhere} profileId={chosen?.id} label="Applications at this company" onOpenJob={onOpenJob} />
+          </>
+        ) : null}
       </div>
     ) : null;
   if (result?.status === 'unreadable') {
@@ -416,7 +456,7 @@ export function AddBar({ onOpenJob }: { onOpenJob: (id: number) => void }) {
             spellCheck={false}
             autoComplete="off"
           />
-          {check?.state === 'checking' && check.url === url.trim() ? <Loader2 className="spin absolute right-2.5 top-1/2 size-4 -translate-y-1/2 text-ink-3" aria-label="Checking" /> : null}
+          {checking ? <Loader2 className="spin absolute right-2.5 top-1/2 size-4 -translate-y-1/2 text-ink-3" aria-label="Checking" /> : null}
         </div>
         <Select
           ariaLabel="Profile"
@@ -449,10 +489,11 @@ export function AddBar({ onOpenJob }: { onOpenJob: (id: number) => void }) {
           </button>
         </Tooltip>
       </div>
-      {duplicateLine || alert ? (
+      {duplicateLine || alert || companyPanel ? (
         <div className="mt-1.5 space-y-1 text-[12.5px]">
           {duplicateLine}
           {alert}
+          {companyPanel}
         </div>
       ) : null}
     </section>

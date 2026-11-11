@@ -75,6 +75,8 @@ export const createApplicationBody = z.object({
   draftId: z.string().uuid().optional()
 });
 
+export const companyJobsQuery = z.object({ name: z.string().trim().min(1, 'Company is required.').max(300, 'That company name is too long.') });
+
 export const checkLinkBody = z.object({ url: z.string().trim().min(1, 'Job URL is required.').max(4_000, 'That link is too long.') });
 
 export const applyToJobBody = z.object({

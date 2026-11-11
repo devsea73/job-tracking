@@ -332,6 +332,25 @@ export interface KnownJobSummary {
   applications: ApplicationSummary[];
 }
 
+/** A job in the list at a company, with everyone's applications to it, earliest first. */
+export interface CompanyJob {
+  id: number;
+  title: string;
+  company: string;
+  location: string | null;
+  applications: ApplicationSummary[];
+}
+
+/** The list's jobs at one company, which a pasted link for a new job is checked against. */
+export interface CompanyJobsResponse {
+  /** The company as the list spells it, or as asked when the list has no job there. */
+  company: string;
+  /** The jobs the asker applied to first, then the most recently applied to: at most 30. */
+  jobs: CompanyJob[];
+  /** Every job the list has at the company. */
+  jobCount: number;
+}
+
 export type CheckLinkResponse =
   /** Not in the list yet. */
   | { status: 'fresh'; draftId: string; job: CheckedJobSummary }

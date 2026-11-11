@@ -17,7 +17,7 @@ import { getActivity } from './services/activity';
 import { getJobBrief } from './services/job-brief';
 import { applyToExistingJob, checkLink, createApplication } from './services/intake';
 import { refreshJobFacts } from './services/job-facts-store';
-import { getDashboard, getJobDetail, getTeam, listCompanies, listInterviews, listJobs, listTeamApplications } from './services/job-queries';
+import { getDashboard, getJobDetail, getTeam, listCompanies, listCompanyJobs, listInterviews, listJobs, listTeamApplications } from './services/job-queries';
 import * as profilesService from './services/profiles';
 import * as usersService from './services/users';
 import { instantsOf } from './services/zone';
@@ -238,6 +238,13 @@ export function buildApp(ctx: AppContext, options: BuildOptions = {}): FastifyIn
   });
 
   app.get('/api/jobs/companies', async (_request, reply) => cachedJson(reply, 'companies', () => listCompanies(ctx.db)));
+
+  // A pasted link's company: the jobs already there, and who applied to each.
+  app.get('/api/jobs/company', async (request, reply) => {
+    const userId = requireSession(request).user.id;
+    const { name } = v.parse(v.companyJobsQuery, request.query);
+    return cachedJson(reply, `company-jobs:${userId}:${request.url}`, () => listCompanyJobs(ctx.db, userId, name));
+  });
 
   app.get('/api/jobs/:id', async (request) => getJobDetail(ctx, requireSession(request).user.id, v.parse(v.idParam, request.params).id));
 
